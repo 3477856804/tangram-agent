@@ -63,7 +63,13 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        // 沙箱终端「Debian 用户态（proot）」依赖：Android 10+ 对 targetSdk≥29
+        // 的应用禁止 exec 私有目录里的文件（SELinux app_data_file noexec）。
+        // 本 App 走自有 OTA 分发、不上 Google Play，故按 Termux 同款方案
+        // 固定 targetSdk=28，使运行时下载/解包的 proot + rootfs 可执行。
+        // 若改回 flutter.targetSdkVersion，安卓本地 apt 链路将不可用
+        // （沙箱终端会如实报错并引导用「远端沙箱（SSH）」）。
+        targetSdk = 28
         versionCode = vCode
         versionName = vName
         // 端侧 llama.cpp 运行时只内置 arm64-v8a 官方预编译库（真机通用 ABI）。

@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../../../../design/dsh_tokens.dart';
 import '../../../../design/dsh_widgets.dart';
 import '../../../../services/persona_store.dart';
+import '../../../../ui/i18n/tga_strings.dart';
 import '../../../../ui/pages/tga_profile_page.dart';
 import '../../../../ui/pages/tga_settings_page.dart';
 import '../sidebar_config.dart';
@@ -77,7 +78,7 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
       );
       return;
     }
-    final String label = item.label;
+    final String label = context.t(item.labelKey);
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (BuildContext ctx) {
@@ -116,7 +117,7 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
                   DshTopBar(
-                    title: '更多…',
+                    title: ctx.t('sidebar.more', zh: '更多…'),
                     onBack: () => Navigator.of(ctx).maybePop(),
                   ),
                   Expanded(
@@ -128,7 +129,7 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                           .map(
                             (NavItem item) => _NavRow(
                               icon: item.icon,
-                              label: item.label,
+                              label: ctx.t(item.labelKey),
                               onTap: () => _openNavItem(ctx, item),
                             ),
                           )
@@ -146,6 +147,9 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
 
   @override
   Widget build(BuildContext context) {
+    // PersonaStore.language 驱动 MaterialApp.locale：watch 保证切语言时
+    // 整个抽屉即时重建（context.t 亦会注册 Localizations 依赖）。
+    context.watch<PersonaStore>();
     final DshPalette c = DshPalette.of(context);
     final List<ConversationItem> starred = _filtered(widget.starred);
     final List<ConversationItem> recents = _filtered(widget.recents);
@@ -184,7 +188,7 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                     icon: Icons.vertical_split_rounded,
                     iconSize: 18,
                     tint: c.labelSecondary,
-                    tooltip: '收起',
+                    tooltip: context.t('sidebar.collapse', zh: '收起'),
                     onTap: () => Scaffold.maybeOf(context)?.closeDrawer(),
                   ),
                 ],
@@ -196,7 +200,7 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
               padding: const EdgeInsets.symmetric(horizontal: DshSpace.x12),
               child: _DrawerButton(
                 icon: Icons.add_circle_outline_rounded,
-                label: '新会话',
+                label: context.t('sidebar.newChat', zh: '新会话'),
                 onTap: () {
                   widget.config.onNewChat?.call();
                   Scaffold.maybeOf(context)?.closeDrawer();
@@ -215,14 +219,14 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                         .map(
                           (NavItem item) => _NavRow(
                             icon: item.icon,
-                            label: item.label,
+                            label: context.t(item.labelKey),
                             onTap: () => _openNavItem(context, item),
                           ),
                         ),
                     if (widget.config.navItems.length > 4)
                       _NavRow(
                         icon: Icons.apps_rounded,
-                        label: '更多…',
+                        label: context.t('sidebar.more', zh: '更多…'),
                         onTap: () => _openAllNav(context),
                       ),
                   ],
@@ -240,7 +244,7 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
               child: Row(
                 children: <Widget>[
                   Text(
-                    '会话',
+                    context.t('sidebar.conversations', zh: '会话'),
                     style: DshType.xs13m.copyWith(color: c.labelTertiary),
                   ),
                   const Spacer(),
@@ -251,7 +255,7 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                       iconSize: 17,
                       tint: c.labelTertiary,
                       onTap: () => setState(() => _searching = !_searching),
-                      tooltip: '搜索会话',
+                      tooltip: context.t('sidebar.search', zh: '搜索会话'),
                     ),
                 ],
               ),
@@ -289,7 +293,8 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                           decoration: InputDecoration(
                             isDense: true,
                             border: InputBorder.none,
-                            hintText: '搜索会话',
+                            hintText:
+                                context.t('sidebar.search', zh: '搜索会话'),
                             hintStyle: DshType.s14.copyWith(
                               color: c.labelCaption,
                             ),
@@ -318,7 +323,7 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                         DshSpace.x2,
                       ),
                       child: Text(
-                        '已收藏',
+                        context.t('sidebar.starred', zh: '已收藏'),
                         style: DshType.xxxs11m.copyWith(
                           color: c.labelTertiary,
                         ),
@@ -331,7 +336,12 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                     Padding(
                       padding: const EdgeInsets.all(DshSpace.x16),
                       child: Text(
-                        _searchQuery.isEmpty ? '还没有会话' : '没有匹配“$_searchQuery”的会话',
+                        _searchQuery.isEmpty
+                            ? context.t('sidebar.empty', zh: '还没有会话')
+                            : context
+                                .t('sidebar.noMatch',
+                                    zh: '没有匹配“{q}”的会话')
+                                .replaceAll('{q}', _searchQuery),
                         textAlign: TextAlign.center,
                         style: DshType.xs13.copyWith(color: c.labelTertiary),
                       ),
@@ -368,7 +378,7 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                           ),
                           const SizedBox(width: DshSpace.x6),
                           Text(
-                            '设置',
+                            context.t('sidebar.settings', zh: '设置'),
                             style: DshType.s14.copyWith(
                               color: c.labelPrimary,
                             ),
@@ -429,7 +439,9 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
             Icon(Icons.person_outline, size: 16, color: c.labelSecondary),
             const SizedBox(width: DshSpace.x6),
             Text(
-              name.isEmpty ? '个人' : name,
+              name.isEmpty
+                  ? context.t('sidebar.profile', zh: '个人')
+                  : name,
               style: DshType.xs13.copyWith(color: c.labelPrimary),
             ),
           ],

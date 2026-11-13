@@ -14,6 +14,8 @@
 - TGA 手机 APP 扫码接入（`im/agp_bridge.py`）：
     GET  /api/login/wechat/qr    腾讯 iLink 真二维码 PNG（APP 直接显示，不伪造）
     GET  /api/login/qq/qr        NapCat 真二维码 PNG
+    GET  /get_bot_qrcode?platform=qq  QQ 官方机器人：返回 QQ 开放平台机器人
+                                创建页真实 URL 的真码（扫码=打开官方创建/授权页）
     GET  /api/login/feishu/qr    飞书官方设备授权流：扫码一键建应用（需 lark-oapi）
     POST /api/login/feishu/cancel 取消飞书登录并清除本地凭据
     GET  /api/discover          局域网发现 HTTP 兜底
@@ -824,6 +826,10 @@ class Handler(BaseHTTPRequestHandler):
             adp = {
                 n: {"enabled": a.enabled, "name": a.name} for n, a in self.gateway.adapters.items()
             }
+            # QQ 官方 wss 适配器：真实 token/网关状态快照（不伪造在线）
+            qq_off = self.gateway.adapters.get("qq_official")
+            if qq_off is not None and hasattr(qq_off, "status"):
+                adp["qq_official"].update(qq_off.status())
             stats = self.gateway.stats()
             return self._json({
                 "product": "Tangram IM Gateway",
@@ -860,6 +866,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._feishu_login_qr()
         if path == "/api/login/feishu/status":
             return self._feishu_login_status()
+        if path == "/get_bot_qrcode":
+            return self._get_bot_qrcode()
         if path == "/api/discover":
             # 局域网发现的 HTTP 兜底（UDP 被防火墙拦时 APP 可直连探测）
             return self._json({"ok": True, "product": "Tangram IM Gateway",
@@ -885,6 +893,34 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/login/feishu/cancel":
             return self._feishu_cancel()
         return self._json({"error": "not-found"}, 404)
+
+    # ---- 官方协议兼容取码端点（对齐 iLink get_bot_qrcode 契约）----
+    def _get_bot_qrcode(self) -> None:
+        """GET /get_bot_qrcode?platform=qq
+
+        QQ 官方机器人没有「扫码登录」这一步——官方流程是创建机器人后拿
+        AppID/AppSecret。本端点返回 QQ 开放平台机器人创建页的**真实 URL**
+        渲染的码：扫码 = 打开官方创建/授权页，这是官方流程第一站的真码，
+        不是伪造的登录码。segno 缺失时降级返回文本内容（同样不造图）。
+        """
+        from urllib.parse import parse_qs, urlparse
+
+        qs = parse_qs(urlparse(self.path).query)
+        platform = (qs.get("platform") or ["qq"])[0]
+        if platform != "qq":
+            return self._json(
+                {"ok": False, "hint": f"get_bot_qrcode 目前仅支持 platform=qq（收到 {platform}）"},
+                400)
+        url = os.environ.get("TANGRAM_QQ_CONSOLE_URL", "https://q.qq.com/")
+        png = _qr_png_bytes(url)
+        if png is not None:
+            return self._send(200, png, "image/png")
+        return self._json({
+            "ok": True, "render": "text-only", "platform": "qq",
+            "qrcode": url, "qrcode_img_content": url,
+            "hint": "码内容为 QQ 开放平台机器人创建页真实 URL（扫码打开官方创建/授权页）；"
+                    "装 segno 后本端点直接返回 PNG 二维码",
+        })
 
     # ---- QQ NapCat：真实登录二维码 ----
     def _onebot_get(self, action: str, params: Optional[dict] = None) -> tuple[Optional[dict], str]:
@@ -1301,6 +1337,30 @@ def build_gateway(onebot_base: str, napcat_token: str) -> Gateway:
     gw.register(qq)
     if qq.ready:
         qq.enabled = True
+
+    # QQ 官方机器人 websocket 长连接模式（im/adapters/qq_official.py，
+    # 无需公网回调；register_default_adapters 已注册，凭据同
+    # TANGRAM_QQ_APPID/SECRET）。事件 -> Agent -> v2 被动回复真实回发。
+    qq_ws = gw.adapters.get("qq_official")
+    if qq_ws is not None and getattr(qq_ws, "ready", False):
+        def _route_qq_ws(event: dict) -> None:
+            try:
+                msg = gw.handle_inbound(event, "qq_official")
+                text = extract_text(msg)
+                answer = _agent_reply(text, f"qqw:{msg.user_id}") if text else "（没听清/没识别到内容）"
+                payload = msg.payload if isinstance(msg.payload, dict) else {}
+                payload["text"] = answer
+                payload.setdefault("scope", "users")
+                ok, reason = gw.send_outbound(MultimodalMessage(
+                    user_id=msg.user_id, platform="qq_official", modality="text",
+                    payload=payload, ts=time.time()))
+                if not ok:
+                    print(f"[qq-official] 回复发送失败：{reason}", flush=True)
+            except Exception as exc:
+                print(f"[qq-official] 事件处理失败：{exc}", flush=True)
+
+        qq_ws.set_event_handler(_route_qq_ws)
+        qq_ws.enabled = True
 
     def _route_wx(raw_msgs: list[dict]) -> None:
         for item in raw_msgs:

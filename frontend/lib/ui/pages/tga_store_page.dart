@@ -6,12 +6,14 @@ import 'package:provider/provider.dart';
 import '../../bridge/backend_client.dart';
 import '../../design/tga_design.dart';
 
-/// 模型商店（2026-11-13 真实化改造）：
-/// - 搜索：防抖后调用后端 `model_store ms_search` RPC（魔搭 PUT dolphin 接口，
-///   返回真实模型仓库）；空关键词默认搜 'GGUF'，保证首屏即有可下载的真实内容。
-///   在线卡片显示真实名称（中文名优先）、owner、下载量（千分位）、任务标签 chips。
-/// - 分类胶囊（全部/文本生成/文生图/视觉多模态/语音合成/其他）按返回的
-///   tasks / tags 真实归类，识别不了归「其他」。
+/// 模型商店（2026-11-14 GGUF 可下载性改造）：
+/// - 搜索：防抖后调用后端 `model_store ms_search` RPC（魔搭 PUT dolphin 接口
+///   Name 参数，返回真实模型仓库）；空关键词默认搜 'GGUF'。
+/// - GGUF 优先：对每个候选仓库并行调用 `ms_files`（魔搭 repo/files 真实文件
+///   API）探测是否含 .gguf；带 GGUF 的仓库排在前面并加绿色「GGUF」角标，
+///   无 GGUF 的（safetensors 全量权重）保留在后并如实标注。
+/// - 无 GGUF 死路修复：点进无 GGUF 的仓库时，自动以「仓库名 GGUF」再搜魔搭，
+///   找到真实量化版仓库（同样逐个探测确认含 GGUF）列出，一键切换后直接下载。
 /// - 点击在线条目 → 底部弹层 `ms_files` 列出真实 GGUF 文件（名称 + 人类可读
 ///   大小，按大小升序），每个文件「下载」走 `ms_download`（后端真实 Range 分片
 ///   下载），弹层内该行显示真实字节进度（轮询 `download_status`）；完成 toast
@@ -45,6 +47,12 @@ class _TgaStorePageState extends State<TgaStorePage> {
   List<_ModelItem> _local = <_ModelItem>[];
   Timer? _debounce;
 
+  /// 每个在线仓库的 GGUF 探测结果：path → .gguf 文件数（真实 repo/files API）。
+  final Map<String, int> _ggufCount = <String, int>{};
+
+  /// 搜索代际号：防抖后旧请求的探测/结果一律作废，避免乱序覆盖。
+  int _searchGen = 0;
+
   @override
   void initState() {
     super.initState();
@@ -64,12 +72,14 @@ class _TgaStorePageState extends State<TgaStorePage> {
     _debounce = Timer(const Duration(milliseconds: 700), () => _search());
   }
 
-  /// 拉取模型列表：在线 ms_search（真实魔搭模型仓库）+ 本地 list/local_files
-  /// 真实扫描。[quiet] 用于下载完成后的静默刷新（不闪 loading）。
+  /// 拉取模型列表：在线 ms_search（真实魔搭模型仓库）→ 并行 ms_files 探测
+  /// 每个仓库是否含 GGUF（GGUF 优先排序）→ 本地 list/local_files 真实扫描。
+  /// [quiet] 用于下载完成后的静默刷新（不闪 loading）。
   Future<void> _search({bool quiet = false}) async {
     final String q = _searchCtrl.text.trim();
     final String query = q.isEmpty ? _defaultQuery : q;
     final BackendClient backend = context.read<BackendClient>();
+    final int gen = ++_searchGen;
     if (!quiet) setState(() => _loading = true);
 
     final List<_ModelItem> online = <_ModelItem>[];
@@ -128,6 +138,43 @@ class _TgaStorePageState extends State<TgaStorePage> {
       error = '在线搜索失败：$e';
     }
 
+    // ---- 1.5 GGUF 探测：对每个候选仓库并行调 ms_files（魔搭 repo/files
+    // 真实文件 API，后端只回 .gguf），带 GGUF 的优先展示并加角标。----
+    _ggufCount.clear();
+    if (error.isEmpty && online.isNotEmpty) {
+      await Future.wait(online.map((_ModelItem it) async {
+        int n = 0;
+        try {
+          final env = await backend.sendControl('model_store',
+              <String, dynamic>{'action': 'ms_files', 'model_path': it.id});
+          final dynamic p = env.payload;
+          if (p is Map && p['ok'] == true && p['files'] is List) {
+            n = (p['files'] as List).length;
+          }
+        } on Object {
+          n = 0; // 探测失败如实按「无 GGUF」处理，不猜测
+        }
+        if (gen == _searchGen) _ggufCount[it.id] = n;
+      }));
+      if (gen != _searchGen) return; // 已有更新的搜索，本批作废
+      // 稳定排序：GGUF 数 >0 的排前面，其余保持搜索相关度顺序。
+      final List<int> idx =
+          List<int>.generate(online.length, (int i) => i);
+      idx.sort((int a, int b) {
+        final int ga = (_ggufCount[online[a].id] ?? 0) > 0 ? 0 : 1;
+        final int gb = (_ggufCount[online[b].id] ?? 0) > 0 ? 0 : 1;
+        return ga != gb ? ga.compareTo(gb) : a.compareTo(b);
+      });
+      final List<_ModelItem> sorted =
+          idx.map((int i) => online[i]).toList();
+      online
+        ..clear()
+        ..addAll(sorted);
+      final int ggufN =
+          _ggufCount.values.where((int v) => v > 0).length;
+      note += ' · 其中 $ggufN 个含可直接下载的 GGUF（已优先展示）';
+    }
+
     // ---- 2. 本地已下载区：model_store list → local_files 真实扫描 ----
     try {
       final env = await backend.sendControl('model_store', <String, dynamic>{
@@ -160,7 +207,7 @@ class _TgaStorePageState extends State<TgaStorePage> {
       localError = '本地文件扫描失败：$e';
     }
 
-    if (!mounted) return;
+    if (!mounted || gen != _searchGen) return;
     setState(() {
       _online = online;
       _local = local;
@@ -255,7 +302,7 @@ class _TgaStorePageState extends State<TgaStorePage> {
             child: Text(
               caption.isNotEmpty
                   ? caption
-                  : '魔搭真实模型 · 点击条目选择 GGUF 权重下载',
+                  : '魔搭真实模型 · 含 GGUF 的仓库优先 · 无 GGUF 仓库自动推荐量化版',
               style: Tga.caption,
             ),
           ),
@@ -300,6 +347,7 @@ class _TgaStorePageState extends State<TgaStorePage> {
                           padding: const EdgeInsets.only(bottom: 12),
                           child: _StoreCard(
                             item: it,
+                            ggufCount: _ggufCount[it.id],
                             onTap: () => _openFilesSheet(it),
                           ),
                         ),
@@ -386,12 +434,17 @@ class _ModelItem {
 }
 
 class _StoreCard extends StatelessWidget {
-  const _StoreCard({required this.item, required this.onTap});
+  const _StoreCard(
+      {required this.item, required this.onTap, this.ggufCount});
   final _ModelItem item;
   final VoidCallback onTap;
 
+  /// ms_files 真实探测到的 .gguf 文件数；null = 未探测/本地条目。
+  final int? ggufCount;
+
   @override
   Widget build(BuildContext context) {
+    final bool hasGguf = ggufCount != null && ggufCount! > 0;
     return TgaCard(
       padding: const EdgeInsets.all(14),
       onTap: item.online ? onTap : null,
@@ -432,6 +485,8 @@ class _StoreCard extends StatelessWidget {
                       spacing: 6,
                       runSpacing: 6,
                       children: <Widget>[
+                        if (item.online && hasGguf)
+                          TgaTag('GGUF', color: Tga.green),
                         TgaTag(item.type, color: item.color),
                         for (final String t in item.tasks.take(3))
                           TgaTag(t, color: Tga.textSub),
@@ -473,12 +528,21 @@ class _StoreCard extends StatelessWidget {
     );
   }
 
-  /// 右侧操作区：在线条目提示点击进入 GGUF 文件弹层；本地条目如实标记已下载。
+  /// 右侧操作区：在线条目按真实探测结果提示（GGUF 数 / 可切换量化版）；
+  /// 本地条目如实标记已下载。
   Widget _trailing() {
     if (item.online) {
+      final bool hasGguf = ggufCount != null && ggufCount! > 0;
       return Row(
         children: <Widget>[
-          Text('GGUF 文件', style: Tga.caption),
+          Text(
+            ggufCount == null
+                ? 'GGUF 文件'
+                : hasGguf
+                    ? 'GGUF×$ggufCount'
+                    : '切换量化版',
+            style: Tga.caption,
+          ),
           Icon(Icons.chevron_right_rounded, size: 18, color: Tga.textDim),
         ],
       );
@@ -493,6 +557,14 @@ class _MsFile {
   _MsFile({required this.path, required this.name, required this.size});
   final String path, name;
   final int size;
+}
+
+/// 量化版仓库候选（原仓库无 GGUF 时，ms_search「仓库名 GGUF」+ ms_files
+/// 真实探测确认含 .gguf 后才展示）。
+class _QuantRepo {
+  _QuantRepo({required this.path, required this.name, required this.ggufCount});
+  final String path, name;
+  final int ggufCount;
 }
 
 /// 弹层内单个文件的真实下载进度（字节来自后端落盘统计，不编造）。
@@ -522,8 +594,15 @@ class _MsFilesSheet extends StatefulWidget {
 }
 
 class _MsFilesSheetState extends State<_MsFilesSheet> {
+  // 当前仓库：初始为点开的条目；若其无 GGUF，可一键切换到搜到的量化版仓库。
+  late String _repoPath;
+  late String _repoName;
+  late String _repoDesc;
   final List<_MsFile> _files = <_MsFile>[];
   final Map<String, _FileJob> _jobs = <String, _FileJob>{};
+  List<_QuantRepo> _quant = <_QuantRepo>[]; // 无 GGUF 时的量化版候选（真实探测）
+  bool _quantSearching = false;
+  String _quantError = '';
   bool _loading = true;
   String _error = '';
   Timer? _timer;
@@ -532,6 +611,9 @@ class _MsFilesSheetState extends State<_MsFilesSheet> {
   @override
   void initState() {
     super.initState();
+    _repoPath = widget.item.id;
+    _repoName = widget.item.name;
+    _repoDesc = widget.item.desc;
     _loadFiles();
   }
 
@@ -555,7 +637,7 @@ class _MsFilesSheetState extends State<_MsFilesSheet> {
     });
     try {
       final env = await widget.backend.sendControl('model_store',
-          <String, dynamic>{'action': 'ms_files', 'model_path': widget.item.id});
+          <String, dynamic>{'action': 'ms_files', 'model_path': _repoPath});
       final dynamic p = env.payload;
       if (p is Map && p['ok'] == true) {
         final List<_MsFile> files = <_MsFile>[];
@@ -579,6 +661,8 @@ class _MsFilesSheetState extends State<_MsFilesSheet> {
             ..addAll(files);
           _loading = false;
         });
+        // 无 GGUF 不再是死路：自动去魔搭搜该模型的量化版仓库。
+        if (files.isEmpty) _findQuantRepos();
       } else {
         if (!mounted) return;
         setState(() {
@@ -596,13 +680,87 @@ class _MsFilesSheetState extends State<_MsFilesSheet> {
     }
   }
 
+  /// 该仓库无 GGUF：以「仓库名 GGUF」再搜魔搭（dolphin Name 搜索，实测可命中
+  /// unsloth / QuantFactory 等量化仓库），逐个 ms_files 真实探测确认含 .gguf
+  /// 后列出，供用户一键切换下载。
+  Future<void> _findQuantRepos() async {
+    setState(() {
+      _quantSearching = true;
+      _quantError = '';
+      _quant = <_QuantRepo>[];
+    });
+    final String short = _repoPath.split('/').last;
+    try {
+      final env = await widget.backend.sendControl('model_store',
+          <String, dynamic>{'action': 'ms_search', 'query': '$short GGUF'});
+      final dynamic p = env.payload;
+      final List<String> candidates = <String>[];
+      final Map<String, String> names = <String, String>{};
+      if (p is Map && p['ok'] == true && p['models'] is List) {
+        for (final dynamic m in p['models'] as List) {
+          if (m is! Map) continue;
+          final Map<String, dynamic> md = _asMap(m);
+          final String path = (md['path'] ?? '').toString();
+          if (path.isEmpty || path == _repoPath) continue;
+          if (candidates.length >= 8) break;
+          candidates.add(path);
+          final String name = (md['name'] ?? path).toString();
+          final String cn = (md['chinese_name'] ?? '').toString();
+          names[path] = cn.isNotEmpty ? cn : name;
+        }
+      }
+      final List<_QuantRepo> found = <_QuantRepo>[];
+      await Future.wait(candidates.map((String path) async {
+        try {
+          final e2 = await widget.backend.sendControl('model_store',
+              <String, dynamic>{'action': 'ms_files', 'model_path': path});
+          final dynamic p2 = e2.payload;
+          if (p2 is Map && p2['ok'] == true && p2['files'] is List) {
+            final int n = (p2['files'] as List).length;
+            if (n > 0) {
+              found.add(_QuantRepo(
+                  path: path, name: names[path] ?? path, ggufCount: n));
+            }
+          }
+        } on Object {
+          // 探测失败：如实跳过该候选，不猜测。
+        }
+      }));
+      if (!mounted) return;
+      found.sort((_QuantRepo a, _QuantRepo b) => a.path.compareTo(b.path));
+      setState(() {
+        _quant = found;
+        _quantSearching = false;
+      });
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _quantSearching = false;
+        _quantError = '搜索量化版失败：$e';
+      });
+    }
+  }
+
+  /// 一键切换到量化版仓库：重载其真实 GGUF 文件列表，即可直接下载。
+  void _switchRepo(_QuantRepo r) {
+    setState(() {
+      _repoPath = r.path;
+      _repoName = r.name;
+      _repoDesc = r.path;
+      _quant = <_QuantRepo>[];
+      _files.clear();
+      _jobs.clear();
+    });
+    _loadFiles();
+  }
+
   /// 发起真实下载（ms_download → 后端 Range 分片 + 断点续传）。
   Future<void> _startDownload(_MsFile f) async {
     try {
       final env = await widget.backend.sendControl('model_store',
           <String, dynamic>{
         'action': 'ms_download',
-        'model_path': widget.item.id,
+        'model_path': _repoPath,
         'file': f.path,
       });
       final dynamic p = env.payload;
@@ -707,12 +865,12 @@ class _MsFilesSheetState extends State<_MsFilesSheet> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
-                        Text(widget.item.name,
+                        Text(_repoName,
                             style: Tga.body,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis),
                         const SizedBox(height: 4),
-                        Text(widget.item.desc,
+                        Text(_repoDesc,
                             style: Tga.caption,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis),
@@ -763,8 +921,103 @@ class _MsFilesSheetState extends State<_MsFilesSheet> {
       );
     }
     if (_files.isEmpty) {
+      if (_quantSearching) {
+        return Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              CircularProgressIndicator(
+                  strokeWidth: 2, color: Tga.primary),
+              const SizedBox(height: 12),
+              Text('该仓库没有 GGUF，正在魔搭自动搜索量化版…',
+                  style: Tga.sub, textAlign: TextAlign.center),
+            ],
+          ),
+        );
+      }
+      if (_quant.isNotEmpty) {
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Text(
+                '原仓库只有全量权重（safetensors），无端侧可直接下载的 GGUF。\n'
+                '已在魔搭找到 ${_quant.length} 个含 GGUF 的量化版仓库，'
+                '点选即可切换并下载：',
+                style: Tga.sub,
+              ),
+            ),
+            for (final _QuantRepo r in _quant)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: TgaCard(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  onTap: () => _switchRepo(r),
+                  child: Row(
+                    children: <Widget>[
+                      Icon(Icons.auto_awesome_outlined,
+                          size: 18, color: Tga.primary),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            Text(r.name,
+                                style: Tga.body,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis),
+                            const SizedBox(height: 4),
+                            Text(r.path,
+                                style: Tga.caption,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      TgaTag('GGUF×${r.ggufCount}', color: Tga.green),
+                      Icon(Icons.chevron_right_rounded,
+                          size: 18, color: Tga.textDim),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        );
+      }
+      if (_quantError.isNotEmpty) {
+        return Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 28),
+                child: Text(_quantError,
+                    style: Tga.sub,
+                    textAlign: TextAlign.center,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis),
+              ),
+              const SizedBox(height: 12),
+              TgaButton(
+                  label: '重试搜索量化版',
+                  onTap: _findQuantRepos,
+                  icon: Icons.refresh_rounded,
+                  filled: false),
+            ],
+          ),
+        );
+      }
       return Center(
-        child: Text('该仓库没有可直接下载的 GGUF 文件', style: Tga.sub),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 28),
+          child: Text('该仓库没有可直接下载的 GGUF 文件，'
+              '也未在魔搭搜到含 GGUF 的量化版仓库', style: Tga.sub,
+              textAlign: TextAlign.center),
+        ),
       );
     }
     return ListView.builder(

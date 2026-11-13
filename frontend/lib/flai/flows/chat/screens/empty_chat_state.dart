@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../../design/dsh_tokens.dart';
 import '../../../../design/dsh_widgets.dart';
+import '../../../../ui/i18n/tga_strings.dart';
 import '../chat_experience_config.dart';
 
 /// 空会话态（设计稿 2026-11-12）：居中的品牌组合（七巧板鹿标 + 问候语），
@@ -26,20 +27,20 @@ class FlaiEmptyChatState extends StatelessWidget {
 
   /// 问候语按时段动态（用户实测反馈 2026-11-13）：
   /// <5 夜深了 / <9 早上好 / <12 上午好 / <14 中午好 / <18 下午好 / 其余 晚上好。
-  static String _timeGreeting() {
+  static String _greetKey() {
     final int hour = DateTime.now().hour;
-    if (hour < 5) return '夜深了';
-    if (hour < 9) return '早上好';
-    if (hour < 12) return '上午好';
-    if (hour < 14) return '中午好';
-    if (hour < 18) return '下午好';
-    return '晚上好';
+    if (hour < 5) return 'home.greet.night';
+    if (hour < 9) return 'home.greet.early';
+    if (hour < 12) return 'home.greet.am';
+    if (hour < 14) return 'home.greet.noon';
+    if (hour < 18) return 'home.greet.afternoon';
+    return 'home.greet.evening';
   }
 
   @override
   Widget build(BuildContext context) {
     final DshPalette c = DshPalette.of(context);
-    final String title = '${_timeGreeting()}，我能帮你做什么？';
+    final String title = context.t(_greetKey());
 
     return SingleChildScrollView(
       padding: const EdgeInsets.only(bottom: DshSpace.x16),

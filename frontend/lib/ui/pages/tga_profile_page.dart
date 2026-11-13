@@ -4,29 +4,69 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../design/tga_design.dart';
+import '../../services/announcements.dart';
 import '../../services/persona_store.dart';
+import '../../services/update_service.dart';
+import '../i18n/tga_strings.dart';
+import '../voice_sheet.dart';
+import 'tga_agents_page.dart';
+import 'tga_messages_page.dart';
 import 'tga_persona_page.dart';
 import 'tga_settings_page.dart';
+import 'tga_works_page.dart';
 
-/// 个人页（设计稿 2026-11-12）：沿用对方版式结构。
-/// 顶部头像 + 用户名 + 身份说明；三功能入口：我的作品 / 智能体中心 / 消息中心；
-/// 偏好卡片：外观设置（跟随系统）、音色设置（标准女声）；帮助与反馈、设置。
+/// 个人页：顶部身份卡 + 三功能入口（我的作品 / 智能体中心 / 消息中心）
+/// + 偏好卡（外观 / 音色）+ 设置。
 ///
-/// 假交互清扫（2026-11-13）：
-/// - 顶部身份卡 → 整卡可点，push 人格设置页（头像 / AI 名字的真实编辑处）；
-/// - 外观设置 → 弹主题三选（跟随系统 / 浅色 / 深色），落 PersonaStore.themeMode，
-///   全局主题即时生效并持久化；
-/// - 设置 → push TgaSettingsPage；
-/// - 我的作品 / 智能体中心 / 消息中心 / 音色设置 / 帮助与反馈：后端暂无对应
-///   能力，点击如实 toast「当前版本不支持」，不再静默无响应。
-class TgaProfilePage extends StatelessWidget {
+/// 真实化（2026-11-14，问题 #13/#14/#15/#17）：
+/// - 我的作品 → TgaWorksPage（扫描工作区真实产物）；
+/// - 智能体中心 → TgaAgentsPage（agents.json 落盘，启用即注入对话人设）；
+/// - 消息中心 → TgaMessagesPage（发布仓库真实公告，未读持久化），
+///   入口带未读红点（拉取失败无红点）；
+/// - 音色设置 → showTgaVoiceSheet（真实 TTS 多音色）；
+/// - 帮助与反馈入口移除（#17）；
+/// - 底部版本读真实安装包（UpdateService.installedVersion）。
+class TgaProfilePage extends StatefulWidget {
   const TgaProfilePage({super.key});
+
+  @override
+  State<TgaProfilePage> createState() => _TgaProfilePageState();
+}
+
+class _TgaProfilePageState extends State<TgaProfilePage> {
+  bool _hasUnread = false;
+  String _version = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUnread();
+    _loadVersion();
+  }
+
+  /// 未读红点：真实拉公告 + 已读集合比对；任何失败保持无红点（宁缺毋假）。
+  Future<void> _loadUnread() async {
+    final int n = await Announcements.unreadCount();
+    if (!mounted) return;
+    setState(() => _hasUnread = n > 0);
+  }
+
+  Future<void> _loadVersion() async {
+    final String v = await UpdateService.installedVersion();
+    if (!mounted) return;
+    setState(() => _version = v);
+  }
+
+  void _push(Widget page) {
+    Navigator.of(context)
+        .push(MaterialPageRoute<void>(builder: (BuildContext _) => page));
+  }
 
   @override
   Widget build(BuildContext context) {
     final PersonaStore store = context.watch<PersonaStore>();
     return TgaPage(
-      title: '个人',
+      title: context.t('profile.title'),
       child: ListView(
         padding: const EdgeInsets.fromLTRB(Tga.pagePad, 8, Tga.pagePad, 40),
         children: <Widget>[
@@ -41,11 +81,7 @@ class TgaProfilePage extends StatelessWidget {
                     : null;
             return TgaCard(
               // 整卡可点：头像 / AI 名字的真实编辑入口在人格设置页。
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (BuildContext _) => const TgaPersonaPage(),
-                ),
-              ),
+              onTap: () => _push(const TgaPersonaPage()),
               padding:
                   const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
               child: Row(
@@ -97,21 +133,23 @@ class TgaProfilePage extends StatelessWidget {
             );
           }),
 
-          // ---------- 三功能入口 ----------
+          // ---------- 三功能入口（真实页面）----------
           const SizedBox(height: 14),
           TgaCard(
             padding: const EdgeInsets.symmetric(vertical: 18),
             child: Row(
               children: <Widget>[
-                _Entry(icon: Icons.folder_copy_outlined, label: '我的作品',
+                _Entry(icon: Icons.folder_copy_outlined,
+                    label: context.t('profile.works'),
                     bg: Tga.iconBlueBg, fg: Tga.iconBlue,
-                    onTap: () => _toast(context, '当前版本不支持：我的作品（暂无作品库）')),
-                _Entry(icon: Icons.smart_toy_outlined, label: '智能体中心',
+                    onTap: () => _push(const TgaWorksPage())),
+                _Entry(icon: Icons.smart_toy_outlined, label: context.t('profile.agents'),
                     bg: Tga.iconPurpleBg, fg: Tga.iconPurple,
-                    onTap: () => _toast(context, '当前版本不支持：智能体中心（暂无智能体市场）')),
-                _Entry(icon: Icons.mark_chat_unread_outlined, label: '消息中心',
+                    onTap: () => _push(const TgaAgentsPage())),
+                _Entry(icon: Icons.mark_chat_unread_outlined, label: context.t('profile.messages'),
                     bg: Tga.iconCyanBg, fg: Tga.iconCyan,
-                    onTap: () => _toast(context, '当前版本不支持：消息中心（暂无站内消息服务）')),
+                    badge: _hasUnread,
+                    onTap: () => _push(const TgaMessagesPage())),
               ],
             ),
           ),
@@ -133,46 +171,36 @@ class TgaProfilePage extends StatelessWidget {
                   icon: Icons.record_voice_over_outlined,
                   iconBg: Tga.iconPurpleBg,
                   iconColor: Tga.iconPurple,
-                  title: '音色设置',
+                  title: context.t('settings.voice'),
                   subtitle: '标准女声',
-                  onTap: () => _toast(context, '当前版本不支持：音色设置（未接入 TTS 引擎）'),
+                  onTap: () => showTgaVoiceSheet(context),
                 ),
               ],
             ),
           ),
 
-          // ---------- 帮助与反馈、设置 ----------
+          // ---------- 设置（#17：帮助与反馈入口已移除）----------
           const TgaGroupTitle('其他'),
           TgaCard(
             padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Column(
-              children: <Widget>[
-                TgaIconTile(
-                  icon: Icons.help_outline_rounded,
-                  iconBg: Tga.iconGoldBg,
-                  iconColor: Tga.iconGold,
-                  title: '帮助与反馈',
-                  subtitle: '使用指南与问题反馈',
-                  onTap: () => _toast(context, '当前版本不支持：帮助与反馈（未接入反馈通道）'),
-                ),
-                TgaTileDivider(),
-                TgaIconTile(
-                  icon: Icons.settings_outlined,
-                  iconBg: Tga.iconBlueBg,
-                  iconColor: Tga.iconBlue,
-                  title: '设置',
-                  subtitle: '通用 / 模型与服务 / 数据 / 关于',
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (BuildContext _) => const TgaSettingsPage(),
-                    ),
-                  ),
-                ),
-              ],
+            child: TgaIconTile(
+              icon: Icons.settings_outlined,
+              iconBg: Tga.iconBlueBg,
+              iconColor: Tga.iconBlue,
+              title: context.t('settings.title'),
+              subtitle: '通用 / 模型与服务 / 数据 / 关于',
+              onTap: () => _push(const TgaSettingsPage()),
             ),
           ),
           const SizedBox(height: 20),
-          Center(child: Text('tangram-agent · 0.0.1', style: Tga.caption)),
+          Center(
+            child: Text(
+              _version.isEmpty
+                  ? 'tangram-agent'
+                  : 'tangram-agent · $_version',
+              style: Tga.caption,
+            ),
+          ),
         ],
       ),
     );
@@ -185,12 +213,16 @@ class _Entry extends StatelessWidget {
       required this.label,
       required this.bg,
       required this.fg,
-      required this.onTap});
+      required this.onTap,
+      this.badge = false});
   final IconData icon;
   final String label;
   final Color bg;
   final Color fg;
   final VoidCallback onTap;
+
+  /// 未读红点（消息中心）。
+  final bool badge;
 
   @override
   Widget build(BuildContext context) {
@@ -200,11 +232,30 @@ class _Entry extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Container(
-              width: 46,
-              height: 46,
-              decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
-              child: Icon(icon, size: 22, color: fg),
+            Stack(
+              clipBehavior: Clip.none,
+              children: <Widget>[
+                Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
+                  child: Icon(icon, size: 22, color: fg),
+                ),
+                if (badge)
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    child: Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: Tga.red,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Tga.card, width: 1.5),
+                      ),
+                    ),
+                  ),
+              ],
             ),
             const SizedBox(height: 9),
             Text(label, style: Tga.sub.copyWith(color: Tga.text)),
@@ -213,15 +264,6 @@ class _Entry extends StatelessWidget {
       ),
     );
   }
-}
-
-void _toast(BuildContext context, String message) {
-  ScaffoldMessenger.of(context)
-    ..hideCurrentSnackBar()
-    ..showSnackBar(SnackBar(
-        content: Text(message),
-        behavior: SnackBarBehavior.floating,
-        margin: const EdgeInsets.all(12)));
 }
 
 /// 外观设置：主题三选真实落 PersonaStore.themeMode（全局即时生效 + 持久化）。

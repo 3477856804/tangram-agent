@@ -326,6 +326,7 @@ class TgaGroupTitle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Tga.syncFrom(context);
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 18, 4, 10),
       child: Row(
@@ -353,6 +354,7 @@ class TgaCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Tga.syncFrom(context);
     final Widget inner = Container(
       width: double.infinity,
       padding: padding ?? const EdgeInsets.all(14),
@@ -400,6 +402,7 @@ class TgaIconTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Tga.syncFrom(context);
     final Color bg = iconBg ?? Tga.iconBlueBg;
     final Color fg = iconColor ?? Tga.iconBlue;
     return Material(
@@ -446,8 +449,10 @@ class TgaIconTile extends StatelessWidget {
 class TgaTileDivider extends StatelessWidget {
   const TgaTileDivider({super.key});
   @override
-  Widget build(BuildContext context) =>
-      Divider(height: 1, thickness: 1, color: Tga.divider, indent: 64);
+  Widget build(BuildContext context) {
+    Tga.syncFrom(context);
+    return Divider(height: 1, thickness: 1, color: Tga.divider, indent: 64);
+  }
 }
 
 /// 通用胶囊分段控件（如：跟随系统 / 浅色 / 深色）。
@@ -467,6 +472,7 @@ class TgaSegmented<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Tga.syncFrom(context);
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       child: Row(
@@ -496,6 +502,7 @@ class _SegPill<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Tga.syncFrom(context);
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
@@ -529,6 +536,7 @@ class TgaTag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Tga.syncFrom(context);
     final Color c = color ?? Tga.primary;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3.5),
@@ -565,6 +573,7 @@ class TgaStatCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Tga.syncFrom(context);
     return Expanded(
       child: TgaCard(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
@@ -609,6 +618,7 @@ class TgaEmpty extends StatelessWidget {
   final IconData icon;
   @override
   Widget build(BuildContext context) {
+    Tga.syncFrom(context);
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 34),
@@ -646,6 +656,7 @@ class TgaButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Tga.syncFrom(context);
     final Color c = color ?? Tga.primary;
     final Color fg = filled ? Tga.onPrimary : c;
     final Widget content = Row(
@@ -691,6 +702,7 @@ class TgaSearchField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Tga.syncFrom(context);
     return Container(
       height: 42,
       decoration: BoxDecoration(

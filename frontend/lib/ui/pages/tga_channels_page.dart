@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../bridge/backend_client.dart';
 import '../../bridge/bridge_protocol.dart';
@@ -23,9 +24,12 @@ import '../../design/tga_design.dart';
 ///    返回的真实网关适配器快照，授权成功后持久化到安全存储。
 /// 2. 扫码授权弹窗：点「去授权」永远出一个真实可扫的二维码——
 ///    飞书优先走官方设备授权流直连（im_event/login_qr 返回真实验证 URL，
-///    本地 QrImageView 渲染，扫码即建应用，无需网关）；微信/QQ 有网关时
+///    本地 QrImageView 渲染，扫码即建应用，无需网关）；微信有网关时
 ///    渲染网关下发的真登录码；未发现网关时渲染「网关部署说明」真实 URL
 ///    的引导码 + 如实文案 + 手填网关地址即自动重试出码。
+///    QQ 是两条真实路径（见 _QqAuthSheet）：①官方机器人——填 AppID/
+///    AppSecret 即真实调用官方 getAppAccessToken 验证并连 wss 网关收
+///    消息、被动回复；②沙箱网关（NapCat）——保留网关真码扫码流程。
 ///    全程轮询 login_status；绝不伪造登录二维码或画占位码。
 ///    「保存到相册」把真实二维码渲染成 PNG 交给系统分享。
 class TgaChannelsPage extends StatefulWidget {
@@ -170,11 +174,19 @@ class _TgaChannelsPageState extends State<TgaChannelsPage> {
     showDialog<void>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.45), // 列表压暗
-      builder: (BuildContext ctx) => _QrAuthSheet(
-        client: client,
-        channel: ch,
-        onConfirmed: () => _markAuthorized(ch.id),
-      ),
+      builder: (BuildContext ctx) => ch.id == 'qq'
+          // QQ 两条真实路径：官方机器人（AppID/Secret 直连官方端点）
+          // 或沙箱网关（NapCat 真码），见 _QqAuthSheet。
+          ? _QqAuthSheet(
+              client: client,
+              channel: ch,
+              onConfirmed: () => _markAuthorized(ch.id),
+            )
+          : _QrAuthSheet(
+              client: client,
+              channel: ch,
+              onConfirmed: () => _markAuthorized(ch.id),
+            ),
     );
   }
 
@@ -284,13 +296,18 @@ class _BrandIcon extends StatelessWidget {
 
 // ---------------------------------------------------------------------------
 // 扫码授权弹窗（真实网关二维码 + 轮询 + 成功持久化）
+// embedded=true 时只渲染内容区（供 QQ 双路径弹窗内嵌 NapCat 扫码页）
 // ---------------------------------------------------------------------------
 class _QrAuthSheet extends StatefulWidget {
   const _QrAuthSheet(
-      {required this.client, required this.channel, required this.onConfirmed});
+      {required this.client,
+      required this.channel,
+      required this.onConfirmed,
+      this.embedded = false});
   final BackendClient client;
   final _Channel channel;
   final Future<void> Function() onConfirmed;
+  final bool embedded;
 
   @override
   State<_QrAuthSheet> createState() => _QrAuthSheetState();
@@ -500,6 +517,146 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final Widget content = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        // 平台官方图标 + 标题（内嵌模式由外层 QQ 弹窗统一出标题）
+        if (!widget.embedded) ...<Widget>[
+          Container(
+            width: 46,
+            height: 46,
+            decoration:
+                BoxDecoration(color: widget.channel.bg, shape: BoxShape.circle),
+            child: _BrandIcon(channel: widget.channel, size: 26),
+          ),
+          const SizedBox(height: 10),
+          Text('${widget.channel.name}授权', style: Tga.h2),
+        ],
+        const SizedBox(height: 18),
+        // 二维码区域
+        RepaintBoundary(
+          key: _qrKey,
+          child: Container(
+            width: _qrSize.toDouble() + 20,
+            height: _qrSize.toDouble() + 20,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Tga.border),
+            ),
+            alignment: Alignment.center,
+            child: _buildQr(),
+          ),
+        ),
+        const SizedBox(height: 14),
+        Text(_hint(), style: Tga.sub, textAlign: TextAlign.center),
+        // 引导模式：手填网关地址入口，填了自动重试出码。
+        if (_guide)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(0, 12, 0, 0),
+            child: Row(
+              children: <Widget>[
+                Expanded(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Tga.bgSoft,
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12),
+                    child: TextField(
+                      controller: _gwCtl,
+                      keyboardType: TextInputType.url,
+                      style: TextStyle(fontSize: 13, color: Tga.text),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        border: InputBorder.none,
+                        hintText: 'ws://192.168.x.x:50432',
+                        hintStyle:
+                            TextStyle(fontSize: 13, color: Tga.textDim),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                GestureDetector(
+                  onTap: _retryWithGateway,
+                  child: Container(
+                    height: 42,
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    decoration: BoxDecoration(
+                      color: Tga.primary,
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text('填写并重试出码',
+                        style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: Tga.onPrimary)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        const SizedBox(height: 20),
+        // 取消 / 要新码（过期或失败时）/ 保存到相册（有码时）
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: GestureDetector(
+                onTap: () => Navigator.of(context).maybePop(),
+                child: Container(
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: Tga.bgSoft,
+                    borderRadius: BorderRadius.circular(11),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text('取消',
+                      style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Tga.textSub)),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: GestureDetector(
+                onTap: _needsNewCode
+                    ? () => _requestQr(
+                        gatewayUrl: _gwCtl.text.trim().isEmpty
+                            ? null
+                            : _gwCtl.text.trim())
+                    : (_hasQr ? _saveToAlbum : null),
+                child: Container(
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: _needsNewCode
+                        ? Tga.primary
+                        : (_hasQr ? Tga.primary : Tga.bgSoft),
+                    borderRadius: BorderRadius.circular(11),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                      _needsNewCode
+                          ? '要新码'
+                          : '保存到相册',
+                      style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: _needsNewCode || _hasQr
+                              ? Tga.onPrimary
+                              : Tga.textDim)),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+    if (widget.embedded) return content;
     return Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 32),
@@ -509,143 +666,7 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
           borderRadius: BorderRadius.circular(20),
         ),
         padding: const EdgeInsets.fromLTRB(20, 22, 20, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            // 平台官方图标 + 标题
-            Container(
-              width: 46,
-              height: 46,
-              decoration:
-                  BoxDecoration(color: widget.channel.bg, shape: BoxShape.circle),
-              child: _BrandIcon(channel: widget.channel, size: 26),
-            ),
-            const SizedBox(height: 10),
-            Text('${widget.channel.name}授权', style: Tga.h2),
-            const SizedBox(height: 18),
-            // 二维码区域
-            RepaintBoundary(
-              key: _qrKey,
-              child: Container(
-                width: _qrSize.toDouble() + 20,
-                height: _qrSize.toDouble() + 20,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Tga.border),
-                ),
-                alignment: Alignment.center,
-                child: _buildQr(),
-              ),
-            ),
-            const SizedBox(height: 14),
-            Text(_hint(), style: Tga.sub, textAlign: TextAlign.center),
-            // 引导模式：手填网关地址入口，填了自动重试出码。
-            if (_guide)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(0, 12, 0, 0),
-                child: Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Tga.bgSoft,
-                          borderRadius: BorderRadius.circular(11),
-                        ),
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 12),
-                        child: TextField(
-                          controller: _gwCtl,
-                          keyboardType: TextInputType.url,
-                          style: TextStyle(fontSize: 13, color: Tga.text),
-                          decoration: InputDecoration(
-                            isDense: true,
-                            border: InputBorder.none,
-                            hintText: 'ws://192.168.x.x:50432',
-                            hintStyle:
-                                TextStyle(fontSize: 13, color: Tga.textDim),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    GestureDetector(
-                      onTap: _retryWithGateway,
-                      child: Container(
-                        height: 42,
-                        padding: const EdgeInsets.symmetric(horizontal: 14),
-                        decoration: BoxDecoration(
-                          color: Tga.primary,
-                          borderRadius: BorderRadius.circular(11),
-                        ),
-                        alignment: Alignment.center,
-                        child: Text('填写并重试出码',
-                            style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: Tga.onPrimary)),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            const SizedBox(height: 20),
-            // 取消 / 要新码（过期或失败时）/ 保存到相册（有码时）
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: GestureDetector(
-                    onTap: () => Navigator.of(context).maybePop(),
-                    child: Container(
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Tga.bgSoft,
-                        borderRadius: BorderRadius.circular(11),
-                      ),
-                      alignment: Alignment.center,
-                      child: Text('取消',
-                          style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: Tga.textSub)),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: GestureDetector(
-                    onTap: _needsNewCode
-                        ? () => _requestQr(
-                            gatewayUrl: _gwCtl.text.trim().isEmpty
-                                ? null
-                                : _gwCtl.text.trim())
-                        : (_hasQr ? _saveToAlbum : null),
-                    child: Container(
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: _needsNewCode
-                            ? Tga.primary
-                            : (_hasQr ? Tga.primary : Tga.bgSoft),
-                        borderRadius: BorderRadius.circular(11),
-                      ),
-                      alignment: Alignment.center,
-                      child: Text(
-                          _needsNewCode
-                              ? '要新码'
-                              : '保存到相册',
-                          style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: _needsNewCode || _hasQr
-                                  ? Tga.onPrimary
-                                  : Tga.textDim)),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
+        child: content,
       ),
     );
   }
@@ -756,5 +777,426 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
         );
       }
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// QQ 授权弹窗：两条真实路径
+//  ① 官方机器人：填 AppID/AppSecret → 真实调用 QQ 官方
+//     bots.qq.com/app/getAppAccessToken 验证（成功=官方真实签发 token，
+//     落 App 私有目录 qq_official.json）→ 再真实连 api.sgroup.qq.com
+//     wss 网关（HELLO/IDENTIFY/READY+心跳）；收到 C2C/群@ 事件走真实
+//     推理并以 v2 被动回复 API 回发。协议对齐官方开源 SDK botpy。
+//  ② 沙箱网关（NapCat）：保留原 im_event{action:'login_qr'} 真码流程
+//     （内嵌 _QrAuthSheet，网关在跑时出 NapCat 真登录码）。
+// 状态标签只认真实 token / 网关状态，UI 绝不假绿。
+// ---------------------------------------------------------------------------
+class _QqAuthSheet extends StatefulWidget {
+  const _QqAuthSheet(
+      {required this.client, required this.channel, required this.onConfirmed});
+  final BackendClient client;
+  final _Channel channel;
+  final Future<void> Function() onConfirmed;
+
+  @override
+  State<_QqAuthSheet> createState() => _QqAuthSheetState();
+}
+
+class _QqAuthSheetState extends State<_QqAuthSheet> {
+  int _tab = 0; // 0=官方机器人 1=沙箱网关(NapCat)
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 28, vertical: 40),
+      child: Container(
+        decoration: BoxDecoration(
+          color: Tga.card,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 22, 20, 16),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Container(
+                width: 46,
+                height: 46,
+                decoration:
+                    BoxDecoration(color: widget.channel.bg, shape: BoxShape.circle),
+                child: _BrandIcon(channel: widget.channel, size: 26),
+              ),
+              const SizedBox(height: 10),
+              Text('${widget.channel.name}授权', style: Tga.h2),
+              const SizedBox(height: 14),
+              // 两条路径切换
+              Container(
+                decoration: BoxDecoration(
+                  color: Tga.bgSoft,
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                padding: const EdgeInsets.all(3),
+                child: Row(
+                  children: <Widget>[
+                    _tabChip(0, '官方机器人'),
+                    _tabChip(1, '沙箱网关（NapCat）'),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              if (_tab == 0)
+                _QqOfficialBody(
+                  client: widget.client,
+                  onConfirmed: widget.onConfirmed,
+                )
+              else
+                _QrAuthSheet(
+                  client: widget.client,
+                  channel: widget.channel,
+                  onConfirmed: widget.onConfirmed,
+                  embedded: true,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _tabChip(int idx, String label) {
+    final bool active = _tab == idx;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() => _tab = idx),
+        child: Container(
+          height: 34,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: active ? Tga.primary : Colors.transparent,
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: Text(label,
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: active ? Tga.onPrimary : Tga.textSub)),
+        ),
+      ),
+    );
+  }
+}
+
+/// 官方机器人路径：真实验证 + 真实网关状态展示。
+class _QqOfficialBody extends StatefulWidget {
+  const _QqOfficialBody(
+      {required this.client, required this.onConfirmed});
+  final BackendClient client;
+  final Future<void> Function() onConfirmed;
+
+  @override
+  State<_QqOfficialBody> createState() => _QqOfficialBodyState();
+}
+
+class _QqOfficialBodyState extends State<_QqOfficialBody> {
+  /// QQ 开放平台真实入口（官方文档站 bot.q.qq.com 现 302 到 q.qq.com，
+  /// 机器人创建与「开发设置」里的 AppID/AppSecret 都在这里）。
+  static const String _consoleUrl = 'https://q.qq.com/';
+  static const String _docsUrl = 'https://bot.q.qq.com/wiki/develop/api-v2/';
+
+  final TextEditingController _appIdCtl = TextEditingController();
+  final TextEditingController _secretCtl = TextEditingController();
+  bool _obscure = true;
+  bool _sandbox = false;
+  bool _saving = false;
+  bool _loading = true;
+
+  /// qq_official_status 返回的真实快照（token/网关状态均来自官方应答）。
+  Map<String, dynamic> _snap = <String, dynamic>{};
+  String _detail = '';
+  String _result = '';
+  bool? _resultOk;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchStatus();
+  }
+
+  @override
+  void dispose() {
+    _appIdCtl.dispose();
+    _secretCtl.dispose();
+    super.dispose();
+  }
+
+  Map<String, dynamic> _map(BridgeEnvelope env) {
+    final dynamic p = env.payload;
+    return p is Map ? Map<String, dynamic>.from(p) : <String, dynamic>{};
+  }
+
+  Future<void> _fetchStatus() async {
+    try {
+      final BridgeEnvelope env =
+          await widget.client.sendControl('im_event', <String, dynamic>{
+        'action': 'qq_official_status',
+      });
+      final Map<String, dynamic> m = _map(env);
+      if (!mounted) return;
+      setState(() {
+        _snap = m['status'] is Map
+            ? Map<String, dynamic>.from(m['status'] as Map)
+            : <String, dynamic>{};
+        _detail = (m['detail'] ?? '').toString();
+        _loading = false;
+        final String savedAppId = (_snap['app_id'] ?? '').toString();
+        if (savedAppId.isNotEmpty && _appIdCtl.text.isEmpty) {
+          _appIdCtl.text = savedAppId;
+          _sandbox = _snap['sandbox'] == true;
+        }
+      });
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _result = '读取官方机器人状态失败：$e';
+        _resultOk = null;
+      });
+    }
+  }
+
+  Future<void> _save() async {
+    setState(() {
+      _saving = true;
+      _result = '';
+      _resultOk = null;
+    });
+    try {
+      final BridgeEnvelope env =
+          await widget.client.sendControl('im_event', <String, dynamic>{
+        'action': 'qq_official_save',
+        'app_id': _appIdCtl.text.trim(),
+        'client_secret': _secretCtl.text.trim(),
+        'sandbox': _sandbox,
+      });
+      final Map<String, dynamic> m = _map(env);
+      if (!mounted) return;
+      if (m['ok'] == true) {
+        final int ttl = (m['token_expires_in'] is num)
+            ? (m['token_expires_in'] as num).toInt()
+            : 0;
+        setState(() {
+          _resultOk = true;
+          _result = m['gateway_ready'] == true
+              ? '验证成功：官方 bots.qq.com 已签发 access_token（${ttl}s 有效），'
+                  '网关 wss 已连接（READY）。QQ 里给机器人发消息即真实回复。'
+              : '验证成功：官方 bots.qq.com 已签发 access_token（${ttl}s 有效）。'
+                  '但网关暂未连上：${m['gateway_error'] ?? '未知原因'}'
+                  '——token 为真，稍后自动重试。';
+        });
+        await widget.onConfirmed();
+        await _fetchStatus();
+      } else {
+        setState(() {
+          _resultOk = false;
+          _result = (m['error'] ?? '官方验证未通过').toString();
+        });
+      }
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _resultOk = false;
+        _result = '验证请求失败：$e';
+      });
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _open(String url) async {
+    try {
+      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+    } on Object catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('打开失败：$e')));
+      }
+    }
+  }
+
+  (String, Color) _liveTag() {
+    if (_loading) return ('检测中…', Tga.textDim);
+    final bool hasCred = _snap['has_cred'] == true;
+    if (!hasCred) return ('未配置', Tga.textSub);
+    if (_snap['gateway_ready'] == true) return ('已连接', Tga.green);
+    if (_snap['token_valid'] == true) return ('已连接', Tga.green);
+    return ('token 已过期', Tga.orange);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final (String tag, Color tagColor) = _liveTag();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        // 真实状态行：只来自官方 token / 网关状态快照
+        Row(
+          children: <Widget>[
+            TgaTag(tag, color: tagColor),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _detail.isNotEmpty
+                    ? _detail
+                    : (_snap['has_cred'] == true
+                        ? '凭据已存本机'
+                        : '尚未配置官方机器人凭据'),
+                style: Tga.caption,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Text('在 QQ 开放平台创建机器人，拿到 AppID / AppSecret 填入即可——'
+            '保存时会真实调用官方 getAppAccessToken 端点验证，'
+            '验证通过才算「已连接」，本应用绝不假绿。',
+            style: Tga.sub),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 10,
+          children: <Widget>[
+            _linkChip('开放平台 q.qq.com', _consoleUrl),
+            _linkChip('APIv2 文档', _docsUrl),
+          ],
+        ),
+        const SizedBox(height: 12),
+        _field(_appIdCtl, 'AppID（机器人唯一标识，纯数字）',
+            keyboard: TextInputType.number),
+        const SizedBox(height: 8),
+        _field(_secretCtl, 'AppSecret（开发设置页获取）', obscure: _obscure,
+            suffix: IconButton(
+              icon: Icon(_obscure ? Icons.visibility_off_rounded
+                      : Icons.visibility_rounded,
+                  size: 18, color: Tga.textDim),
+              onPressed: () => setState(() => _obscure = !_obscure),
+            )),
+        const SizedBox(height: 4),
+        CheckboxListTile(
+          value: _sandbox,
+          onChanged: (bool? v) => setState(() => _sandbox = v ?? false),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          controlAffinity: ListTileControlAffinity.leading,
+          visualDensity: VisualDensity.compact,
+          title: Text('沙箱环境（机器人未发布时，官方要求先走 '
+              'sandbox.api.sgroup.qq.com + 沙箱成员/群测试）',
+              style: Tga.caption),
+        ),
+        const SizedBox(height: 6),
+        GestureDetector(
+          onTap: _saving ? null : _save,
+          child: Container(
+            height: 42,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: _saving ? Tga.bgSoft : Tga.primary,
+              borderRadius: BorderRadius.circular(11),
+            ),
+            child: _saving
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Tga.primary),
+                  )
+                : Text('保存并真实验证',
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Tga.onPrimary)),
+          ),
+        ),
+        if (_result.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(0, 10, 0, 0),
+            child: Text(_result,
+                style: Tga.sub.copyWith(
+                    color: _resultOk == true
+                        ? Tga.green
+                        : (_resultOk == false ? Tga.orange : Tga.textSub))),
+          ),
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Tga.bgSoft,
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Text(
+            '当前已打通：官方 token 验证 · wss 网关事件接收（群@/私聊）· '
+            '收到消息后真实推理并被动回复（msg_id 20 分钟内有效）。'
+            '主动消息需平台开通对应消息权限，群列表拉取需用户级 OAuth 授权，'
+            '本应用如实呈现边界、不伪造全链路。',
+            style: Tga.caption,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _linkChip(String label, String url) {
+    return GestureDetector(
+      onTap: () => _open(url),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: Tga.bgSoft,
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: Tga.border),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(Icons.open_in_new_rounded, size: 14, color: Tga.cyan),
+            const SizedBox(width: 5),
+            Text(label,
+                style: TextStyle(fontSize: 12, color: Tga.cyan)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _field(TextEditingController ctl, String hint,
+      {TextInputType? keyboard, bool obscure = false, Widget? suffix}) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Tga.bgSoft,
+        borderRadius: BorderRadius.circular(11),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: TextField(
+              controller: ctl,
+              obscureText: obscure,
+              keyboardType: keyboard,
+              style: TextStyle(fontSize: 13, color: Tga.text),
+              decoration: InputDecoration(
+                isDense: true,
+                border: InputBorder.none,
+                hintText: hint,
+                hintStyle: TextStyle(fontSize: 13, color: Tga.textDim),
+              ),
+            ),
+          ),
+          if (suffix != null) suffix,
+        ],
+      ),
+    );
   }
 }

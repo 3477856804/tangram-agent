@@ -1,33 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../design/tga_design.dart';
+import '../../services/cache_cleaner.dart';
 import '../../services/persona_store.dart';
 import '../../services/update_service.dart';
+import '../i18n/tga_strings.dart';
+import '../voice_sheet.dart';
 import 'tga_models_page.dart';
 import 'tga_sphere_graph_page.dart';
 import 'tga_training_page.dart';
 
-/// 设置（设计稿 2026-11-12）：浅蓝灰底 + 白色圆角卡片，蓝色分组标题，
-/// 四分组：通用设置 / 模型与服务 / 数据设置 / 关于。
-/// 圆形浅蓝/浅紫图标底 + 线性图标，标题 + 副标题条目式排列。
-/// 颜色模式三胶囊：跟随系统 / 浅色（默认选中）/ 深色。
-/// 「关于」里保留 TGA 身份信息（产品 / 内核 / 版本 / 能力）。
-///
-/// 假交互清扫（2026-11-13）：
-/// - 通知开关 → 真实落 PersonaStore.permissionNotifications（持久化）；
-/// - 语言 → 弹三选对话框（简体中文 / 繁体中文 / English），落 PersonaStore.language；
-/// - 颜色模式 → 真实落 PersonaStore.themeMode（全局主题即时生效 + 持久化）；
-/// - 默认模型 / 端侧推理 → push TgaModelsPage（真实蒸馏 / 本地权重管理）；
-/// - API 服务 → push TgaTrainingPage（真实云端模型表单）；
-/// - 本地数据 → push TgaSphereGraphPage（真实对话词共现图谱）；
-/// - 检查更新 → 真实 GitHub Releases OTA（见 services/update_service.dart）：
-///   检查 → 下载 APK（真实字节进度）→ FileProvider 调起系统安装器覆盖安装，
-///   不卸载、保留数据；无更新 / 失败如实提示，不假装有更新；
-/// - 自动检查更新 → 开关真实持久化（FlutterSecureStorage），开启后
-///   打开设置页时自动检查一次；
-/// - 清理缓存 → 后端无缓存管理接口，如实 toast「当前版本不支持」；
-/// - 音色设置 → 后端未接入 TTS，如实 toast「当前版本不支持」。
+/// 设置（0.0.3 改版）：
+/// - 通知开关走全局 SwitchTheme（白球始终可见，问题 #5）；
+/// - 语言真实切换三语（flutter_localizations + 内置词典，问题 #11）；
+/// - 颜色模式即时全页深浅切换（Tga 组件已注册主题依赖，问题 #6）；
+/// - 音色设置 → 真实 edge-tts 多音色选择（问题 #12）；
+/// - 检查更新：当前版本读真实安装包（问题 #7）；「自动检查更新」开关
+///   移除，改为启动时静默检查一次（问题 #8，见 main.dart OtaLaunchCheck）；
+/// - 清理缓存真实执行并显示释放量（问题 #9）；
+/// - 关于区收敛为「版本 + 赞助」两项：版本弹品牌卡片，赞助出真码
+///   并可跳转微信识别 wxp 链接（问题 #10）。
 class TgaSettingsPage extends StatefulWidget {
   const TgaSettingsPage({super.key});
 
@@ -36,49 +31,20 @@ class TgaSettingsPage extends StatefulWidget {
 }
 
 class _TgaSettingsPageState extends State<TgaSettingsPage> {
-  /// 「自动检查更新」开关状态（FlutterSecureStorage 持久化）。
-  bool _autoCheck = false;
+  /// 真实安装包版本（问题 #7：读 PackageInfo，OTA 后即时反映）。
+  String _version = UpdateService.currentVersion;
 
   @override
   void initState() {
     super.initState();
-    _initUpdatePrefs();
+    UpdateService.installedVersion().then((String v) {
+      if (mounted) setState(() => _version = v);
+    });
   }
 
-  Future<void> _initUpdatePrefs() async {
-    final bool saved = await UpdateService().loadAutoCheck();
-    if (!mounted) return;
-    setState(() => _autoCheck = saved);
-    // 开关开启：打开设置页时自动真实检查一次更新。
-    if (saved) await _autoCheckOnce();
-  }
-
-  Future<void> _autoCheckOnce() async {
-    final UpdateInfo info = await UpdateService().checkLatest();
-    if (!mounted) return;
-    if (info.error != null) {
-      _toast(context, '自动检查更新失败：${info.error}');
-      return;
-    }
-    if (info.available) await _showUpdateDialog(info);
-  }
-
-  Future<void> _setAutoCheck(bool v) async {
-    setState(() => _autoCheck = v);
-    try {
-      await UpdateService().saveAutoCheck(v);
-    } on Object catch (e) {
-      if (!mounted) return;
-      setState(() => _autoCheck = !v);
-      _toast(context, '自动检查更新开关持久化失败，已回滚：$e');
-    }
-  }
-
-  /// 检查更新：真实调用 GitHub Releases API。
-  /// 有更新 → 对话框（当前→最新 + 更新说明 + 立即下载）；
-  /// 无更新 → 如实提示「已是最新版本」；失败 → 显示真实错误。
+  /// 检查更新：真实调用 GitHub Releases API（当前版本=真实安装包版本）。
   Future<void> _checkUpdate() async {
-    _toast(context, '正在检查更新…');
+    _toast(context, context.t('settings.checkUpdate') + '…');
     final UpdateInfo info = await UpdateService().checkLatest();
     if (!mounted) return;
     if (info.error != null) {
@@ -86,41 +52,46 @@ class _TgaSettingsPageState extends State<TgaSettingsPage> {
       return;
     }
     if (!info.available) {
-      _toast(context, '已是最新版本 v${info.latest ?? info.current}');
+      _toast(context, '${context.t('settings.latest')} v${info.current}');
       return;
     }
-    await _showUpdateDialog(info);
-  }
-
-  Future<void> _showUpdateDialog(UpdateInfo info) {
-    return showDialog<void>(
+    await showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (BuildContext ctx) => _UpdateDialog(info: info),
+      builder: (BuildContext ctx) => TgaSettingsUpdateDialog(info: info),
     );
+  }
+
+  /// 清理缓存：真实删除可再生临时数据，如实显示释放量（问题 #9）。
+  Future<void> _clearCache() async {
+    _toast(context, '正在清理…');
+    final CacheCleanResult r = await CacheCleaner.clean();
+    if (!mounted) return;
+    _toast(context, r.fileCount == 0
+        ? '没有可清理的缓存'
+        : '已清理 ${r.fileCount} 个临时文件，释放 ${r.freedText}');
   }
 
   @override
   Widget build(BuildContext context) {
     final PersonaStore store = context.watch<PersonaStore>();
     return TgaPage(
-      title: '设置',
+      title: context.t('settings.title'),
       child: ListView(
         padding: const EdgeInsets.fromLTRB(Tga.pagePad, 4, Tga.pagePad, 40),
         children: <Widget>[
           // ---------- 通用设置 ----------
-          const TgaGroupTitle('通用设置'),
+          TgaGroupTitle(context.t('settings.general')),
           TgaCard(
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: Column(
               children: <Widget>[
                 TgaIconTile(
                   icon: Icons.notifications_none_rounded,
-                  title: '消息通知',
-                  subtitle: '接收 Agent 任务完成提醒',
+                  title: context.t('settings.notifications'),
+                  subtitle: context.t('settings.notificationsSub'),
                   trailing: Switch(
                     value: store.permissionNotifications,
-                    activeThumbColor: Tga.primary,
                     onChanged: (bool v) => store.setPermissionNotifications(v),
                   ),
                   showArrow: false,
@@ -130,7 +101,7 @@ class _TgaSettingsPageState extends State<TgaSettingsPage> {
                   icon: Icons.language_rounded,
                   iconBg: Tga.iconPurpleBg,
                   iconColor: Tga.iconPurple,
-                  title: '语言',
+                  title: context.t('settings.language'),
                   subtitle: store.language,
                   onTap: () => _pickLanguage(context, store),
                 ),
@@ -139,9 +110,11 @@ class _TgaSettingsPageState extends State<TgaSettingsPage> {
                   icon: Icons.volume_up_outlined,
                   iconBg: Tga.iconCyanBg,
                   iconColor: Tga.iconCyan,
-                  title: '音色设置',
-                  subtitle: '标准女声',
-                  onTap: () => _toast(context, '当前版本不支持：音色设置（未接入 TTS 引擎）'),
+                  title: context.t('settings.voice'),
+                  subtitle: store.voiceName.isEmpty
+                      ? '晓伊（微软 neural）'
+                      : store.voiceName,
+                  onTap: () => showTgaVoiceSheet(context),
                 ),
               ],
             ),
@@ -163,14 +136,18 @@ class _TgaSettingsPageState extends State<TgaSettingsPage> {
                           size: 18, color: Tga.iconBlue),
                     ),
                     const SizedBox(width: 12),
-                    Text('颜色模式', style: Tga.body),
+                    Text(context.t('settings.theme'), style: Tga.body),
                   ],
                 ),
                 const SizedBox(height: 14),
                 TgaSegmented<String>(
                   items: const <String>['跟随系统', '浅色', '深色'],
                   value: store.themeMode,
-                  labelOf: (String s) => s,
+                  labelOf: (String s) => switch (s) {
+                    '跟随系统' => context.t('settings.themeSystem'),
+                    '浅色' => context.t('settings.themeLight'),
+                    _ => context.t('settings.themeDark'),
+                  },
                   onChanged: (String v) => store.setThemeMode(v),
                 ),
               ],
@@ -178,7 +155,7 @@ class _TgaSettingsPageState extends State<TgaSettingsPage> {
           ),
 
           // ---------- 模型与服务 ----------
-          const TgaGroupTitle('模型与服务'),
+          TgaGroupTitle(context.t('settings.modelService')),
           TgaCard(
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: Column(
@@ -187,7 +164,7 @@ class _TgaSettingsPageState extends State<TgaSettingsPage> {
                   icon: Icons.hub_outlined,
                   iconBg: Tga.iconPurpleBg,
                   iconColor: Tga.iconPurple,
-                  title: '默认模型',
+                  title: context.t('settings.defaultModel'),
                   subtitle: 'agent = model + harness',
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
@@ -195,10 +172,10 @@ class _TgaSettingsPageState extends State<TgaSettingsPage> {
                     ),
                   ),
                 ),
-                TgaTileDivider(),
+                const TgaTileDivider(),
                 TgaIconTile(
                   icon: Icons.api_outlined,
-                  title: 'API 服务',
+                  title: context.t('settings.apiService'),
                   subtitle: '本地加密存储，不落盘明文',
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
@@ -206,12 +183,12 @@ class _TgaSettingsPageState extends State<TgaSettingsPage> {
                     ),
                   ),
                 ),
-                TgaTileDivider(),
+                const TgaTileDivider(),
                 TgaIconTile(
                   icon: Icons.memory_outlined,
                   iconBg: Tga.iconCyanBg,
                   iconColor: Tga.iconCyan,
-                  title: '端侧推理',
+                  title: context.t('settings.onDevice'),
                   subtitle: 'GGUF · llamadart',
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
@@ -224,7 +201,7 @@ class _TgaSettingsPageState extends State<TgaSettingsPage> {
           ),
 
           // ---------- 数据设置 ----------
-          const TgaGroupTitle('数据设置'),
+          TgaGroupTitle(context.t('settings.data')),
           TgaCard(
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: Column(
@@ -233,7 +210,7 @@ class _TgaSettingsPageState extends State<TgaSettingsPage> {
                   icon: Icons.storage_outlined,
                   iconBg: Tga.iconGoldBg,
                   iconColor: Tga.iconGold,
-                  title: '本地数据',
+                  title: context.t('settings.localData'),
                   subtitle: '记忆 / 图谱 / 日记存于本机',
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
@@ -244,90 +221,81 @@ class _TgaSettingsPageState extends State<TgaSettingsPage> {
                 const TgaTileDivider(),
                 TgaIconTile(
                   icon: Icons.system_update_outlined,
-                  title: '检查更新',
-                  subtitle:
-                      '当前 v${UpdateService.currentVersion} · 更新源 GitHub Releases',
-                  onTap: () => _checkUpdate(),
-                ),
-                const TgaTileDivider(),
-                TgaIconTile(
-                  icon: Icons.access_time_outlined,
-                  iconBg: Tga.iconPurpleBg,
-                  iconColor: Tga.iconPurple,
-                  title: '自动检查更新',
-                  subtitle: '开启后，打开设置页时自动检查一次',
-                  trailing: Switch(
-                    value: _autoCheck,
-                    activeThumbColor: Tga.primary,
-                    onChanged: _setAutoCheck,
-                  ),
-                  showArrow: false,
+                  title: context.t('settings.checkUpdate'),
+                  subtitle: '更新源 GitHub Releases · 启动时自动检查一次',
+                  onTap: _checkUpdate,
                 ),
                 const TgaTileDivider(),
                 TgaIconTile(
                   icon: Icons.cleaning_services_outlined,
                   iconBg: Tga.iconPinkBg,
                   iconColor: Tga.iconPink,
-                  title: '清理缓存',
-                  subtitle: '释放临时文件占用空间',
-                  onTap: () => _toast(context, '当前版本不支持：清理缓存（无缓存管理接口）'),
+                  title: context.t('settings.clearCache'),
+                  subtitle: '清理临时文件，不动用户数据',
+                  onTap: _clearCache,
                 ),
               ],
             ),
           ),
 
-          // ---------- 关于（保留 TGA 身份信息）----------
-          const TgaGroupTitle('关于'),
+          // ---------- 关于：版本 + 赞助 两项（问题 #10）----------
+          TgaGroupTitle(context.t('settings.about')),
           TgaCard(
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: Column(
               children: <Widget>[
                 TgaIconTile(
-                  icon: Icons.info_outline_rounded,
-                  title: '产品',
-                  subtitle: 'tangram-agent（TGA）',
-                  showArrow: false,
-                ),
-                TgaTileDivider(),
-                TgaIconTile(
-                  icon: Icons.account_tree_outlined,
-                  iconBg: Tga.iconPurpleBg,
-                  iconColor: Tga.iconPurple,
-                  title: '内核',
-                  subtitle: 'agent = model + harness',
-                  showArrow: false,
-                ),
-                TgaTileDivider(),
-                TgaIconTile(
                   icon: Icons.tag_rounded,
                   iconBg: Tga.iconCyanBg,
                   iconColor: Tga.iconCyan,
-                  title: '版本',
-                  subtitle: 'v${UpdateService.currentVersion}',
-                  showArrow: false,
+                  title: context.t('settings.version'),
+                  subtitle: 'v$_version',
+                  onTap: _showAboutCard,
                 ),
-                TgaTileDivider(),
+                const TgaTileDivider(),
                 TgaIconTile(
-                  icon: Icons.auto_awesome_outlined,
-                  iconBg: Tga.iconGoldBg,
-                  iconColor: Tga.iconGold,
-                  title: '能力',
-                  subtitle: '工作蒸馏 · 产出私人模型',
-                  showArrow: false,
+                  icon: Icons.favorite_rounded,
+                  iconBg: Tga.iconPinkBg,
+                  iconColor: Tga.iconPink,
+                  title: context.t('settings.sponsor'),
+                  subtitle: '赞助 TGA，让鹿跑得更快',
+                  onTap: _showSponsorSheet,
                 ),
               ],
             ),
           ),
           const SizedBox(height: 20),
           Center(
-            child: Text('Tangram Agent · 让每个人拥有自己的模型',
-                style: Tga.caption),
+            child: Text(context.t('settings.tagline'), style: Tga.caption),
           ),
         ],
       ),
     );
   }
+
+  /// 品牌版本卡片：TGA 鹿标 + 产品/内核/版本/能力 详细数据（问题 #10）。
+  void _showAboutCard() {
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.45),
+      builder: (BuildContext ctx) => const _AboutBrandCard(),
+    );
+  }
+
+  /// 赞助：真实二维码（wxp 收款码内容）+ 尝试跳转微信识别。
+  void _showSponsorSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext ctx) => const _SponsorSheet(),
+    );
+  }
 }
+
+/// 官方赞助收款码内容（用户 2026-11-14 提供，微信识别即达收款页）。
+const String kSponsorWxLink =
+    'wxp://f2f0XhTuzRTVM8i1MTxPMMzXkFYr08Zp5CHTPbjV1LNvQyY';
 
 void _toast(BuildContext context, String message) {
   ScaffoldMessenger.of(context)
@@ -338,12 +306,13 @@ void _toast(BuildContext context, String message) {
         margin: const EdgeInsets.all(12)));
 }
 
-/// 语言：三选对话框，真实落 PersonaStore.language（持久化）。
+/// 语言：三选对话框，真实落 PersonaStore.language（持久化 + 全局 locale）。
 Future<void> _pickLanguage(BuildContext context, PersonaStore store) async {
   final String? picked = await showDialog<String>(
     context: context,
     builder: (BuildContext ctx) => SimpleDialog(
-      title: const Text('语言'),
+      title: const Text('语言 / Language'),
+      backgroundColor: Tga.card,
       children: <Widget>[
         for (final String lang in const <String>['简体中文', '繁體中文', 'English'])
           RadioMenuButton<String>(
@@ -360,25 +329,178 @@ Future<void> _pickLanguage(BuildContext context, PersonaStore store) async {
   }
 }
 
+/// 品牌版本卡片：鹿标 logo + 名称 + 四项详细数据。
+class _AboutBrandCard extends StatelessWidget {
+  const _AboutBrandCard();
+
+  @override
+  Widget build(BuildContext context) {
+    Tga.syncFrom(context);
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+        decoration: BoxDecoration(
+          color: Tga.card,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Image.asset('assets/logo/tangram_deer.png',
+                width: 84, height: 84, fit: BoxFit.contain),
+            const SizedBox(height: 12),
+            Text('TGA · Tangram Agent', style: Tga.h1),
+            Text('檀阁瑞木 · 让每个人拥有自己的模型', style: Tga.sub),
+            const SizedBox(height: 18),
+            FutureBuilder<String>(
+              future: UpdateService.installedVersion(),
+              builder: (BuildContext _, AsyncSnapshot<String> s) => _kvGrid(
+                context,
+                <(String, String)>[
+                  ('产品', 'tangram-agent（TGA）'),
+                  ('内核', 'agent = model + harness'),
+                  ('版本', 'v${s.data ?? UpdateService.currentVersion}'),
+                  ('能力', '工作蒸馏 · 产出私人模型'),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: Text(context.t('common.close'))),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _kvGrid(BuildContext context, List<(String, String)> rows) {
+    return Column(
+      children: <Widget>[
+        for (final (String k, String v) in rows)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 5),
+            child: Row(
+              children: <Widget>[
+                SizedBox(
+                    width: 56, child: Text(k, style: Tga.caption)),
+                Expanded(child: Text(v, style: Tga.body)),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// 赞助弹层：真码 + 「打开微信识别」+ 保存图片指引。
+class _SponsorSheet extends StatelessWidget {
+  const _SponsorSheet();
+
+  Future<void> _openWeChat(BuildContext context) async {
+    final Uri uri = Uri.parse(kSponsorWxLink);
+    bool ok = false;
+    try {
+      ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } on Object {
+      ok = false;
+    }
+    if (!ok && context.mounted) {
+      _toast(context, '本机未能直接拉起微信识别，请截图后用微信扫一扫');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Tga.syncFrom(context);
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.72,
+        minChildSize: 0.5,
+        maxChildSize: 0.92,
+        builder: (BuildContext ctx, ScrollController ctrl) => Container(
+          decoration: BoxDecoration(
+              color: Tga.card, borderRadius: BorderRadius.circular(20)),
+          child: ListView(
+            controller: ctrl,
+            padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Expanded(
+                      child: Text('赞助 TGA',
+                          style: Tga.h2, textAlign: TextAlign.center)),
+                  IconButton(
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      icon: Icon(Icons.close_rounded, color: Tga.textSub)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Center(
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(14)),
+                  child: QrImageView(
+                    data: kSponsorWxLink,
+                    size: 220,
+                    backgroundColor: Colors.white,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text('微信「扫一扫」识别上方二维码即可赞助；'
+                  '或点击下方按钮尝试直接拉起微信。',
+                  style: Tga.sub, textAlign: TextAlign.center),
+              const SizedBox(height: 14),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                    backgroundColor: Tga.green,
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size.fromHeight(46)),
+                icon: const Icon(Icons.wechat_rounded),
+                label: const Text('打开微信识别'),
+                onPressed: () => _openWeChat(ctx),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// OTA 更新对话框：当前→最新 版本 + 真实大小 / Release 说明 + 「立即下载」。
-/// 下载中显示真实字节进度条；下载完成自动经 MethodChannel 调起系统安装器。
+/// 下载中显示真实字节进度与实时速度；分片并行+镜像回退见 UpdateService。
 /// 失败显示真实错误并可重试；未授予「安装未知应用」权限时如实引导去授权。
-class _UpdateDialog extends StatefulWidget {
-  const _UpdateDialog({required this.info});
+class TgaSettingsUpdateDialog extends StatefulWidget {
+  const TgaSettingsUpdateDialog({super.key, required this.info});
 
   final UpdateInfo info;
 
   @override
-  State<_UpdateDialog> createState() => _UpdateDialogState();
+  State<TgaSettingsUpdateDialog> createState() => _UpdateDialogState();
 }
 
-class _UpdateDialogState extends State<_UpdateDialog> {
+class _UpdateDialogState extends State<TgaSettingsUpdateDialog> {
   bool _downloading = false;
   bool _installerStarted = false;
   bool _pendingPermission = false;
   int _received = 0;
   int _total = 0;
   String? _error;
+  final Stopwatch _watch = Stopwatch();
+
+  String get _speed {
+    if (!_watch.isRunning || _watch.elapsedMilliseconds < 500) return '';
+    final double mbps =
+        _received / 1048576.0 / (_watch.elapsedMilliseconds / 1000.0);
+    return ' · ${mbps.toStringAsFixed(1)} MB/s';
+  }
 
   Future<void> _startDownload() async {
     setState(() {
@@ -387,6 +509,9 @@ class _UpdateDialogState extends State<_UpdateDialog> {
       _pendingPermission = false;
       _received = 0;
       _total = widget.info.size ?? 0;
+      _watch
+        ..reset()
+        ..start();
     });
     final InstallOutcome outcome = await UpdateService().downloadAndInstall(
       widget.info,
@@ -399,6 +524,7 @@ class _UpdateDialogState extends State<_UpdateDialog> {
         }
       },
     );
+    _watch.stop();
     if (!mounted) return;
     setState(() {
       _downloading = false;
@@ -428,7 +554,7 @@ class _UpdateDialogState extends State<_UpdateDialog> {
         const SizedBox(height: 8),
         Text(
             '${UpdateService.formatSize(_received)} / '
-            '${_total > 0 ? UpdateService.formatSize(_total) : '大小未知'}',
+            '${_total > 0 ? UpdateService.formatSize(_total) : '大小未知'}$_speed',
             style: Tga.caption),
       ];
       actions = const <Widget>[]; // 下载中不提供假取消
@@ -460,8 +586,7 @@ class _UpdateDialogState extends State<_UpdateDialog> {
         TextButton(
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('以后再说')),
-        FilledButton(
-            onPressed: _startDownload, child: const Text('重试')),
+        FilledButton(onPressed: _startDownload, child: const Text('重试')),
       ];
     } else {
       content = <Widget>[
@@ -488,9 +613,12 @@ class _UpdateDialogState extends State<_UpdateDialog> {
       ];
     }
     return AlertDialog(
+      backgroundColor: Tga.card,
       title: Text(_downloading
           ? '下载更新'
-          : (_installerStarted || _pendingPermission ? '更新' : '发现新版本 v${info.latest}')),
+          : (_installerStarted || _pendingPermission
+              ? '更新'
+              : '发现新版本 v${info.latest}')),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,

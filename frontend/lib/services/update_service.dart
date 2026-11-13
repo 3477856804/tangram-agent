@@ -14,10 +14,12 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
 /// 一次「检查最新真实版本」的结果。error 非空表示检查失败（如实上报）。
@@ -103,10 +105,25 @@ class UpdateService {
 
   // ---- 版本真源 ----
 
-  /// 当前版本真源：构建时以 `--dart-define=TANGRAM_VERSION=<pubspec version>`
-  /// 注入；默认值与 pubspec.yaml 的 version 字段及仓库根 VERSION 文件保持一致。
-  static const String currentVersion =
+  /// 构建注入版本（--dart-define=TANGRAM_VERSION），仅作兜底。
+  static const String fallbackVersion =
       String.fromEnvironment('TANGRAM_VERSION', defaultValue: '0.0.1');
+
+  /// 真实安装包版本真源：读系统包信息（Android versionName / 桌面 pubspec），
+  /// OTA 覆盖安装后立即反映新版本，不再依赖写死常量（问题 #7）。
+  static Future<String> installedVersion() async {
+    try {
+      final PackageInfo info = await PackageInfo.fromPlatform();
+      final String v = info.version.trim();
+      if (v.isNotEmpty) return v.split('+').first;
+    } on Object {
+      // 平台通道不可用时回退构建注入值。
+    }
+    return fallbackVersion;
+  }
+
+  /// 兼容旧引用：构建注入值。UI 展示一律改用 [installedVersion]。
+  static String get currentVersion => fallbackVersion;
 
   static const MethodChannel _channel = MethodChannel('tangram/update');
   static const FlutterSecureStorage _secure = FlutterSecureStorage();
@@ -116,9 +133,10 @@ class UpdateService {
       'https://api.github.com/repos/$repoOwner/$repoName/releases/latest');
 
   /// 拉取 releases/latest，语义化比较（0.0.1 vs 0.0.2）。
+  /// 当前版本读真实安装包（[installedVersion]），已是最新不会再误报（问题 #7）。
   /// 任何网络/解析失败都如实返回 available=false + error。
   Future<UpdateInfo> checkLatest() async {
-    final String current = currentVersion;
+    final String current = await installedVersion();
     http.Client? client;
     try {
       client = http.Client();
@@ -238,7 +256,7 @@ class UpdateService {
         final int len = file.lengthSync();
         onProgress?.call(len, expected ?? len);
       } else {
-        await _downloadTo(url, file, onProgress);
+        await _downloadResilient(url, file, expected, onProgress);
       }
       final Map<Object?, Object?>? res =
           await _channel.invokeMethod<Map<Object?, Object?>>(
@@ -323,48 +341,207 @@ class UpdateService {
     return dir;
   }
 
-  /// dart:io HttpClient 真实流式下载（GitHub 资产 URL 会 302 到对象存储，
-  /// HttpClient 默认自动跟随重定向）。进度 = 真实落盘字节数。
-  Future<void> _downloadTo(
+  /// 韧性强下载（问题 #3：下载慢/30s 超时报错）：
+  ///  1. GitHub 加速镜像依次回退（直连不通自动换 gh-proxy/ghfast 等）；
+  ///  2. Range 分片 4 路并行下载，各分片断点续传（.part 文件记进度）；
+  ///  3. 超时按"分片空闲"计——只要还在收字节就不超时，
+  ///     单分片 30s 无进展才重试该分片，不再整包 30s 一刀切；
+  ///  4. 服务器不支持 Range（返回 200）时自动回退单流边下边落盘。
+  static const List<String> _mirrors = <String>[
+    '', // 原 URL 直连优先
+    'https://gh-proxy.com/',
+    'https://ghfast.top/',
+    'https://ghproxy.net/',
+  ];
+
+  static Uri? _mirrorUrl(String original, String prefix) =>
+      prefix.isEmpty ? Uri.parse(original) : Uri.parse('$prefix$original');
+
+  Future<void> _downloadResilient(
     String url,
     File file,
+    int? expectedSize,
+    void Function(int received, int total)? onProgress,
+  ) async {
+    Object? lastError;
+    for (final String prefix in _mirrors) {
+      final Uri? u = _mirrorUrl(url, prefix);
+      if (u == null) continue;
+      try {
+        await _downloadChunked(u, file, expectedSize, onProgress);
+        return; // 成功即返回
+      } on Object catch (e) {
+        lastError = e; // 换下一个镜像重试
+      }
+    }
+    throw StateError('所有下载通道均失败（直连+3 个加速镜像）：$lastError');
+  }
+
+  Future<void> _downloadChunked(
+    Uri url,
+    File file,
+    int? expectedSize,
     void Function(int received, int total)? onProgress,
   ) async {
     final HttpClient client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15);
     try {
-      final HttpClientRequest req =
-          await client.openUrl('GET', Uri.parse(url));
-      if (githubToken.isNotEmpty) {
-        req.headers.set('Authorization', 'Bearer $githubToken');
-        req.headers.set('Accept', 'application/octet-stream');
+      // 探测总大小与 Range 支持。
+      int total = expectedSize ?? 0;
+      bool rangeOk = true;
+      if (total <= 0) {
+        final HttpClientRequest head = await client.openUrl('HEAD', url);
+        if (githubToken.isNotEmpty) {
+          head.headers.set('Authorization', 'Bearer $githubToken');
+        }
+        final HttpClientResponse headResp =
+            await head.close().timeout(const Duration(seconds: 20));
+        await headResp.drain<void>();
+        total = headResp.contentLength;
       }
-      final HttpClientResponse resp =
-          await req.close().timeout(const Duration(seconds: 30));
-      if (resp.statusCode != HttpStatus.ok) {
-        await resp.drain<void>();
-        throw StateError('下载失败：HTTP ${resp.statusCode}（$url）');
+      if (total <= 0) rangeOk = false; // 大小未知：单流
+      if (rangeOk) {
+        // 校验镜像是否真支持 Range（有些代理会吞掉 Range 头返回 200）。
+        final HttpClientRequest probe = await client.openUrl('GET', url);
+        probe.headers.set('Range', 'bytes=0-0');
+        final HttpClientResponse probeResp =
+            await probe.close().timeout(const Duration(seconds: 20));
+        rangeOk = probeResp.statusCode == HttpStatus.partialContent;
+        await probeResp.drain<void>();
       }
-      final int total = resp.contentLength; // 可能为 -1（未知）
-      final int? expectedSize = total > 0 ? total : null;
+      if (!rangeOk) {
+        await _downloadSingle(client, url, file, onProgress);
+        return;
+      }
+      // 4 路分片并行 + 断点续传。
+      const int kChunks = 4;
+      final int chunkSize = (total / kChunks).ceil();
+      final Directory dir = file.parent;
+      final String base = file.uri.pathSegments.last;
+      final List<Future<void>> jobs = <Future<void>>[];
+      final List<File> parts = <File>[];
+      int done = 0; // 已落盘总字节（跨分片累计）
+      void report() => onProgress?.call(math.min(done, total), total);
+      for (int i = 0; i < kChunks; i++) {
+        final int start = i * chunkSize;
+        if (start >= total) break;
+        final int end = math.min(start + chunkSize - 1, total - 1);
+        final File part = File('${dir.path}/$base.part$i');
+        parts.add(part);
+        jobs.add(_fetchRange(client, url, part, start, end, () {
+          done = parts.fold<int>(
+              0, (int s, File p) => s + (p.existsSync() ? p.lengthSync() : 0));
+          report();
+        }));
+      }
+      report();
+      await Future.wait(jobs);
+      // 合并分片。
       final IOSink sink = file.openWrite();
-      var received = 0;
       try {
-        await for (final List<int> chunk in resp) {
-          sink.add(chunk);
-          received += chunk.length;
-          onProgress?.call(received, expectedSize ?? received);
+        for (final File p in parts) {
+          await sink.addStream(p.openRead());
         }
         await sink.flush();
       } finally {
         await sink.close();
       }
-      if (expectedSize != null && received != expectedSize) {
+      for (final File p in parts) {
+        try {
+          await p.delete();
+        } on Object {
+          // 残留 part 由清理缓存负责回收。
+        }
+      }
+      if (file.lengthSync() != total) {
         throw StateError(
-            '下载不完整：$received/$expectedSize 字节（连接中断），请重试');
+            '下载不完整：${file.lengthSync()}/$total 字节（连接中断），请重试');
       }
     } finally {
       client.close(force: true);
+    }
+  }
+
+  /// 单分片下载：写入 .partN（已存在则从断点续传），30s 空闲超时重试 3 次。
+  Future<void> _fetchRange(HttpClient client, Uri url, File part, int start,
+      int end, void Function() onBytes) async {
+    Object? lastError;
+    for (int attempt = 0; attempt < 3; attempt++) {
+      try {
+        final int have = part.existsSync() ? part.lengthSync() : 0;
+        final int from = start + have;
+        if (from > end) return; // 分片已完成
+        final HttpClientRequest req = await client.openUrl('GET', url);
+        req.headers.set('Range', 'bytes=$from-$end');
+        if (githubToken.isNotEmpty) {
+          req.headers.set('Authorization', 'Bearer $githubToken');
+        }
+        final HttpClientResponse resp =
+            await req.close().timeout(const Duration(seconds: 20));
+        if (resp.statusCode != HttpStatus.partialContent) {
+          await resp.drain<void>();
+          throw StateError('分片请求未得到 206（HTTP ${resp.statusCode}）');
+        }
+        final IOSink sink =
+            part.openWrite(mode: have > 0 ? FileMode.append : FileMode.write);
+        try {
+          await resp
+              .timeout(const Duration(seconds: 30))
+              .map((List<int> chunk) {
+            sink.add(chunk);
+            onBytes();
+            return chunk;
+          }).drain<void>();
+          await sink.flush();
+        } finally {
+          await sink.close();
+        }
+        final int nowHave = part.lengthSync();
+        if (start + nowHave - 1 < end) {
+          throw StateError('分片中断：$nowHave/${end - start + 1}');
+        }
+        return;
+      } on Object catch (e) {
+        lastError = e; // 保留 .part 断点，重试续传
+      }
+    }
+    throw StateError('分片 $start-$end 重试 3 次仍失败：$lastError');
+  }
+
+  /// 单流回退：服务器不支持 Range 时边下边落盘，空闲 30s 才超时。
+  Future<void> _downloadSingle(
+    HttpClient client,
+    Uri url,
+    File file,
+    void Function(int received, int total)? onProgress,
+  ) async {
+    final HttpClientRequest req = await client.openUrl('GET', url);
+    if (githubToken.isNotEmpty) {
+      req.headers.set('Authorization', 'Bearer $githubToken');
+      req.headers.set('Accept', 'application/octet-stream');
+    }
+    final HttpClientResponse resp =
+        await req.close().timeout(const Duration(seconds: 30));
+    if (resp.statusCode != HttpStatus.ok) {
+      await resp.drain<void>();
+      throw StateError('下载失败：HTTP ${resp.statusCode}（$url）');
+    }
+    final int total = resp.contentLength;
+    final IOSink sink = file.openWrite();
+    var received = 0;
+    try {
+      await resp.timeout(const Duration(seconds: 30)).map((List<int> chunk) {
+        sink.add(chunk);
+        received += chunk.length;
+        onProgress?.call(received, total > 0 ? total : received);
+        return chunk;
+      }).drain<void>();
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
+    if (total > 0 && received != total) {
+      throw StateError('下载不完整：$received/$total 字节（连接中断），请重试');
     }
   }
 }

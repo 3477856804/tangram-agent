@@ -523,51 +523,62 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(Tga.pagePad, 6, Tga.pagePad, 40),
         children: <Widget>[
-          // ---------- 环境状态行（真实下拉）----------
-          Row(
-            children: <Widget>[
-              TgaTag(backendReady ? '沙箱已连接' : '后端未就绪',
-                  color: backendReady ? Tga.green : Tga.orange),
-              const SizedBox(width: 10),
-              Text('环境', style: Tga.sub),
-              const SizedBox(width: 8),
-              PopupMenuButton<String>(
-                tooltip: '切换沙箱环境',
-                initialValue: _environment,
-                position: PopupMenuPosition.under,
-                itemBuilder: (BuildContext ctx) => _kEnvironments
-                    .map((String e) => PopupMenuItem<String>(
-                          value: e,
-                          child: Text(e,
-                              style: TextStyle(
-                                  fontWeight: e == _environment
-                                      ? FontWeight.w700
-                                      : FontWeight.w400,
-                                  color: e == _environment
-                                      ? Tga.primary
-                                      : Tga.text)),
-                        ))
-                    .toList(),
-                onSelected: _applyEnvironment,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    Text(_environment,
-                        style: TextStyle(
-                            fontSize: 13.5,
-                            fontWeight: FontWeight.w600,
-                            color: Tga.text)),
-                    Icon(Icons.keyboard_arrow_down_rounded,
-                        size: 18, color: Tga.textDim),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          // ---------- 隔离策略（真实 quota）----------
+          // ---------- 沙箱状态 + 沙箱环境（合并一行卡：左状态右环境胶囊）----------
           TgaCard(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              children: <Widget>[
+                TgaTag(backendReady ? '沙箱已连接' : '后端未就绪',
+                    color: backendReady ? Tga.green : Tga.orange),
+                const Spacer(),
+                PopupMenuButton<String>(
+                  tooltip: '切换沙箱环境',
+                  initialValue: _environment,
+                  position: PopupMenuPosition.under,
+                  itemBuilder: (BuildContext ctx) => _kEnvironments
+                      .map((String e) => PopupMenuItem<String>(
+                            value: e,
+                            child: Text(e,
+                                style: TextStyle(
+                                    fontWeight: e == _environment
+                                        ? FontWeight.w700
+                                        : FontWeight.w400,
+                                    color: e == _environment
+                                        ? Tga.primary
+                                        : Tga.text)),
+                          ))
+                      .toList(),
+                  onSelected: _applyEnvironment,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: Tga.cardAlt,
+                      borderRadius: BorderRadius.circular(Tga.rChip),
+                      border: Border.all(color: Tga.border),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Text(_environment,
+                            style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: Tga.text)),
+                        const SizedBox(width: 2),
+                        Icon(Icons.keyboard_arrow_down_rounded,
+                            size: 18, color: Tga.textDim),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          // ---------- 隔离策略（真实 quota，紧凑行式选项）----------
+          TgaCard(
+            padding: const EdgeInsets.all(12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
@@ -578,23 +589,13 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
                     Text(_policySource, style: Tga.caption),
                   ],
                 ),
-                const SizedBox(height: 12),
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                        child: _NumField(
-                            label: 'CPU %', controller: _cpu, hint: '1~100')),
-                    const SizedBox(width: 10),
-                    Expanded(
-                        child: _NumField(
-                            label: '内存 MB', controller: _mem, hint: '16~4096')),
-                    const SizedBox(width: 10),
-                    Expanded(
-                        child: _NumField(
-                            label: '超时 s', controller: _timeout, hint: '1~300')),
-                  ],
-                ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
+                _NumRow(label: 'CPU %', controller: _cpu, hint: '1~100'),
+                const SizedBox(height: 8),
+                _NumRow(label: '内存 MB', controller: _mem, hint: '16~4096'),
+                const SizedBox(height: 8),
+                _NumRow(label: '超时 s', controller: _timeout, hint: '1~300'),
+                const SizedBox(height: 10),
                 Row(
                   children: <Widget>[
                     Text('超限动作', style: Tga.sub),
@@ -623,7 +624,7 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
               ],
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           // ---------- 工作轨迹（独立入口行）----------
           TgaCard(
             padding: EdgeInsets.zero,
@@ -632,7 +633,7 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
               onTap: _openTraces,
               child: Padding(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
                 child: Row(
                   children: <Widget>[
                     Container(
@@ -658,9 +659,9 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
           ),
 
           // ---------- 模型配置 ----------
-          const TgaGroupTitle('模型配置'),
+          const _GroupTitle('模型配置'),
           Padding(
-            padding: const EdgeInsets.only(left: 4, bottom: 10),
+            padding: const EdgeInsets.only(left: 4, bottom: 8),
             child: Text('选一个教师来源', style: Tga.sub),
           ),
           _SegTab(
@@ -668,12 +669,12 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
             value: _teacherTab,
             onChanged: (String v) => setState(() => _teacherTab = v),
           ),
-          const SizedBox(height: 12),
-          if (apiTab) ..._apiForm() else ..._localForm(local, registry),
+          const SizedBox(height: 10),
+          if (apiTab) _apiCard() else ..._localForm(local, registry),
 
           // ---------- 我添加的云端模型（仅 API 标签渲染）----------
           if (apiTab) ...<Widget>[
-            TgaGroupTitle(
+            _GroupTitle(
               '我添加的云端模型',
               trailing: TgaTag('${cloud.length} 个', color: Tga.textSub),
             ),
@@ -684,7 +685,7 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
               )
             else
               ...cloud.map((ModelEntry e) => Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.only(bottom: 8),
                     child: _CloudRow(
                       entry: e,
                       selected: registry.selectedId == e.id,
@@ -698,135 +699,167 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
     );
   }
 
-  List<Widget> _apiForm() => <Widget>[
-        _FieldCard(
-          label: '模型厂商',
-          child: DropdownButton<String>(
-            value: _vendor,
-            isExpanded: true,
-            underline: const SizedBox.shrink(),
-            style: TextStyle(
-                fontSize: 15, fontWeight: FontWeight.w600, color: Tga.text),
-            items: _kVendors
-                .map((_VendorPreset v) => DropdownMenuItem<String>(
-                      value: v.name,
-                      child: Text(v.name,
-                          overflow: TextOverflow.ellipsis),
-                    ))
-                .toList(),
-            onChanged: (String? v) {
-              if (v == null) return;
-              final _VendorPreset? preset = _vendorByName(v);
-              setState(() {
-                _vendor = v;
-                // 非自定义：自动填默认 Base URL 与示例教师模型名；
-                // 自定义：保留当前输入允许手填。
-                if (preset != null && preset.baseUrl.isNotEmpty) {
-                  _baseUrl.text = preset.baseUrl;
-                  _teacher.text = preset.model;
-                }
-              });
-            },
-          ),
-        ),
-        _FieldCard(
-          label: 'API Base URL',
-          child: TextField(
-            controller: _baseUrl,
-            style: TextStyle(
-                fontSize: 14, fontWeight: FontWeight.w600, color: Tga.text),
-            decoration: const InputDecoration(
-                isCollapsed: true, border: InputBorder.none),
-          ),
-        ),
-        _FieldCard(
-          label: 'API Key',
-          child: Row(
+  /// 模型配置合并卡：厂商下拉 / Base URL / API Key / 教师模型
+  /// 同卡内「小标签 + 输入框」分行（行距 10），测速 + 保存按钮同行各占一半。
+  Widget _apiCard() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        TgaCard(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Expanded(
-                child: TextField(
-                  controller: _apiKey,
-                  obscureText: !_apiKeyVisible,
-                  style: TextStyle(fontSize: 14, color: Tga.text),
-                  decoration: InputDecoration(
-                      isCollapsed: true,
-                      border: InputBorder.none,
-                      hintText: '请输入 API Key',
-                      hintStyle: TextStyle(fontSize: 14, color: Tga.textDim)),
+              _LabeledRow(
+                label: '模型厂商',
+                child: DropdownButton<String>(
+                  value: _vendor,
+                  isExpanded: true,
+                  isDense: true,
+                  underline: const SizedBox.shrink(),
+                  style: TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w600,
+                      color: Tga.text),
+                  items: _kVendors
+                      .map((_VendorPreset v) => DropdownMenuItem<String>(
+                            value: v.name,
+                            child:
+                                Text(v.name, overflow: TextOverflow.ellipsis),
+                          ))
+                      .toList(),
+                  onChanged: (String? v) {
+                    if (v == null) return;
+                    final _VendorPreset? preset = _vendorByName(v);
+                    setState(() {
+                      _vendor = v;
+                      // 非自定义：自动填默认 Base URL 与示例教师模型名；
+                      // 自定义：保留当前输入允许手填。
+                      if (preset != null && preset.baseUrl.isNotEmpty) {
+                        _baseUrl.text = preset.baseUrl;
+                        _teacher.text = preset.model;
+                      }
+                    });
+                  },
                 ),
               ),
-              GestureDetector(
-                onTap: () => setState(() => _apiKeyVisible = !_apiKeyVisible),
-                child: Icon(
-                    _apiKeyVisible
-                        ? Icons.visibility_outlined
-                        : Icons.visibility_off_outlined,
-                    size: 17,
-                    color: Tga.textDim),
+              const SizedBox(height: 10),
+              _LabeledRow(
+                label: 'API Base URL',
+                child: _InputBox(
+                  child: TextField(
+                    controller: _baseUrl,
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Tga.text),
+                    decoration: const InputDecoration(
+                        isCollapsed: true, border: InputBorder.none),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              _LabeledRow(
+                label: 'API Key',
+                child: _InputBox(
+                  child: Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: TextField(
+                          controller: _apiKey,
+                          obscureText: !_apiKeyVisible,
+                          style: TextStyle(fontSize: 14, color: Tga.text),
+                          decoration: InputDecoration(
+                              isCollapsed: true,
+                              border: InputBorder.none,
+                              hintText: '请输入 API Key',
+                              hintStyle:
+                                  TextStyle(fontSize: 13, color: Tga.textDim)),
+                        ),
+                      ),
+                      GestureDetector(
+                        onTap: () =>
+                            setState(() => _apiKeyVisible = !_apiKeyVisible),
+                        child: Icon(
+                            _apiKeyVisible
+                                ? Icons.visibility_outlined
+                                : Icons.visibility_off_outlined,
+                            size: 17,
+                            color: Tga.textDim),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              _LabeledRow(
+                label: '教师模型',
+                child: _InputBox(
+                  child: TextField(
+                    controller: _teacher,
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Tga.text),
+                    decoration: const InputDecoration(
+                        isCollapsed: true, border: InputBorder.none),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              // 同一 Row：左「测试 API 连通」右「保存为云端模型」各占一半
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: _FormButton(
+                      label: _testing ? '测试中…' : '测试 API 连通',
+                      icon: Icons.wifi_rounded,
+                      filled: false,
+                      busy: _testing,
+                      onTap: _testing ? null : _testApi,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _FormButton(
+                      label: '保存为云端模型',
+                      icon: Icons.link_rounded,
+                      filled: true,
+                      onTap: _testing ? null : _saveCloud,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
         ),
-        _FieldCard(
-          label: '教师模型',
-          child: TextField(
-            controller: _teacher,
-            style: TextStyle(
-                fontSize: 15, fontWeight: FontWeight.w600, color: Tga.text),
-            decoration: const InputDecoration(
-                isCollapsed: true, border: InputBorder.none),
-          ),
-        ),
-        const SizedBox(height: 16),
-        // 同一 Row：左「测试 API 连通」右「保存为云端模型」各占一半
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: _FormButton(
-                label: _testing ? '测试中…' : '测试 API 连通',
-                icon: Icons.wifi_rounded,
-                filled: false,
-                busy: _testing,
-                onTap: _testing ? null : _testApi,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _FormButton(
-                label: '保存为云端模型',
-                icon: Icons.link_rounded,
-                filled: true,
-                onTap: _testing ? null : _saveCloud,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.only(top: 8, left: 4, right: 4),
           child: Text(
             '保存后出现在右下角选择器里（带「云端」标记），选中即可用。可添加多个。'
             'API Key 仅本机存储，不写进日志。',
             style: Tga.sub,
           ),
         ),
-      ];
+      ],
+    );
+  }
 
   List<Widget> _localForm(List<ModelEntry> local, ModelRegistry registry) =>
       <Widget>[
         TgaCard(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(12),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               Text('本地基底模型', style: Tga.h2),
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               Text(
                 '选择一个已下载的本地 GGUF 权重作为基底，'
                 '通过 harness 跑「模型 → 工具 → 沙箱 → 回写」循环蒸馏。',
                 style: Tga.sub,
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 12),
               if (local.isEmpty)
                 TgaTag('暂无本地权重', color: Tga.textSub)
               else
@@ -845,9 +878,9 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
       ];
 }
 
-/// 数字输入小字段（隔离策略用）。
-class _NumField extends StatelessWidget {
-  const _NumField(
+/// 数字输入紧凑行（隔离策略用）：左小标签右输入框。
+class _NumRow extends StatelessWidget {
+  const _NumRow(
       {required this.label, required this.controller, required this.hint});
   final String label;
   final TextEditingController controller;
@@ -855,28 +888,28 @@ class _NumField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Row(
       children: <Widget>[
-        Text(label, style: Tga.caption),
-        const SizedBox(height: 4),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          decoration: BoxDecoration(
-            color: Tga.cardAlt,
-            borderRadius: BorderRadius.circular(9),
-            border: Border.all(color: Tga.border),
-          ),
-          child: TextField(
-            controller: controller,
-            keyboardType: TextInputType.number,
-            style: TextStyle(
-                fontSize: 14, fontWeight: FontWeight.w600, color: Tga.text),
-            decoration: InputDecoration(
-              isCollapsed: true,
-              border: InputBorder.none,
-              hintText: hint,
-              hintStyle: TextStyle(fontSize: 11, color: Tga.textDim),
+        SizedBox(width: 64, child: Text(label, style: Tga.sub)),
+        Expanded(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: Tga.cardAlt,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: Tga.border),
+            ),
+            child: TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              style: TextStyle(
+                  fontSize: 14, fontWeight: FontWeight.w600, color: Tga.text),
+              decoration: InputDecoration(
+                isCollapsed: true,
+                border: InputBorder.none,
+                hintText: hint,
+                hintStyle: TextStyle(fontSize: 11, color: Tga.textDim),
+              ),
             ),
           ),
         ),
@@ -1081,24 +1114,62 @@ class _LocalRow extends StatelessWidget {
   }
 }
 
-class _FieldCard extends StatelessWidget {
-  const _FieldCard({required this.label, required this.child});
+/// 分组标题（同 TgaGroupTitle 视觉，纵向留白收紧为上 12 / 下 8）。
+class _GroupTitle extends StatelessWidget {
+  const _GroupTitle(this.text, {this.trailing});
+  final String text;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 12, 4, 8),
+      child: Row(
+        children: <Widget>[
+          Text(text,
+              style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w700,
+                  color: Tga.groupTitle)),
+          const Spacer(),
+          if (trailing != null) trailing!,
+        ],
+      ),
+    );
+  }
+}
+
+/// 合并卡内的「小标签 + 输入框」行。
+class _LabeledRow extends StatelessWidget {
+  const _LabeledRow({required this.label, required this.child});
   final String label;
   final Widget child;
+
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 12),
-        child: TgaCard(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(label, style: Tga.sub),
-              const SizedBox(height: 8),
-              child,
-            ],
-          ),
+  Widget build(BuildContext context) {
+    return Row(
+      children: <Widget>[
+        SizedBox(width: 84, child: Text(label, style: Tga.sub)),
+        Expanded(child: child),
+      ],
+    );
+  }
+}
+
+/// 行内输入框外观（浅底 + 描边圆角）。
+class _InputBox extends StatelessWidget {
+  const _InputBox({required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+        decoration: BoxDecoration(
+          color: Tga.cardAlt,
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: Tga.border),
         ),
+        child: child,
       );
 }
 

@@ -6,8 +6,11 @@
 ///   * 本地模型 = 真实扫描 downloads/ 与 models/ 目录里**已完成**的 .gguf/.bin
 ///     权重文件（.partN 分片与下载 sidecar 不会被误算），下载完即自动出现。
 ///   * 内置引擎 = 开箱即用的兜底项，始终本地可用。
+///   * 内置免费模型 = Kilo Code 网关的 OpenAI 兼容免费端点（无需 API 密钥），
+///     全部经 curl 实测可调（见 [kBuiltinFreeModels]），归入选择器「内置」区。
 ///
-/// 不把「还没下载」的商店 catalog 塞进选择器，也不预置任何编造的模型名。
+/// 不把「还没下载」的商店 catalog 塞进选择器，也不预置任何编造的模型名或
+/// 未实测调通的端点。
 /// 选中云端模型后 [chatParams] 会产出真实 api_base / api_key / model，
 /// 由 TangramAiProvider 注入聊天请求，让后端真正发起 HTTP 推理。
 
@@ -31,6 +34,7 @@ class ModelEntry {
     this.path,
     this.size,
     this.builtin = false,
+    this.free = false,
   });
 
   final String id;
@@ -51,13 +55,20 @@ class ModelEntry {
   /// 是否为内置兜底引擎（不可删除）。
   final bool builtin;
 
-  String get tag => kind == ModelKind.cloud ? '云端' : '本地';
+  /// 内置免费云端模型：无需 API 密钥即可真实推理（端点已 curl 实测）。
+  final bool free;
+
+  String get tag =>
+      free ? '云端·免费' : (kind == ModelKind.cloud ? '云端' : '本地');
 
   /// 右下角与选择器里展示的名字，带（本地）/（云端）标记。
   String get displayName => '$name（$tag）';
 
   /// 选择器副标题：如实说明来源，不夸大能力。
   String get subtitle {
+    if (free) {
+      return '免费·无需密钥 · Kilo 网关 OpenAI 兼容 · ${modelId ?? ''}';
+    }
     if (builtin) return '内置 AgentLoop · 表达式 / 工具 / 记忆 / 自检，离线可用';
     if (kind == ModelKind.cloud) {
       return 'OpenAI 兼容 API · ${apiBase ?? ''} · ${modelId ?? ''}';
@@ -95,6 +106,72 @@ final ModelEntry kBuiltinEngine = const ModelEntry(
   builtin: true,
 );
 
+/// 内置免费云端模型（Kilo Code 网关，OpenAI 兼容，无需 API 密钥）。
+///
+/// 2026-11-14 全部 curl 实测通过（HTTP 200、返回真实 content、usage.cost=0、
+/// 请求不带 Authorization 头）：
+///   * 模型列表：GET https://api.kilo.ai/api/gateway/models（isFree=true 档）
+///   * 推理端点：POST https://api.kilo.ai/api/gateway/chat/completions
+/// 下方 6 个 id 均取自该列表接口真实返回，且逐个实测过
+/// system+user+temperature+max_tokens+top_p 完整请求体（与后端
+/// _remoteChat 发出的请求一致）可正常作答。禁止注册未实测调通的模型。
+final List<ModelEntry> kBuiltinFreeModels = <ModelEntry>[
+  const ModelEntry(
+    id: 'kilo-free:kilo-auto/free',
+    name: 'Kilo Auto 免费路由',
+    kind: ModelKind.cloud,
+    apiBase: 'https://api.kilo.ai/api/gateway',
+    modelId: 'kilo-auto/free',
+    builtin: true,
+    free: true,
+  ),
+  const ModelEntry(
+    id: 'kilo-free:liquid/lfm-3-1.7b:free',
+    name: 'Liquid LFM3 1.7B',
+    kind: ModelKind.cloud,
+    apiBase: 'https://api.kilo.ai/api/gateway',
+    modelId: 'liquid/lfm-3-1.7b:free',
+    builtin: true,
+    free: true,
+  ),
+  const ModelEntry(
+    id: 'kilo-free:baidu/ernie-5.5-flash-preview:free',
+    name: '文心 ERNIE 5.5 Flash',
+    kind: ModelKind.cloud,
+    apiBase: 'https://api.kilo.ai/api/gateway',
+    modelId: 'baidu/ernie-5.5-flash-preview:free',
+    builtin: true,
+    free: true,
+  ),
+  const ModelEntry(
+    id: 'kilo-free:cohere/north-mini-code:free',
+    name: 'Cohere North Mini Code',
+    kind: ModelKind.cloud,
+    apiBase: 'https://api.kilo.ai/api/gateway',
+    modelId: 'cohere/north-mini-code:free',
+    builtin: true,
+    free: true,
+  ),
+  const ModelEntry(
+    id: 'kilo-free:particle-ai/particle-1:free',
+    name: 'Particle AI 1',
+    kind: ModelKind.cloud,
+    apiBase: 'https://api.kilo.ai/api/gateway',
+    modelId: 'particle-ai/particle-1:free',
+    builtin: true,
+    free: true,
+  ),
+  const ModelEntry(
+    id: 'kilo-free:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+    name: 'NVIDIA Nemotron 3 Nano 30B',
+    kind: ModelKind.cloud,
+    apiBase: 'https://api.kilo.ai/api/gateway',
+    modelId: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+    builtin: true,
+    free: true,
+  ),
+];
+
 class ModelRegistry extends ChangeNotifier {
   ModelRegistry._(this.store);
 
@@ -122,13 +199,18 @@ class ModelRegistry extends ChangeNotifier {
 
   bool get loaded => _loaded;
 
-  /// 云端 + 本地 + 内置兜底，用户添加的模型排在前面。
+  /// 云端 + 本地 + 内置免费云端（Kilo）+ 内置兜底，用户添加的模型排在前面。
   List<ModelEntry> get entries =>
       List<ModelEntry>.unmodifiable(<ModelEntry>[
         ..._cloud,
         ..._local,
+        ...kBuiltinFreeModels,
         kBuiltinEngine,
       ]);
+
+  /// 内置免费模型（选择器「内置」区，无需密钥即可真实推理）。
+  List<ModelEntry> get freeEntries =>
+      List<ModelEntry>.unmodifiable(kBuiltinFreeModels);
 
   List<ModelEntry> get cloudEntries => List<ModelEntry>.unmodifiable(_cloud);
   List<ModelEntry> get localEntries => List<ModelEntry>.unmodifiable(_local);
@@ -186,10 +268,12 @@ class ModelRegistry extends ChangeNotifier {
     _local = local;
     // 选中的模型若已被删除/文件消失，诚实回退到内置引擎。
     final candidate = byId(sel);
-    // 额外防御：若选中的是云端模型但 API Key 为空（用户添加后未填/被清空），
-    // 直接回退内置引擎，避免开箱首条消息就 401，违背「无需联网」承诺。
+    // 额外防御：若选中的是用户自配云端模型但 API Key 为空（用户添加后未填/
+    // 被清空），直接回退内置引擎，避免开箱首条消息就 401，违背「无需联网」
+    // 承诺。内置免费模型（free=true）本就无需密钥，不受该防御影响。
     _selectedId = candidate != null &&
             !(candidate.kind == ModelKind.cloud &&
+                !candidate.free &&
                 (candidate.apiKey ?? '').trim().isEmpty)
         ? candidate.id
         : kBuiltinEngine.id;
@@ -254,11 +338,22 @@ class ModelRegistry extends ChangeNotifier {
   }
 
   /// 选中模型对应的真实聊天参数。
+  ///   * 内置免费模型 → 真实 api_base + model，api_key 为空并带 free=true，
+  ///     后端据此省略 Authorization 头直连 Kilo 网关真实推理（已 curl 实测）。
   ///   * 云端 → api_base / api_key / model，后端据此发起真实 HTTP 推理。
   ///   * 本地权重 → 带上真实权重路径与来源标记，后端如实记录，不冒充推理。
   ///   * 内置引擎 → 不带任何外部参数，走内置 AgentLoop。
   Map<String, dynamic> chatParams() {
     final e = selected;
+    if (e.free) {
+      return <String, dynamic>{
+        'api_base': e.apiBase ?? '',
+        'api_key': '',
+        'model': e.modelId ?? '',
+        'model_kind': 'cloud',
+        'free': true,
+      };
+    }
     if (e.kind == ModelKind.cloud) {
       return <String, dynamic>{
         'api_base': e.apiBase ?? '',

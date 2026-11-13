@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -9,6 +8,7 @@ import 'package:provider/provider.dart';
 import '../../bridge/backend_client.dart';
 import '../../design/tga_design.dart';
 import '../../services/persona_store.dart';
+import '../../services/ssh_workspace.dart';
 
 /// 工作区域（真实化改造）：
 /// - 「工作区」列表来自 PersonaStore.workspaceRoot 指向的真实目录：
@@ -16,8 +16,9 @@ import '../../services/persona_store.dart';
 ///   不存在显示「未初始化」；⋮ 菜单支持设为当前 / 重命名（改记录别名）/ 删除。
 /// - 「本地工作区」= device_file mkdir 真实创建目录 + setWorkspaceRoot
 ///   + rpc sandbox_policy_set{environment:'工作区沙箱'}。
-/// - 「SSH 远程工作区」= 表单 + Socket.connect 真实 TCP 可达性测试
-///   （明确不做假认证），成功后配置存 flutter_secure_storage。
+/// - 「SSH 远程工作区」= dartssh2 真实握手与认证（密码 / 私钥），
+///   「连接测试」实际登录远端并 exec `echo ok` 验证、取回 `uname -a`；
+///   点条目进入真实 sftp 目录浏览。配置与凭据存 flutter_secure_storage。
 class TgaWorkspacePage extends StatefulWidget {
   const TgaWorkspacePage({super.key});
 
@@ -26,13 +27,15 @@ class TgaWorkspacePage extends StatefulWidget {
 }
 
 class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
-  /// SSH 配置与本地工作区别名的安全存储 key。
+  /// 本地工作区别名的安全存储 key。
   static const FlutterSecureStorage _storage = FlutterSecureStorage();
-  static const String _sshKey = 'tangram.ssh.v1';
   static const String _aliasKey = 'tangram.workspace.alias.v1';
 
   /// 本地工作区在 App 沙箱内的相对目录（device_file 以此为根）。
   static const String _localRel = 'workspace';
+
+  /// SSH 远程工作区服务（真实握手/认证/sftp + 配置加密持久化）。
+  final SshWorkspace _sshWs = SshWorkspace();
 
   /// 沙箱根绝对路径（device_file status 返回的 roots[0]）。
   String _sandboxRoot = '';
@@ -42,8 +45,8 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
   bool _loading = true;
   String _loadError = '';
 
-  /// 已保存的 SSH 配置（tangram.ssh.v1），null 表示尚未配置。
-  Map<String, dynamic>? _ssh;
+  /// 已保存的 SSH 配置，null 表示尚未配置。
+  SshWorkspaceConfig? _ssh;
 
   /// workspaceRoot 绝对路径 -> 展示别名（重命名只改记录，不动磁盘）。
   Map<String, String> _aliases = <String, String>{};
@@ -72,11 +75,8 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
         _sandboxRoot =
             (roots is List && roots.isNotEmpty) ? roots.first.toString() : '';
       }
-      // 2) 读 SSH 配置与别名。
-      final String? sshRaw = await _storage.read(key: _sshKey);
-      _ssh = (sshRaw != null && sshRaw.isNotEmpty)
-          ? Map<String, dynamic>.from(jsonDecode(sshRaw) as Map)
-          : null;
+      // 2) 读 SSH 配置（安全存储）与别名。
+      _ssh = await _sshWs.load();
       final String? aliasRaw = await _storage.read(key: _aliasKey);
       _aliases = (aliasRaw != null && aliasRaw.isNotEmpty)
           ? Map<String, String>.from(
@@ -240,42 +240,19 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
   }
 
   // ---------------------------------------------------------------------------
-  // SSH 远程工作区
+  // SSH 远程工作区（dartssh2 真实握手/认证 + sftp 浏览）
   // ---------------------------------------------------------------------------
 
   Future<void> _createSshWorkspace() async {
     final bool? saved = await showDialog<bool>(
       context: context,
-      builder: (BuildContext ctx) => _SshFormDialog(
-        initial: _ssh,
-        onConnected: (Map<String, dynamic> cfg) async {
-          // TCP 可达后：配置落盘 + 环境切「远端沙箱（SSH）」。
-          await _storage.write(key: _sshKey, value: jsonEncode(cfg));
-          if (!mounted) return;
-          final PersonaStore persona = context.read<PersonaStore>();
-          persona.setSandboxEnvironment('远端沙箱（SSH）');
-          final BackendClient client = context.read<BackendClient>();
-          try {
-            await client.sendControl('rpc', <String, dynamic>{
-              'action': 'sandbox_policy_set',
-              'environment': '远端沙箱（SSH）',
-            });
-          } on Object {
-            // 后端未就绪：本地记录已保存，如实说明。
-          }
-        },
-      ),
+      builder: (BuildContext ctx) =>
+          _SshFormDialog(initial: _ssh, workspace: _sshWs),
     );
     if (saved == true) {
-      _ssh = await _readSsh();
+      _ssh = await _sshWs.load();
       if (mounted) setState(() {});
     }
-  }
-  Future<Map<String, dynamic>?> _readSsh() async {
-    final String? raw = await _storage.read(key: _sshKey);
-    return (raw != null && raw.isNotEmpty)
-        ? Map<String, dynamic>.from(jsonDecode(raw) as Map)
-        : null;
   }
 
   Future<void> _setSshCurrent() async {
@@ -287,7 +264,7 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
         'action': 'sandbox_policy_set',
         'environment': '远端沙箱（SSH）',
       });
-      _toast('已切换为远端沙箱（SSH）');
+      _toast('已将远端设为当前工作区（仅浏览与展示，Agent 写文件仍走本地）');
     } on Object {
       _toast('已切换（沙箱策略未同步：后端未就绪）');
     }
@@ -298,16 +275,23 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
     final PersonaStore persona = context.read<PersonaStore>();
     final bool ok = await _confirm(
       title: '删除 SSH 工作区配置？',
-      message: '将清除本机加密保存的连接配置；不会断开远端任何服务。',
+      message: '将清除本机加密保存的连接配置与凭据；不会断开远端任何服务。',
     );
     if (!ok) return;
-    await _storage.delete(key: _sshKey);
+    await _sshWs.delete();
     _ssh = null;
     if (persona.sandboxEnvironment == '远端沙箱（SSH）') {
       persona.setSandboxEnvironment('内置沙箱');
     }
     if (mounted) setState(() {});
     _toast('SSH 配置已清除');
+  }
+
+  void _openSshBrowser(SshWorkspaceConfig cfg) {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (BuildContext _) =>
+          _SshBrowserPage(config: cfg, workspace: _sshWs),
+    ));
   }
 
   // ---------------------------------------------------------------------------
@@ -404,7 +388,7 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
               iconBg: Tga.iconPurpleBg,
               iconColor: Tga.iconPurple,
               title: 'SSH 远程工作区',
-              subtitle: '配置主机并测试 TCP 可达性',
+              subtitle: '真实 SSH 握手认证（密码/私钥），sftp 浏览远端目录',
               onTap: () {
                 Navigator.of(ctx).pop();
                 _createSshWorkspace();
@@ -485,7 +469,7 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
                     iconBg: Tga.iconPurpleBg,
                     iconColor: Tga.iconPurple,
                     title: 'SSH 远程工作区',
-                    subtitle: '连接自己的服务器（TCP 可达性测试）',
+                    subtitle: '连接自己的服务器（真实握手认证 + sftp 浏览）',
                     onTap: _createSshWorkspace,
                   ),
                 ],
@@ -495,9 +479,13 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4),
               child: Text(
-                '工作区为 Agent 提供隔离的可写目录；SSH 配置加密存于本机。'
-                '「连接测试」只验证端口 TCP 可达（Socket.connect，5 秒超时），'
-                '不做真实认证，也不代表已登录远端。',
+                '工作区为 Agent 提供隔离的可写目录。SSH 远程工作区基于 dartssh2 '
+                '与远端完成真实 TCP + SSH 握手与认证（密码 / 私钥，私钥可带口令）：'
+                '「连接测试」会实际登录远端、执行 `echo ok` 验证命令通道，'
+                '并取回 `uname -a` 系统信息；点远端条目可用真实 sftp 浏览目录。'
+                '连接配置与凭据加密存于本机（FlutterSecureStorage），不落明文磁盘。'
+                '将远端设为当前工作区后仅用于浏览与展示，Agent 写文件仍在本地'
+                '沙箱目录进行。',
                 style: Tga.caption,
               ),
             ),
@@ -539,7 +527,10 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
                             style: Tga.body,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis)),
-                    if (!sshCurrent) TgaTag('当前', color: Tga.primary),
+                    if (!sshCurrent)
+                      TgaTag('当前', color: Tga.primary)
+                    else
+                      TgaTag('写入位置', color: Tga.gold),
                     const SizedBox(width: 6),
                     TgaTag(label, color: color),
                   ],
@@ -568,13 +559,13 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
   }
 
   Widget _sshCard(bool sshCurrent) {
-    final Map<String, dynamic> cfg = _ssh!;
-    final String host = (cfg['host'] ?? '').toString();
-    final String port = (cfg['port'] ?? 22).toString();
-    final String user = (cfg['user'] ?? '').toString();
-    final String tested = (cfg['tested_at'] ?? '').toString();
+    final SshWorkspaceConfig cfg = _ssh!;
+    final bool verified = cfg.verifiedAt.isNotEmpty;
+    final String verifiedAt =
+        cfg.verifiedAt.length >= 16 ? cfg.verifiedAt.substring(0, 16).replaceAll('T', ' ') : cfg.verifiedAt;
     return TgaCard(
       padding: const EdgeInsets.all(14),
+      onTap: () => _openSshBrowser(cfg),
       child: Row(
         children: <Widget>[
           Container(
@@ -601,19 +592,31 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
                             overflow: TextOverflow.ellipsis)),
                     if (sshCurrent) TgaTag('当前', color: Tga.primary),
                     const SizedBox(width: 6),
-                    TgaTag('TCP 可达', color: Tga.cyan),
+                    TgaTag('远端', color: Tga.purple),
+                    const SizedBox(width: 6),
+                    TgaTag(verified ? '已验证' : '未验证',
+                        color: verified ? Tga.green : Tga.orange),
                   ],
                 ),
                 const SizedBox(height: 6),
-                Text('$user@$host:$port'
-                    '${tested.isEmpty ? '' : ' · 测试于 $tested'}',
+                Text(
+                    '${cfg.user}@${cfg.host}:${cfg.port} · ${cfg.auth}认证'
+                    '${verified ? ' · 验证于 $verifiedAt' : ''}',
                     style: Tga.sub,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis),
+                if (verified && cfg.remoteInfo.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(cfg.remoteInfo,
+                        style: Tga.caption,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis),
+                  ),
               ],
             ),
           ),
-          _MoreMenu(onSelected: (String v) {
+          _MoreMenu(renameLabel: '编辑配置', onSelected: (String v) {
             switch (v) {
               case 'current':
                 _setSshCurrent();
@@ -630,8 +633,9 @@ class _TgaWorkspacePageState extends State<TgaWorkspacePage> {
 }
 
 class _MoreMenu extends StatelessWidget {
-  const _MoreMenu({required this.onSelected});
+  const _MoreMenu({required this.onSelected, this.renameLabel = '重命名'});
   final ValueChanged<String> onSelected;
+  final String renameLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -643,7 +647,7 @@ class _MoreMenu extends StatelessWidget {
         PopupMenuItem<String>(
             value: 'current', child: Text('设为当前', style: Tga.body)),
         PopupMenuItem<String>(
-            value: 'rename', child: Text('重命名', style: Tga.body)),
+            value: 'rename', child: Text(renameLabel, style: Tga.body)),
         PopupMenuItem<String>(
             value: 'delete',
             child: Text('删除', style: TextStyle(color: Tga.red, fontSize: 14))),
@@ -653,13 +657,13 @@ class _MoreMenu extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// SSH 表单：主机/端口/用户名/认证方式 + 真实 TCP 可达性测试
+// SSH 表单：主机/端口/用户名/认证方式（密码/私钥）+ dartssh2 真实握手认证测试
 // ---------------------------------------------------------------------------
 class _SshFormDialog extends StatefulWidget {
-  const _SshFormDialog({required this.initial, required this.onConnected});
+  const _SshFormDialog({required this.initial, required this.workspace});
 
-  final Map<String, dynamic>? initial;
-  final Future<void> Function(Map<String, dynamic> cfg) onConnected;
+  final SshWorkspaceConfig? initial;
+  final SshWorkspace workspace;
 
   @override
   State<_SshFormDialog> createState() => _SshFormDialogState();
@@ -669,18 +673,26 @@ class _SshFormDialogState extends State<_SshFormDialog> {
   late final TextEditingController _host;
   late final TextEditingController _port;
   late final TextEditingController _user;
+  late final TextEditingController _secret;
+  late final TextEditingController _passphrase;
   late String _auth;
 
   bool _testing = false;
+  bool _ok = false;
   String _result = '';
+
+  bool get _isKey => _auth == '私钥';
 
   @override
   void initState() {
     super.initState();
-    _host = TextEditingController(text: (widget.initial?['host'] ?? '').toString());
-    _port = TextEditingController(text: (widget.initial?['port'] ?? '22').toString());
-    _user = TextEditingController(text: (widget.initial?['user'] ?? '').toString());
-    _auth = (widget.initial?['auth'] ?? '密码').toString();
+    final SshWorkspaceConfig? ini = widget.initial;
+    _host = TextEditingController(text: ini?.host ?? '');
+    _port = TextEditingController(text: (ini?.port ?? 22).toString());
+    _user = TextEditingController(text: ini?.user ?? '');
+    _auth = ini?.auth ?? '密码';
+    _secret = TextEditingController(text: ini?.secret ?? '');
+    _passphrase = TextEditingController(text: ini?.passphrase ?? '');
   }
 
   @override
@@ -688,59 +700,84 @@ class _SshFormDialogState extends State<_SshFormDialog> {
     _host.dispose();
     _port.dispose();
     _user.dispose();
+    _secret.dispose();
+    _passphrase.dispose();
     super.dispose();
   }
 
-  /// 真实 TCP 探测：仅验证端口可达，不做任何认证。
+  /// 真实连接测试：dartssh2 握手 + 认证 + exec `echo ok` 验证 + `uname -a`。
+  /// 成功后立即把配置（含 verifiedAt / uname）写入安全存储。
   Future<void> _testConnection() async {
     final String host = _host.text.trim();
     final int port = int.tryParse(_port.text.trim()) ?? 0;
-    if (host.isEmpty || port < 1 || port > 65535) {
-      setState(() => _result = '请填写有效主机与端口（1~65535）');
+    final String user = _user.text.trim();
+    final String secret = _isKey ? _secret.text : _secret.text.trim();
+    if (host.isEmpty || port < 1 || port > 65535 || user.isEmpty) {
+      setState(() {
+        _ok = false;
+        _result = '请填写有效主机、用户名与端口（1~65535）';
+      });
+      return;
+    }
+    if (secret.isEmpty) {
+      setState(() {
+        _ok = false;
+        _result = _isKey ? '请粘贴 OpenSSH 私钥文本' : '请输入密码';
+      });
       return;
     }
     setState(() {
       _testing = true;
+      _ok = false;
       _result = '';
     });
-    String err = '';
-    try {
-      final Socket socket =
-          await Socket.connect(host, port, timeout: const Duration(seconds: 5));
-      socket.destroy();
-    } on SocketException catch (e) {
-      err = e.osError?.message ?? e.message;
-    } on TimeoutException {
-      err = '连接超时（5 秒）';
-    } on Object catch (e) {
-      err = '$e';
-    }
+    final SshWorkspaceConfig cfg = SshWorkspaceConfig(
+      host: host,
+      port: port,
+      user: user,
+      auth: _auth,
+      secret: secret,
+      passphrase: _passphrase.text,
+    );
+    final SshConnectResult r = await widget.workspace.testConnection(cfg);
     if (!mounted) return;
-    if (err.isEmpty) {
-      final Map<String, dynamic> cfg = <String, dynamic>{
-        'host': host,
-        'port': port,
-        'user': _user.text.trim(),
-        'auth': _auth,
-        'tested_at': DateTime.now().toIso8601String().substring(0, 19),
-      };
-      await widget.onConnected(cfg);
-      if (mounted) Navigator.of(context).pop(true);
-    } else {
+    if (!r.ok) {
       setState(() {
         _testing = false;
-        _result = 'TCP 不可达：$err';
+        _result = r.error;
       });
+      return;
     }
+    final SshWorkspaceConfig saved = cfg.copyWith(
+      verifiedAt: DateTime.now().toIso8601String().substring(0, 19),
+      remoteInfo: r.uname,
+    );
+    try {
+      await widget.workspace.save(saved);
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _testing = false;
+        _result = '连接成功，但配置保存失败：$e';
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _testing = false;
+      _ok = true;
+      _result = '握手成功 · ${r.remoteVersion}\n远端：${r.uname}';
+    });
   }
 
   Widget _field(String label, TextEditingController ctrl,
-      {String? hint, TextInputType? keyboard}) {
+      {String? hint, TextInputType? keyboard, bool obscure = false}) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 5),
       child: TextField(
         controller: ctrl,
         keyboardType: keyboard,
+        obscureText: obscure,
         decoration: InputDecoration(
             labelText: label, hintText: hint, isDense: true),
         style: Tga.body,
@@ -756,70 +793,307 @@ class _SshFormDialogState extends State<_SshFormDialog> {
       title: Text('SSH 远程工作区', style: Tga.h2),
       content: SizedBox(
         width: 320,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            _field('主机', _host, hint: '如 192.168.1.10'),
-            _field('端口', _port, hint: '22', keyboard: TextInputType.number),
-            _field('用户名', _user, hint: '如 deploy'),
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 5),
-              child: Row(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              _field('主机', _host, hint: '如 192.168.1.10'),
+              _field('端口', _port, hint: '22', keyboard: TextInputType.number),
+              _field('用户名', _user, hint: '如 deploy'),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 5),
+                child: Row(
+                  children: <Widget>[
+                    Text('认证方式', style: Tga.sub),
+                    const SizedBox(width: 12),
+                    DropdownButton<String>(
+                      value: _auth,
+                      underline: const SizedBox.shrink(),
+                      items: const <DropdownMenuItem<String>>[
+                        DropdownMenuItem<String>(value: '密码', child: Text('密码')),
+                        DropdownMenuItem<String>(value: '私钥', child: Text('私钥')),
+                      ],
+                      onChanged: (String? v) => setState(() {
+                        _auth = v ?? '密码';
+                        _ok = false;
+                        _result = '';
+                      }),
+                    ),
+                  ],
+                ),
+              ),
+              if (_isKey) ...<Widget>[
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 5),
+                  child: TextField(
+                    controller: _secret,
+                    maxLines: 4,
+                    decoration: const InputDecoration(
+                        labelText: '私钥文本',
+                        hintText: '-----BEGIN OPENSSH PRIVATE KEY-----',
+                        isDense: true),
+                    style: TextStyle(fontSize: 12, color: Tga.text),
+                  ),
+                ),
+                _field('密钥口令（加密私钥时填写）', _passphrase, obscure: true),
+              ] else
+                _field('密码', _secret, obscure: true),
+              const SizedBox(height: 4),
+              Text(
+                '「连接测试」用 dartssh2 真实登录远端：完成 TCP + SSH 握手、'
+                '密码/私钥认证，并实际执行 `echo ok` 与 `uname -a` 验证。'
+                '通过后配置与凭据加密存于本机。',
+                style: Tga.caption,
+              ),
+              if (_result.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 8),
+                Text(_result,
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: _ok ? Tga.green : Tga.red,
+                        height: 1.4)),
+              ],
+              const SizedBox(height: 12),
+              Row(
                 children: <Widget>[
-                  Text('认证方式', style: Tga.sub),
-                  const SizedBox(width: 12),
-                  DropdownButton<String>(
-                    value: _auth,
-                    underline: const SizedBox.shrink(),
-                    items: const <DropdownMenuItem<String>>[
-                      DropdownMenuItem<String>(value: '密码', child: Text('密码')),
-                      DropdownMenuItem<String>(value: '私钥', child: Text('私钥')),
-                    ],
-                    onChanged: (String? v) =>
-                        setState(() => _auth = v ?? '密码'),
+                  Expanded(
+                    child: TgaButton(
+                        label: '取消',
+                        onTap: () => Navigator.of(context).pop(false),
+                        filled: false),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _testing
+                        ? Center(
+                            child: SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2.4, color: Tga.primary)))
+                        : TgaButton(
+                            label: _ok ? '完成' : '连接测试',
+                            onTap: () {
+                              if (_ok) {
+                                Navigator.of(context).pop(true);
+                              } else {
+                                _testConnection();
+                              }
+                            },
+                          ),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '「连接测试」用 Socket.connect 真实探测端口 TCP 可达性（5 秒超时），'
-              '不做假认证；密码/私钥不会保存到本机。',
-              style: Tga.caption,
-            ),
-            if (_result.isNotEmpty) ...<Widget>[
-              const SizedBox(height: 8),
-              Text(_result,
-                  style: TextStyle(fontSize: 12, color: Tga.red)),
             ],
-            const SizedBox(height: 12),
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: TgaButton(
-                      label: '取消',
-                      onTap: () => Navigator.of(context).pop(false),
-                      filled: false),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _testing
-                      ? Center(
-                          child: SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 2.4, color: Tga.primary)))
-                      : TgaButton(
-                          label: '连接测试',
-                          onTap: _testConnection),
-                ),
-              ],
-            ),
-          ],
+          ),
         ),
       ),
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// 远端目录浏览：真实 sftp listdir（目录/文件 + 大小 + mtime）
+// ---------------------------------------------------------------------------
+class _SshBrowserPage extends StatefulWidget {
+  const _SshBrowserPage({required this.config, required this.workspace});
+
+  final SshWorkspaceConfig config;
+  final SshWorkspace workspace;
+
+  @override
+  State<_SshBrowserPage> createState() => _SshBrowserPageState();
+}
+
+class _SshBrowserPageState extends State<_SshBrowserPage> {
+  String _path = '';
+  List<SshDirEntry> _entries = <SshDirEntry>[];
+  bool _loading = true;
+  String _error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load('');
+  }
+
+  /// [path] 为空串时由服务端解析远端登录用户 home 目录。
+  Future<void> _load(String path) async {
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
+    try {
+      final SshListing listing = await widget.workspace.listDir(
+        widget.config,
+        path,
+      );
+      if (!mounted) return;
+      setState(() {
+        _path = listing.path;
+        _entries = listing.entries;
+        _loading = false;
+      });
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = SshWorkspace.describeError(e);
+      });
+    }
+  }
+
+  String _join(String dir, String name) =>
+      dir.endsWith('/') ? '$dir$name' : '$dir/$name';
+
+  String get _parent {
+    if (_path.isEmpty || _path == '/') return _path;
+    final int i = _path.lastIndexOf('/');
+    return i <= 0 ? '/' : _path.substring(0, i);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final SshWorkspaceConfig cfg = widget.config;
+    return TgaPage(
+      title: '远端目录',
+      actions: <Widget>[
+        IconButton(
+          icon: Icon(Icons.refresh_rounded, color: Tga.primary),
+          tooltip: '刷新',
+          onPressed: () => _load(_path),
+        ),
+      ],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 2, Tga.pagePad, 2),
+            child: Row(
+              children: <Widget>[
+                IconButton(
+                  icon: Icon(Icons.arrow_upward_rounded,
+                      size: 20,
+                      color: (_path.isEmpty || _path == '/')
+                          ? Tga.textDim
+                          : Tga.primary),
+                  tooltip: '上级目录',
+                  onPressed: (_loading || _path.isEmpty || _path == '/')
+                      ? null
+                      : () => _load(_parent),
+                ),
+                Expanded(
+                  child: Text(_loading && _path.isEmpty ? '连接中…' : _path,
+                      style: Tga.sub,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Tga.pagePad, 0, Tga.pagePad, 6),
+            child: Text(
+              '${cfg.user}@${cfg.host}:${cfg.port} · 真实 sftp 浏览，'
+              '仅供查看；Agent 写文件仍走本地沙箱目录。',
+              style: Tga.caption,
+            ),
+          ),
+          Expanded(
+            child: _buildBody(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_loading) {
+      return Center(
+        child: SizedBox(
+            width: 26,
+            height: 26,
+            child:
+                CircularProgressIndicator(strokeWidth: 2.4, color: Tga.primary)),
+      );
+    }
+    if (_error.isNotEmpty) {
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(Tga.pagePad, 6, Tga.pagePad, 32),
+        children: <Widget>[
+          TgaCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(_error,
+                    style: TextStyle(fontSize: 13, color: Tga.red, height: 1.4)),
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TgaButton(label: '重试', onTap: () => _load(_path)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+    if (_entries.isEmpty) {
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(Tga.pagePad, 6, Tga.pagePad, 32),
+        children: const <Widget>[
+          TgaCard(
+            child: TgaEmpty('空目录', icon: Icons.folder_open_outlined),
+          ),
+        ],
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: () => _load(_path),
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(Tga.pagePad, 6, Tga.pagePad, 32),
+        children: <Widget>[
+          TgaCard(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Column(
+              children: <Widget>[
+                for (int i = 0; i < _entries.length; i++) ...<Widget>[
+                  if (i > 0) const TgaTileDivider(),
+                  _entryTile(_entries[i]),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _entryTile(SshDirEntry e) {
+    return TgaIconTile(
+      icon: e.isDirectory ? Icons.folder_rounded : Icons.description_outlined,
+      iconBg: e.isDirectory ? Tga.iconGoldBg : Tga.iconBlueBg,
+      iconColor: e.isDirectory ? Tga.iconGold : Tga.iconBlue,
+      title: e.name,
+      subtitle: e.isDirectory
+          ? '目录'
+          : '${_fmtSize(e.size)} · ${_fmtMtime(e.mtime)}',
+      showArrow: e.isDirectory,
+      onTap: e.isDirectory ? () => _load(_join(_path, e.name)) : null,
+    );
+  }
+}
+
+String _fmtSize(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1048576) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  if (bytes < 1073741824) return '${(bytes / 1048576).toStringAsFixed(1)} MB';
+  return '${(bytes / 1073741824).toStringAsFixed(2)} GB';
+}
+
+String _fmtMtime(DateTime? d) {
+  if (d == null) return '时间未知';
+  String two(int v) => v.toString().padLeft(2, '0');
+  return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
 }

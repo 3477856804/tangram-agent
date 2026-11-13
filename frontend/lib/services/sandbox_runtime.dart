@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
 import 'package:tangram/bridge/backend_client.dart';
 import 'package:tangram/services/persona_store.dart';
+import 'package:tangram/services/ssh_sandbox.dart';
 
 enum PythonRuntimeState { unknown, available, unavailable }
 
@@ -22,7 +24,14 @@ class SandboxRuntime extends ChangeNotifier {
   final BackendClient backend;
   final PersonaStore? persona;
 
-  static const List<String> environments = <String>['内置沙箱', 'TCP 桥', '仅本地'];
+  /// 「远端沙箱（SSH）」= dartssh2 真实 SSH 会话：终端所有命令在远端
+  /// 真实 Linux 执行（apt/pkg/pip/python 全真），配置见沙箱终端「⚙」。
+  static const List<String> environments = <String>[
+    '内置沙箱',
+    '远端沙箱（SSH）',
+    'TCP 桥',
+    '仅本地',
+  ];
 
   PythonRuntimeState python = PythonRuntimeState.unknown;
   bool starting = false;
@@ -108,7 +117,26 @@ class SandboxRuntime extends ChangeNotifier {
     if (!environments.contains(value)) return;
     persona?.setSandboxEnvironment(value);
     notice = null;
+    if (value != '远端沙箱（SSH）') {
+      // 切离远端：真实断开 SSH 会话，不留悬空连接。
+      SshSandbox.instance.disconnect();
+    }
+    // 同步后端沙箱策略（code_task shell 路由按此分流），失败如实提示。
+    unawaited(_syncBackendEnvironment(value));
     notifyListeners();
+  }
+
+  Future<void> _syncBackendEnvironment(String value) async {
+    try {
+      await backend.sendControl('rpc', <String, dynamic>{
+        'action': 'sandbox_policy_set',
+        'environment': value,
+      });
+    } on Object {
+      notice = '环境已在本机保存；后端策略同步失败（后端未就绪），'
+          '终端将按后端当前环境执行。';
+      notifyListeners();
+    }
   }
 
   void clearNotice() {

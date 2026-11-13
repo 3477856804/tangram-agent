@@ -41,7 +41,9 @@ import 'package:tangram/harness/downloader.dart';
 import 'package:tangram/harness/im_service.dart';
 import 'package:tangram/harness/local_inference.dart';
 import 'package:tangram/harness/mcp_client.dart';
+import 'package:tangram/harness/proot_sandbox.dart';
 import 'package:tangram/harness/store.dart';
+import 'package:tangram/services/ssh_sandbox.dart';
 import 'package:tangram/services/update_service.dart';
 
 /// 后端一次 dispatch 的结果：结构化 payload + 可选的 hot-path 事件。
@@ -67,6 +69,9 @@ class EmbeddedBackend {
   late final ImService im;
 
   final ToolRegistry tools = ToolRegistry();
+
+  /// Android「Debian 用户态（proot）」扩展包：真实下载/解包/proot 执行。
+  late final ProotSandbox proot = ProotSandbox(store, downloads);
   /// MCP 真实接入：HTTP/SSE 传输的服务端工具会被注册进 [tools]，
   /// 由内置 AgentLoop 直接调用；stdio 传输移动端无法 spawn 进程，如实跳过。
   final Map<String, McpClient> _mcpClients = <String, McpClient>{};
@@ -461,6 +466,9 @@ class EmbeddedBackend {
     // 深度思考 / 智能搜索：由输入区的两个真实开关传入。
     final bool wantThinking = p['thinking'] == true;
     final bool wantSearch = p['search'] == true;
+    // 内置免费云端模型（如 Kilo 网关 :free 档）：curl 实测无 Authorization
+    // 头即可 200 返回且 cost=0，允许 api_key 为空走真实远程推理。
+    final bool freeApi = p['free'] == true;
     String effectiveSystem = system;
     String modeSuffix = '';
     if (wantSearch) {
@@ -474,9 +482,16 @@ class EmbeddedBackend {
       modeSuffix += '+web-search';
     }
     if (wantThinking) modeSuffix += '+deep-think';
+    // 问题 #25：真实技能池——已启用的本地技能注入对话 system prompt；
+    // 停用的技能被过滤，不进对话（云端与本地推理两条路径都生效）。
+    final skillPool = await _enabledSkillPool();
+    if (skillPool.isNotEmpty) {
+      effectiveSystem += '\n\n【本地技能池（已启用，可在回答中运用）】\n$skillPool';
+    }
     String reply;
     String engine;
-    if (apiBase.isNotEmpty && apiKey.isNotEmpty && model.isNotEmpty) {
+    if (apiBase.isNotEmpty && model.isNotEmpty &&
+        (apiKey.isNotEmpty || freeApi)) {
       // 1) 显式配置 OpenAI 兼容 API → 真实 HTTP 推理。
       String query = text;
       if (wantThinking) {
@@ -603,7 +618,9 @@ class EmbeddedBackend {
             uri,
             headers: <String, String>{
               'Content-Type': 'application/json',
-              'Authorization': 'Bearer $apiKey',
+              // 免费端点（Kilo :free）实测不带 Authorization 头即可 200；
+              // 空 Key 时省略该头，避免部分网关对 "Bearer " 直接 401。
+              if (apiKey.isNotEmpty) 'Authorization': 'Bearer $apiKey',
             },
             body: jsonEncode(<String, dynamic>{
               'model': model,
@@ -1188,6 +1205,8 @@ class EmbeddedBackend {
             ? 'run_test'
             : null;
     if (action == 'shell') return _shellExec(p);
+    if (action == 'debian_status') return proot.status();
+    if (action == 'debian_install') return await proot.install();
     if (cube == null) return _err('未知 code_task 动作：$action');
     final r = await SandboxedShell.instance.exec(
       cube,
@@ -1206,14 +1225,19 @@ class EmbeddedBackend {
     };
   }
 
-  /// 沙箱终端真实 shell（2026-11-13 全面 Linux 化）：
+  /// 沙箱终端真实 shell（2026-11-14 Linux 全真实执行）：
   ///
+  /// * 「远端沙箱（SSH）」：所有命令经 dartssh2 真实 SSH 会话在远端
+  ///   Linux 执行——apt/pkg/pip/python 全部真命令真输出；连接/认证失败
+  ///   如实报错，绝不回退本地冒充。
+  /// * 安卓「内置沙箱」+ 已装 Debian 扩展包：命令在 proot 用户态里
+  ///   真实执行（apk/python/pip 真跑）；ROM 拒绝 exec 时如实说明原因。
   /// * 桌面端（Linux/macOS）：命令交给系统 **bash/sh** 真实执行——
   ///   `apt`、`pkg-config`、`pip`、`curl`、`gcc`、`grep`、`sed`… 全部是
   ///   真命令，存在就真跑、不存在就如实 `command not found`。默认落在
   ///   App 私有 sandbox/ 目录，`cd` 可自由出入（和真 Linux 一样）。
-  /// * 安卓：走 /system/bin/sh（toybox 真实命令集）；无 root 时 apt 这类
-  ///   系统命令如实报权限/不存在，不模拟成功。
+  /// * 安卓未装扩展包：走 /system/bin/sh（toybox 真实命令集）；无 root 时
+  ///   apt 这类系统命令如实报权限/不存在，不模拟成功。
   /// * 真实 shell 起不来（平台限制/权限拒绝）才回退内置 Dart 解释器
   ///   （pwd ls cd cat echo mkdir touch rm mv cp head tail wc date
   ///   whoami uname help clear，限定 sandbox/ 根内），并在输出如实标注。
@@ -1222,14 +1246,32 @@ class EmbeddedBackend {
     if (raw.isEmpty) return _err('命令为空');
     final root = store.sub('sandbox').path;
     String cwd = (p['cwd'] ?? '.').toString();
-    final cwdCheck = cwd.startsWith('/') ? cwd : '$root/$cwd';
-    if (!Directory(cwdCheck).existsSync()) cwd = '.';
+
+    final String env = await _sandboxEnvironment();
+    final bool remoteSsh = env.contains('SSH');
+    final bool debianMode =
+        Platform.isAndroid && env == '内置沙箱' && proot.installed;
+
+    // 远端/用户态的 cwd 是远端/客户机路径，不做本地磁盘存在性校验。
+    if (!remoteSsh && !debianMode) {
+      final cwdCheck = cwd.startsWith('/') ? cwd : '$root/$cwd';
+      if (!Directory(cwdCheck).existsSync()) cwd = '.';
+    }
 
     // clear/help/纯算式保留内置语义（UI 依赖 clear 标记；算式走真实求值）。
     final firstWord = (raw.split(RegExp(r'\s+')).first).toLowerCase();
     final isExpression =
         RegExp(r'^[\d\s\+\-\*\/\%\(\)\.\,]+$').hasMatch(raw) && raw.isNotEmpty;
     if (firstWord != 'clear' && firstWord != 'help' && !isExpression) {
+      // ① 远端沙箱（SSH）：真实远端 Linux 执行。
+      if (remoteSsh) {
+        return SshSandbox.instance.run(raw, cwd);
+      }
+      // ② 安卓 Debian 用户态（proot）：apk/python/pip 真实执行。
+      if (debianMode) {
+        final viaDebian = await proot.run(raw, cwd);
+        if (viaDebian != null) return viaDebian;
+      }
       final real = await _realShellExec(raw, root, cwd);
       if (real != null) return real;
     }
@@ -1457,12 +1499,25 @@ class EmbeddedBackend {
         // 由前端识别：stdout 返回标记，页面清空屏幕。
         buf.writeln('\x1bclear\x1b');
       case 'help':
+        if (remoteSsh) {
+          buf.writeln('远端沙箱（SSH）：命令经真实 SSH 会话在远端 Linux 执行，');
+          buf.writeln('apt/pkg/pip/python 全部真命令真输出；pwd/cd 由远端 shell');
+          buf.writeln('提供（本终端仅 clear 与算式求值在本地）。');
+          buf.writeln('连接失败会如实报错；右上「⚙」可改主机与凭据。');
+          break;
+        }
         buf.writeln('内置沙箱 shell（真实文件操作，限定 sandbox/ 根内）：');
         buf.writeln('pwd ls [-l] cd cat echo mkdir touch rm [-r] mv cp');
         buf.writeln('head tail wc date whoami uname clear help');
         buf.writeln('表达式求值请直接输入算式，如 2+3*4');
         buf.writeln('注：本终端默认把命令交给系统真实 shell 执行，'
             'apt/pkg/pip/curl 等系统命令按本机真实情况响应。');
+        if (Platform.isAndroid) {
+          buf.writeln(debianMode
+              ? '当前已启用 Debian 用户态（proot）：apk/python 真实执行。'
+              : '安卓本机为 toybox；跑 apt 请装「Debian 扩展包」或切'
+                  '「远端沙箱（SSH）」。');
+        }
       default:
         // 表达式兜底：2+3*4 之类直接走真实求值（受限 Isolate）。
         if (RegExp(r'^[\d\s\+\-\*\/\%\(\)\.\,]+$').hasMatch(raw)) {
@@ -1824,6 +1879,10 @@ class EmbeddedBackend {
             ..headers['User-Agent'] =
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0'
             ..body = jsonEncode(<String, dynamic>{
+              // 2026-11-14 curl 实测：真正的搜索参数是 Name；只传 Query 会被
+              // 忽略并返回热门榜（旧实现的 bug：搜什么都出同样的榜单）。
+              // Query 字段保留，兼容接口未来恢复该参数名的可能。
+              'Name': q,
               'Query': q,
               'PageSize': 20,
               'PageNumber': 1,
@@ -2475,27 +2534,81 @@ class EmbeddedBackend {
       return _ok(<String, dynamic>{'name': name, 'source': '本地文件', 'installed': true});
     }
     // 技能：扫描随包/用户安装的 skills 目录（.md / .json 清单）。
+    // 问题 #25：正确解析 YAML frontmatter 取 name/description（旧实现拿
+    // 文件首行当描述，带 frontmatter 的文件把「---」直接显示到界面）；
+    // 并返回每条的启用状态（停用 = 不进对话技能池，见 _enabledSkillPool）。
     if (action == 'skills_list') {
       final files = <Map<String, dynamic>>[
         ...store.scanFiles('skills', extensions: <String>{'.md', '.json'}),
       ];
+      final disabled = await _skillDisabled();
       final skills = <Map<String, dynamic>>[];
       for (final f in files) {
+        final fileName = (f['name'] ?? '').toString();
+        var name = fileName.split('.').first;
         var desc = '';
         try {
-          final txt = await store.file('skills/${f['name']}').readAsString();
-          desc = txt.trim().split('\n').first.replaceAll(RegExp(r'^#+\s*'), '');
+          final txt = await store.file('skills/$fileName').readAsString();
+          final parsed = _parseSkillDoc(fileName, txt);
+          name = parsed.name;
+          desc = parsed.description;
         } on Object {
           desc = '';
         }
         skills.add(<String, dynamic>{
-          'name': (f['name'] ?? '').toString().split('.').first,
-          'file': f['name'],
+          'name': name,
+          'file': fileName,
           'description': desc.isEmpty ? '本地技能文件' : desc,
           'size': f['size'],
+          'enabled': !disabled.contains(fileName),
         });
       }
       return _ok(<String, dynamic>{'skills': skills, 'dir': store.sub('skills').path});
+    }
+    // 启用/停用技能：持久化到 skill_state.json（真实生效——对话只注入
+    // 已启用技能，见 _chat → _enabledSkillPool）。name 为技能文件名。
+    if (action == 'skill_set_enabled') {
+      final fileName = (p['name'] ?? '').toString().trim();
+      if (fileName.isEmpty || fileName.contains('/') || fileName.contains('..')) {
+        return _err('非法技能名称');
+      }
+      final enabled = p['enabled'] == true;
+      final cfg = await store.readJson('skill_state.json');
+      final set = <String>{...(cfg['disabled'] is List
+          ? (cfg['disabled'] as List).map((dynamic e) => e.toString())
+          : <String>[])};
+      if (enabled) {
+        set.remove(fileName);
+      } else {
+        set.add(fileName);
+      }
+      await store.writeJson('skill_state.json',
+          <String, dynamic>{'disabled': set.toList()..sort()});
+      return _ok(<String, dynamic>{'name': fileName, 'enabled': enabled});
+    }
+    // 编辑技能：读取 / 保存技能文件真实文本（⋮ 菜单「编辑」用）。
+    if (action == 'skill_read') {
+      final fileName = (p['name'] ?? '').toString().trim();
+      if (fileName.isEmpty || fileName.contains('/') || fileName.contains('..')) {
+        return _err('非法技能名称');
+      }
+      final f = store.file('skills/$fileName');
+      if (!await f.exists()) return _err('技能文件不存在：$fileName');
+      return _ok(<String, dynamic>{'name': fileName, 'content': await f.readAsString()});
+    }
+    if (action == 'skill_save') {
+      final fileName = (p['name'] ?? '').toString().trim();
+      final content = (p['content'] ?? '').toString();
+      if (fileName.isEmpty || fileName.contains('/') || fileName.contains('..')) {
+        return _err('非法技能名称');
+      }
+      if (!fileName.endsWith('.md') && !fileName.endsWith('.json')) {
+        return _err('技能文件必须是 .md 或 .json');
+      }
+      final f = store.file('skills/$fileName');
+      if (!await f.parent.exists()) await f.parent.create(recursive: true);
+      await f.writeAsString(content, flush: true);
+      return _ok(<String, dynamic>{'name': fileName, 'path': f.path});
     }
     // 从本地添加技能：真实写入 skills/ 目录（device_file 根限定 sandbox/，
     // 越界不可达，故在此提供专用动作）。
@@ -2526,6 +2639,17 @@ class EmbeddedBackend {
           await f.delete();
           ok = true;
         }
+      }
+      if (ok) {
+        // 删除后清理停用状态，避免残留脏记录。
+        final cfg = await store.readJson('skill_state.json');
+        final set = (cfg['disabled'] is List
+                ? (cfg['disabled'] as List).map((dynamic e) => e.toString()).toSet()
+                : <String>{})
+            .where((String e) => e != '$name.md' && e != '$name.json')
+            .toList()
+          ..sort();
+        await store.writeJson('skill_state.json', <String, dynamic>{'disabled': set});
       }
       return <String, dynamic>{'ok': ok, 'name': name};
     }
@@ -2586,7 +2710,290 @@ class EmbeddedBackend {
     if (action == 'mcp_sync') {
       return _ok(await _mcpSync());
     }
+    // 问题 #23：真实在线目录（GitHub Search API + 官方注册表）与真实安装。
+    if (action == 'discover') return _pluginDiscover(p);
+    if (action == 'install_repo') return _installRepoPlugin(p);
     return _err('未知 plugin_community 动作：$action');
+  }
+
+  // ---- 插件社区 · 真实在线目录（问题 #23）----
+
+  /// 各标签发现区的 GitHub topic 过滤（curl 实测匿名可达：
+  /// topic:mcp-server ≈4.3 万仓库、topic:claude-skills ≈1.6 万、
+  /// topic:claude-code-plugin ≈1.5 万；匿名 60 次/小时限流按需搜索够用）。
+  static const Map<String, String> _discoverTopics = <String, String>{
+    'plugin': 'claude-code-plugin',
+    'skill': 'claude-skills',
+    'mcp': 'mcp-server',
+  };
+
+  Map<String, String> _githubHeaders() => <String, String>{
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'tangram-agent',
+        if (UpdateService.githubToken.isNotEmpty)
+          'Authorization': 'Bearer ${UpdateService.githubToken}',
+      };
+
+  /// 发现区数据源：GitHub 仓库搜索（远端关键词过滤，不是本地过滤）
+  /// + 官方注册表（发布通道仓库 raw plugins.json，文件不存在如实跳过）。
+  /// GitHub 失败时如实带 error；两路都空才报「暂无结果」。
+  Future<Map<String, dynamic>> _pluginDiscover(Map<String, dynamic> p) async {
+    final kindRaw = (p['kind'] ?? 'plugin').toString();
+    final kind = _discoverTopics.containsKey(kindRaw) ? kindRaw : 'plugin';
+    final kw = (p['query'] ?? '').toString().trim();
+    final topic = _discoverTopics[kind]!;
+    final uri = Uri.https('api.github.com', '/search/repositories',
+        <String, String>{
+      'q': kw.isEmpty ? 'topic:$topic' : '$kw topic:$topic',
+      'sort': 'stars',
+      'order': 'desc',
+      'per_page': '20',
+    });
+    final items = <Map<String, dynamic>>[];
+    String? searchError;
+    try {
+      final resp = await http
+          .get(uri, headers: _githubHeaders())
+          .timeout(const Duration(seconds: 15));
+      if (resp.statusCode == 200) {
+        final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
+        final list = decoded is Map ? decoded['items'] : null;
+        if (list is List) {
+          for (final e in list.whereType<Map>()) {
+            items.add(<String, dynamic>{
+              'name': (e['full_name'] ?? '').toString(),
+              'description': (e['description'] ?? '').toString(),
+              'stars': e['stargazers_count'] is num
+                  ? (e['stargazers_count'] as num).toInt()
+                  : 0,
+              'updated': (e['pushed_at'] ?? e['updated_at'] ?? '').toString(),
+              'url': (e['html_url'] ?? '').toString(),
+              'repo': (e['full_name'] ?? '').toString(),
+              'branch': (e['default_branch'] ?? 'main').toString(),
+              'source': 'GitHub',
+              'kind': kind,
+            });
+          }
+        }
+      } else if (resp.statusCode == 403) {
+        searchError = 'GitHub Search API 限流（匿名 60 次/小时），稍后再试';
+      } else {
+        searchError = 'GitHub Search API 返回 HTTP ${resp.statusCode}';
+      }
+    } on Object catch (e) {
+      searchError = 'GitHub 搜索请求失败：$e';
+    }
+    // 官方注册表排在前面（自家发布通道），GitHub 结果随后。
+    items.insertAll(0, await _registryPlugins());
+    if (items.isEmpty) {
+      return _err(searchError ?? '远端目录暂无结果（GitHub 搜索 + 官方注册表均为空）');
+    }
+    return _ok(<String, dynamic>{
+      'items': items,
+      'query': kw,
+      'source': 'GitHub Search API + 官方注册表',
+      if (searchError != null) 'partial_error': searchError,
+    });
+  }
+
+  /// 官方注册表：读发布通道仓库（与 UpdateService 同一 owner/repo 常量）
+  /// 的 raw plugins.json。文件不存在（404）/网络失败一律如实跳过，不编造。
+  Future<List<Map<String, dynamic>>> _registryPlugins() async {
+    final uri = Uri.parse('https://raw.githubusercontent.com/'
+        '${UpdateService.repoOwner}/${UpdateService.repoName}/main/plugins.json');
+    try {
+      final resp = await http.get(uri, headers: <String, String>{
+        if (UpdateService.githubToken.isNotEmpty)
+          'Authorization': 'Bearer ${UpdateService.githubToken}',
+      }).timeout(const Duration(seconds: 10));
+      if (resp.statusCode != 200) return <Map<String, dynamic>>[];
+      final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
+      final list = decoded is List
+          ? decoded
+          : (decoded is Map && decoded['plugins'] is List
+              ? decoded['plugins'] as List
+              : null);
+      if (list == null) return <Map<String, dynamic>>[];
+      return list.whereType<Map>().map((Map<dynamic, dynamic> e) {
+        final m = e.map((dynamic k, dynamic v) => MapEntry(k.toString(), v));
+        final repo = (m['repo'] ?? '').toString();
+        return <String, dynamic>{
+          'name': (m['name'] ?? repo).toString(),
+          'description': (m['description'] ?? '').toString(),
+          'stars': m['stars'] is num ? (m['stars'] as num).toInt() : 0,
+          'updated': (m['updated'] ?? '').toString(),
+          'url': (m['url'] ?? (repo.isEmpty
+                  ? ''
+                  : 'https://github.com/$repo'))
+              .toString(),
+          'repo': repo,
+          'branch': (m['branch'] ?? 'main').toString(),
+          'source': '官方注册表',
+          'kind': (m['kind'] ?? 'plugin').toString(),
+        };
+      }).toList();
+    } on Object {
+      // plugins.json 不存在或不可达：跳过（不冒充有官方条目）。
+      return <Map<String, dynamic>>[];
+    }
+  }
+
+  /// 真实安装：按仓库自身 default_branch 从 raw.githubusercontent.com
+  /// 依次下载根目录 plugin.json / SKILL.md / README.md（curl 实测：文件
+  /// 存在 200 即落盘，404 如实报未找到），写入现有插件池目录
+  /// plugins/<name>.json——与 plugin_lifecycle 同一落点，「已安装」可见、可卸载。
+  Future<Map<String, dynamic>> _installRepoPlugin(Map<String, dynamic> p) async {
+    final repo = (p['repo'] ?? '').toString().trim();
+    if (!RegExp(r'^[\w.\-]+/[\w.\-]+$').hasMatch(repo)) {
+      return _err('非法仓库名：$repo');
+    }
+    final branchRaw = (p['branch'] ?? '').toString().trim();
+    final branch = RegExp(r'^[\w.\-]+$').hasMatch(branchRaw) ? branchRaw : 'main';
+    final name = (p['name'] ?? repo).toString().trim();
+    if (name.isEmpty) return _err('插件名称为空');
+    for (final fname in <String>['plugin.json', 'SKILL.md', 'README.md']) {
+      final url = 'https://raw.githubusercontent.com/$repo/$branch/$fname';
+      String content;
+      try {
+        final resp = await http.get(Uri.parse(url), headers: <String, String>{
+          if (UpdateService.githubToken.isNotEmpty)
+            'Authorization': 'Bearer ${UpdateService.githubToken}',
+        }).timeout(const Duration(seconds: 15));
+        if (resp.statusCode != 200) continue;
+        content = utf8.decode(resp.bodyBytes, allowMalformed: true);
+      } on Object {
+        continue;
+      }
+      var entry = <String, dynamic>{'content': content};
+      if (fname.endsWith('.json')) {
+        try {
+          final j = jsonDecode(content);
+          if (j is Map) {
+            entry = j.map((dynamic k, dynamic v) => MapEntry(k.toString(), v));
+          }
+        } on Object {
+          entry = <String, dynamic>{'content': content};
+        }
+      }
+      final safe = name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+      final target = store.file('plugins/$safe.json');
+      await target.writeAsString(jsonEncode(<String, dynamic>{
+        ...entry,
+        'name': name,
+        'version': (entry['version'] ?? '').toString(),
+        'source': 'GitHub:$repo/$branch/$fname',
+        'repo': repo,
+        'installed_at': DateTime.now().toIso8601String(),
+      }), flush: true);
+      return _ok(<String, dynamic>{
+        'name': name,
+        'repo': repo,
+        'file': fname,
+        'path': target.path,
+        'installed': true,
+      });
+    }
+    return _err('仓库 $repo 根目录未找到 plugin.json / SKILL.md / README.md'
+        '（raw.githubusercontent.com 均 404），未安装');
+  }
+
+  // ---- 技能 frontmatter 解析 / 启用状态（问题 #25）----
+
+  /// 解析技能文件：.md 取 YAML frontmatter 的 name/description（剥掉
+  /// --- 头），无 frontmatter 时回退首个非标题正文行；.json 读清单字段。
+  static ({String name, String description}) _parseSkillDoc(
+      String fileName, String text) {
+    var name = fileName.split('.').first;
+    var description = '';
+    if (fileName.toLowerCase().endsWith('.json')) {
+      try {
+        final j = jsonDecode(text);
+        if (j is Map) {
+          name = (j['name'] ?? name).toString();
+          description = (j['description'] ?? '').toString();
+        }
+      } on Object {
+        // 非法 JSON：回退文件名。
+      }
+      return (name: name, description: description);
+    }
+    final lines = text.split('\n');
+    var i = 0;
+    if (lines.isNotEmpty && lines.first.trim() == '---') {
+      for (i = 1; i < lines.length; i++) {
+        final t = lines[i].trim();
+        if (t == '---') {
+          i++;
+          break;
+        }
+        // 只认顶层 key（缩进行是嵌套结构，跳过）。
+        if (lines[i].startsWith(' ') || lines[i].startsWith('\t')) continue;
+        final idx = lines[i].indexOf(':');
+        if (idx <= 0) continue;
+        final key = lines[i].substring(0, idx).trim();
+        var value = lines[i].substring(idx + 1).trim();
+        if (value.length >= 2 &&
+            ((value.startsWith('"') && value.endsWith('"')) ||
+                (value.startsWith("'") && value.endsWith("'")))) {
+          value = value.substring(1, value.length - 1);
+        }
+        if (value.isEmpty) continue;
+        if (key == 'name') {
+          name = value;
+        } else if (key == 'description') {
+          description = value;
+        }
+      }
+    }
+    if (description.isEmpty) {
+      for (; i < lines.length; i++) {
+        final t = lines[i].trim();
+        if (t.isEmpty || t.startsWith('#')) continue;
+        description = t;
+        break;
+      }
+    }
+    return (name: name, description: description);
+  }
+
+  /// 停用技能文件名集合（skill_state.json 持久化，默认全部启用）。
+  Future<Set<String>> _skillDisabled() async {
+    final cfg = await store.readJson('skill_state.json');
+    return cfg['disabled'] is List
+        ? (cfg['disabled'] as List).map((dynamic e) => e.toString()).toSet()
+        : <String>{};
+  }
+
+  /// 对话技能池：只把「已启用」技能注入 system prompt（问题 #25：
+  /// 停用 = 不进对话技能池，真实生效）。无启用技能时返回空串不注入。
+  Future<String> _enabledSkillPool() async {
+    try {
+      final files =
+          store.scanFiles('skills', extensions: <String>{'.md', '.json'});
+      final disabled = await _skillDisabled();
+      final buf = StringBuffer();
+      var count = 0;
+      for (final f in files) {
+        final fileName = (f['name'] ?? '').toString();
+        if (fileName.isEmpty || disabled.contains(fileName)) continue;
+        String txt;
+        try {
+          txt = await store.file('skills/$fileName').readAsString();
+        } on Object {
+          continue;
+        }
+        final parsed = _parseSkillDoc(fileName, txt);
+        final desc = parsed.description.length > 200
+            ? '${parsed.description.substring(0, 200)}…'
+            : parsed.description;
+        buf.writeln('- ${parsed.name}：${desc.isEmpty ? '（无描述）' : desc}');
+        if (++count >= 20) break;
+      }
+      return buf.toString().trimRight();
+    } on Object {
+      return '';
+    }
   }
 
   // ---- im_event → ImService（真实 AGP/WebSocket 网关，见 im_service.dart）----

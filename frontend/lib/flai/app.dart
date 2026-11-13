@@ -5,6 +5,8 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../services/persona_store.dart';
+import '../ui/i18n/tga_strings.dart';
+import '../ui/update_gate.dart';
 import 'core/secure_auth_storage.dart';
 import 'core/theme/flai_theme.dart';
 import 'core/theme/tangram_palette.dart';
@@ -113,10 +115,17 @@ class _FlaiAppState extends State<FlaiApp> {
     };
     final Brightness platform = MediaQuery.platformBrightnessOf(context);
     final theme = _resolveTheme(mode, platform);
+    // 语言真实生效：简体中文/繁體中文/English → MaterialApp locale，
+    // 系统组件（时间/日期选择器等弹窗）与内置词典同步切换。
+    final Locale locale = TgaL10n.localeOf(
+        context.watch<PersonaStore>().language);
 
     if (_isRestoringSession) {
       return MaterialApp(
         debugShowCheckedModeBanner: false,
+        locale: locale,
+        localizationsDelegates: TgaL10n.delegates,
+        supportedLocales: TgaL10n.supported,
         home: Scaffold(
           backgroundColor: theme.colors.background,
           body: Center(
@@ -143,6 +152,12 @@ class _FlaiAppState extends State<FlaiApp> {
           theme: TangramTheme.light(),
           darkTheme: TangramTheme.dark(),
           themeMode: mode,
+          locale: locale,
+          localizationsDelegates: TgaL10n.delegates,
+          supportedLocales: TgaL10n.supported,
+          // 启动 3 秒后静默检查一次更新，发现新版才弹窗（问题 #8）。
+          builder: (BuildContext ctx, Widget? child) =>
+              TgaUpdateGate(child: child ?? const SizedBox.shrink()),
         ),
       ),
     );

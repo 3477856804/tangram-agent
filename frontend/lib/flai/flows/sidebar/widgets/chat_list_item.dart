@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../../../../design/dsh_tokens.dart';
 import '../../../../design/dsh_widgets.dart';
+import '../../../../ui/i18n/tga_strings.dart';
 import '../sidebar_config.dart';
 
 /// 会话行：标题 + 相对时间 + 更多（长按或点“…”出菜单）。
@@ -33,12 +34,18 @@ class ChatListItem extends StatelessWidget {
     this.onDelete,
   });
 
-  String _formatTimestamp(DateTime timestamp) {
+  String _formatTimestamp(BuildContext context, DateTime timestamp) {
     final Duration diff = DateTime.now().difference(timestamp);
-    if (diff.inMinutes < 1) return '刚刚';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}分钟';
-    if (diff.inHours < 24) return '${diff.inHours}小时';
-    if (diff.inDays < 30) return '${diff.inDays}天';
+    if (diff.inMinutes < 1) return context.t('sidebar.justNow', zh: '刚刚');
+    if (diff.inMinutes < 60) {
+      return '${diff.inMinutes}${context.t('sidebar.unitMinute', zh: '分钟')}';
+    }
+    if (diff.inHours < 24) {
+      return '${diff.inHours}${context.t('sidebar.unitHour', zh: '小时')}';
+    }
+    if (diff.inDays < 30) {
+      return '${diff.inDays}${context.t('sidebar.unitDay', zh: '天')}';
+    }
     return '${timestamp.year}/${timestamp.month}';
   }
 
@@ -70,22 +77,24 @@ class ChatListItem extends StatelessWidget {
               icon: item.isStarred
                   ? Icons.star_rounded
                   : Icons.star_border_rounded,
-              label: item.isStarred ? '取消收藏' : '收藏',
+              label: item.isStarred
+                  ? ctx.t('sidebar.unstar', zh: '取消收藏')
+                  : ctx.t('sidebar.star', zh: '收藏'),
               onTap: () => Navigator.of(ctx).pop('star'),
             ),
             _MenuItem(
               icon: Icons.drive_file_rename_outline_rounded,
-              label: '重命名',
+              label: ctx.t('sidebar.rename', zh: '重命名'),
               onTap: () => Navigator.of(ctx).pop('rename'),
             ),
             _MenuItem(
               icon: Icons.ios_share_rounded,
-              label: '分享',
+              label: ctx.t('sidebar.share', zh: '分享'),
               onTap: () => Navigator.of(ctx).pop('share'),
             ),
             _MenuItem(
               icon: Icons.delete_outline_rounded,
-              label: '删除',
+              label: ctx.t('common.delete', zh: '删除'),
               danger: true,
               onTap: () => Navigator.of(ctx).pop('delete'),
             ),
@@ -144,7 +153,7 @@ class ChatListItem extends StatelessWidget {
               ),
               const SizedBox(width: DshSpace.x8),
               Text(
-                _formatTimestamp(item.timestamp),
+                _formatTimestamp(context, item.timestamp),
                 style: DshType.xxs12.copyWith(color: c.labelCaption),
               ),
               if (item.unreadCount > 0) ...<Widget>[

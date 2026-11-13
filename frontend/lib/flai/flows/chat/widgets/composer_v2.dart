@@ -10,6 +10,7 @@ import '../../../../design/dsh_tokens.dart';
 import '../../../../design/dsh_widgets.dart';
 import '../../../../services/model_registry.dart';
 import '../../../../services/persona_store.dart';
+import '../../../../ui/i18n/tga_strings.dart';
 import '../chat_experience_config.dart';
 import 'attachment_menu.dart';
 import 'attachment_picker.dart';
@@ -117,6 +118,9 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
 
   /// 把已选附件真实拼进消息。文本类附件读取真实文件内容（限制 8KB），
   /// 二进制/不可解码附件只登记元信息并如实说明，绝不伪造文本内容。
+  /// 注意：'[附件]' 等标记是内嵌后端的路由协议（embedded_backend
+  /// ._routeIntent / _summarizeAttachments 按 '[附件]' 切块解析），
+  /// 属消息数据而非界面文案，故不做本地化。
   String _composePayload(String text) {
     if (_pendingAttachments.isEmpty) return text;
     final buf = StringBuffer();
@@ -181,11 +185,14 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   }
 
   /// 把真实注册表转换成选择器选项：带（本地）/（云端）标记、分组、来源副标题。
-  static List<ModelOption> _optionsOf(ModelRegistry r) =>
+  /// 分组标题走 i18n 词典，随语言即时切换。
+  List<ModelOption> _optionsOf(BuildContext context, ModelRegistry r) =>
       r.entries.map((ModelEntry e) {
         final String group = e.builtin
-            ? '内置'
-            : (e.kind == ModelKind.cloud ? '云端模型（API）' : '本地模型（权重）');
+            ? context.t('home.modelGroupBuiltin', zh: '内置')
+            : (e.kind == ModelKind.cloud
+                ? context.t('home.modelGroupCloud', zh: '云端模型（API）')
+                : context.t('home.modelGroupLocal', zh: '本地模型（权重）'));
         final IconData icon = e.builtin
             ? Icons.bolt_rounded
             : (e.kind == ModelKind.cloud
@@ -208,7 +215,7 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
     if (!mounted) return;
     final ModelOption? model = await showModelSelector(
       context: context,
-      models: _optionsOf(registry),
+      models: _optionsOf(context, registry),
       currentModelId: registry.selectedId,
     );
     if (model == null || !mounted) return;
@@ -322,8 +329,9 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
                 decoration: InputDecoration(
                   isDense: true,
                   hintText: widget.isRecording
-                      ? '正在听…'
-                      : widget.config.resolvedPlaceholder,
+                      ? context.t('home.listening', zh: '正在听…')
+                      : context.t('home.inputHint',
+                          zh: widget.config.resolvedPlaceholder),
                   hintStyle: DshType.s14.copyWith(color: c.labelCaption),
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
@@ -342,7 +350,7 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
             size: 28,
             tint: c.labelSecondary,
             onTap: _handleMicTap,
-            tooltip: '语音输入',
+            tooltip: context.t('home.voiceInput', zh: '语音输入'),
           ),
         ],
         const SizedBox(width: DshSpace.x8),
@@ -400,30 +408,33 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
     return Row(
       children: <Widget>[
         // “[+]” 添加附件
-        InkWell(
-          onTap: _openAttachmentMenu,
-          customBorder: const CircleBorder(),
-          child: Container(
-            width: 30,
-            height: 30,
-            decoration: BoxDecoration(
-              color: c.selector,
-              shape: BoxShape.circle,
+        Tooltip(
+          message: context.t('home.attach', zh: '添加附件'),
+          child: InkWell(
+            onTap: _openAttachmentMenu,
+            customBorder: const CircleBorder(),
+            child: Container(
+              width: 30,
+              height: 30,
+              decoration: BoxDecoration(
+                color: c.selector,
+                shape: BoxShape.circle,
+              ),
+              alignment: Alignment.center,
+              child: Icon(Icons.add_rounded, size: 18, color: c.labelPrimary),
             ),
-            alignment: Alignment.center,
-            child: Icon(Icons.add_rounded, size: 18, color: c.labelPrimary),
           ),
         ),
         const SizedBox(width: DshSpace.x8),
         pill(
-          label: '深度思考',
+          label: context.t('home.deepThink', zh: '深度思考'),
           icon: Icons.psychology_outlined,
           active: _deepThink,
           onTap: () => setState(() => _deepThink = !_deepThink),
         ),
         const SizedBox(width: DshSpace.x8),
         pill(
-          label: '智能搜索',
+          label: context.t('home.smartSearch', zh: '智能搜索'),
           icon: Icons.travel_explore_outlined,
           active: _smartSearch,
           onTap: () => setState(() => _smartSearch = !_smartSearch),
@@ -439,9 +450,10 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   Widget _buildModelEntry(DshPalette c) {
     return Semantics(
       button: true,
-      label: '切换模型，快捷键 Ctrl 或 Command 加 M',
+      label: context.t('home.switchModelSemantics',
+          zh: '切换模型，快捷键 Ctrl 或 Command 加 M'),
       child: Tooltip(
-        message: '切换模型（Ctrl + M）',
+        message: context.t('home.switchModelTooltip', zh: '切换模型（Ctrl + M）'),
         child: InkWell(
           onTap: _openModelSelector,
           borderRadius: BorderRadius.circular(DshR.sm),
@@ -454,7 +466,7 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
                 Text(
-                  'TGA 引擎',
+                  context.t('home.engine', zh: 'TGA 引擎'),
                   style: DshType.xs13m.copyWith(color: c.labelPrimary),
                 ),
                 const SizedBox(width: DshSpace.x2),
@@ -486,7 +498,7 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
                       DshSpinner(size: 14, color: c.labelTertiary),
                       const SizedBox(width: DshSpace.x8),
                       Text(
-                        '识别中…',
+                        context.t('home.transcribing', zh: '识别中…'),
                         style: DshType.xs13.copyWith(color: c.labelTertiary),
                       ),
                     ],
@@ -501,7 +513,7 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
             tint: c.labelPrimary,
             background: c.selector,
             onTap: () => widget.onVoiceStop?.call(),
-            tooltip: '停止录音',
+            tooltip: context.t('home.stopRecording', zh: '停止录音'),
           ),
           const SizedBox(width: DshSpace.x4),
           DshSendButton(enabled: _hasText, onSend: _handleSend),
@@ -573,7 +585,7 @@ class _InlineWaveformState extends State<_InlineWaveform>
         ),
         const SizedBox(width: DshSpace.x8),
         Text(
-          '$_formattedTime · 振幅未接入',
+          '$_formattedTime · ${context.t('home.ampPending', zh: '振幅未接入')}',
           style: DshType.mono11.copyWith(color: widget.dim),
         ),
       ],

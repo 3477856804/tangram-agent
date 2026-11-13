@@ -23,6 +23,11 @@ class PersonaStore extends ChangeNotifier {
   bool permissionFiles = false;
   bool permissionNotifications = false;
 
+  /// TTS 音色（edge-tts voice shortName，如 zh-CN-XiaoyiNeural）；
+  /// 空串 = 未选择，UI 显示默认「晓伊」。
+  String voiceName = '';
+  String voiceShortName = '';
+
   String? modelName;
   bool modelNameLocked = false;
 
@@ -31,11 +36,13 @@ class PersonaStore extends ChangeNotifier {
   String displayName = '个人';
 
   // ---- 人格 / 头像 / AI 名字（2026-11-13 真实化）----
-  /// AI 名字（默认 TGA），人格页与系统提示词共用。
+  /// AI 名字（默认 TGA），人格页与系统提示词共用；
+  /// 始终镜像当前激活人格的名字。
   String aiName = 'TGA';
-  /// 自定义头像的应用文档目录绝对路径；null 表示使用内置 TGA 鹿标。
+  /// 自定义头像的应用文档目录绝对路径；null 表示使用内置 TGA 鹿标；
+  /// 始终镜像当前激活人格的独立头像。
   String? avatarPath;
-  /// 人格列表：每项含 name / identity / personality / audience。
+  /// 人格列表：每项含 name / avatarPath / identity / personality / audience。
   List<Persona> personas = <Persona>[Persona.defaultPersona()];
   /// 当前激活的人格 id。
   String activePersonaId = Persona.defaultId;
@@ -62,6 +69,9 @@ class PersonaStore extends ChangeNotifier {
           store.maxTokens = _asInt(m['maxTokens'], 2048);
           store.language = (m['language'] ?? store.language).toString();
           store.themeMode = (m['themeMode'] ?? store.themeMode).toString();
+          store.voiceName = (m['voiceName'] ?? store.voiceName).toString();
+          store.voiceShortName =
+              (m['voiceShortName'] ?? store.voiceShortName).toString();
           store.permissionFiles = m['permissionFiles'] == true;
           store.permissionNotifications = m['permissionNotifications'] == true;
           store.modelName = m['modelName']?.toString();
@@ -89,6 +99,11 @@ class PersonaStore extends ChangeNotifier {
           store.activePersonaId = store.personas.any((Persona p) => p.id == activeId)
               ? activeId
               : store.personas.first.id;
+          // 老数据兼容：旧版只有全局头像，迁移给当时的激活人格，避免升级后头像丢失。
+          if (store.avatarPath != null &&
+              store.activePersona.avatarPath == null) {
+            store.activePersona.avatarPath = store.avatarPath;
+          }
           final dynamic rawLastRun = m['taskLastRun'];
           if (rawLastRun is Map) {
             store.taskLastRun = rawLastRun.map((dynamic k, dynamic v) =>
@@ -111,6 +126,8 @@ class PersonaStore extends ChangeNotifier {
         'maxTokens': maxTokens,
         'language': language,
         'themeMode': themeMode,
+        'voiceName': voiceName,
+        'voiceShortName': voiceShortName,
         'permissionFiles': permissionFiles,
         'permissionNotifications': permissionNotifications,
         'modelName': modelName,
@@ -146,6 +163,10 @@ class PersonaStore extends ChangeNotifier {
   void setMaxTokens(int v) => _update(() => maxTokens = v);
   void setLanguage(String v) => _update(() => language = v);
   void setThemeMode(String v) => _update(() => themeMode = v);
+  void setVoice(String name, String shortName) => _update(() {
+        voiceName = name;
+        voiceShortName = shortName;
+      });
   void setPermissionFiles(bool v) => _update(() => permissionFiles = v);
   void setPermissionNotifications(bool v) =>
       _update(() => permissionNotifications = v);
@@ -172,11 +193,20 @@ class PersonaStore extends ChangeNotifier {
     return first;
   }
 
+  /// 把全局 [aiName] / [avatarPath] 镜像为当前激活人格的名字与头像：
+  /// 人格页顶部、其他页面与系统提示词始终跟随激活人格。
+  void _syncGlobalsFromActive() {
+    final Persona p = activePersona;
+    aiName = p.name;
+    avatarPath = p.avatarPath;
+  }
+
   /// 切换激活人格，并把新人格设定同步进系统提示词（真实影响对话）。
   void setActivePersonaId(String id) {
     if (!personas.any((Persona p) => p.id == id)) return;
     _update(() {
       activePersonaId = id;
+      _syncGlobalsFromActive();
       systemPrompt = composeSystemPrompt();
     });
   }
@@ -192,6 +222,7 @@ class PersonaStore extends ChangeNotifier {
     _update(() {
       personas.add(p);
       activePersonaId = p.id;
+      _syncGlobalsFromActive();
       systemPrompt = composeSystemPrompt();
     });
   }
@@ -209,7 +240,17 @@ class PersonaStore extends ChangeNotifier {
       if (identity != null) p.identity = identity;
       if (personality != null) p.personality = personality;
       if (audience != null) p.audience = audience;
+      _syncGlobalsFromActive();
       systemPrompt = composeSystemPrompt();
+    });
+  }
+
+  /// 设置当前激活人格的独立头像（应用文档目录绝对路径；
+  /// null = 恢复内置鹿标），并同步全局镜像字段。
+  void setActivePersonaAvatar(String? v) {
+    _update(() {
+      activePersona.avatarPath = v;
+      _syncGlobalsFromActive();
     });
   }
 
@@ -232,6 +273,7 @@ class PersonaStore extends ChangeNotifier {
       if (!personas.any((Persona p) => p.id == activePersonaId)) {
         activePersonaId = personas.first.id;
       }
+      _syncGlobalsFromActive();
       systemPrompt = composeSystemPrompt();
     });
   }
@@ -284,7 +326,7 @@ class PersonaStore extends ChangeNotifier {
   }
 }
 
-/// 单个人格设定：名字 + 身份 / 个性 / 为谁服务 三段文案。
+/// 单个人格设定：名字 + 独立头像 + 身份 / 个性 / 为谁服务 三段文案。
 ///
 /// 三段文案随人格持久化在 [PersonaStore]，并在保存时组装进系统提示词，
 /// 真实影响每一次对话推理（agent = model + harness）。
@@ -295,6 +337,7 @@ class Persona {
     this.identity = '',
     this.personality = '',
     this.audience = '',
+    this.avatarPath,
     this.createdAt = 0,
   });
 
@@ -334,6 +377,8 @@ class Persona {
   String identity;
   String personality;
   String audience;
+  /// 该人格独立头像的应用文档目录绝对路径；null = 内置默认鹿标。
+  String? avatarPath;
   final int createdAt;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
@@ -342,16 +387,19 @@ class Persona {
         'identity': identity,
         'personality': personality,
         'audience': audience,
+        'avatarPath': avatarPath,
         'createdAt': createdAt,
       };
 
-  /// 向后兼容：缺字段一律用空串 / 0 兜底，不抛错。
+  /// 向后兼容：缺字段一律用空串 / 0 / null 兜底，不抛错；
+  /// 老数据无 avatarPath 时为 null，UI 回退默认鹿标。
   static Persona fromJson(Map<String, dynamic> m) => Persona(
         id: (m['id'] ?? '').toString(),
         name: (m['name'] ?? '未命名人格').toString(),
         identity: (m['identity'] ?? '').toString(),
         personality: (m['personality'] ?? '').toString(),
         audience: (m['audience'] ?? '').toString(),
+        avatarPath: m['avatarPath']?.toString(),
         createdAt: m['createdAt'] is num
             ? (m['createdAt'] as num).toInt()
             : int.tryParse('${m['createdAt']}') ?? 0,

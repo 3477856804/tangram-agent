@@ -5,7 +5,9 @@ import 'settings_config.dart';
 class NavItem {
   final IconData icon;
 
-  final String label;
+  /// i18n 词典 key（sidebar.*）。侧栏在 build 时用 `context.t(labelKey)`
+  /// 运行时解析，语言切换即时刷新，不再持有构造期中文常量。
+  final String labelKey;
 
   final Widget? page;
 
@@ -15,7 +17,7 @@ class NavItem {
 
   const NavItem({
     required this.icon,
-    required this.label,
+    required this.labelKey,
     this.page,
     this.fullPage = false,
   });

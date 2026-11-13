@@ -12,10 +12,12 @@ import '../../services/persona_store.dart';
 import '../../services/task_scheduler.dart';
 
 /// 人格设置（2026-11-13 真实化）：
-/// - 头像：默认内置 TGA 鹿标，点击经 image_picker 选图并复制到应用文档目录，
-///   路径存 [PersonaStore.avatarPath]，全局生效；支持恢复默认。
-/// - AI 名字：铅笔改名，存 [PersonaStore.aiName]（默认 TGA）。
-/// - 人格列表：多套人格真实持久化，点选切换、长按删除/重置（最后一条只重置）。
+/// - 每个人格拥有独立的名字与头像（Persona.name / Persona.avatarPath）；
+///   头像点击经 image_picker 选图并复制到应用文档目录，仅写回当前激活人格；
+///   无头像时回退内置鹿标 assets/logo/tangram_deer.png，支持恢复默认。
+/// - 顶部大头像/名字区跟随当前激活人格的 avatar/name，铅笔改名写回该 Persona。
+/// - 人格列表：每行渲染各自头像与名字，多套人格真实持久化，
+///   点选切换、长按删除/重置（最后一条只重置）。
 /// - 人设管理：身份/个性/为谁服务 三段各自可编辑保存，保存后组装进系统提示词，
 ///   真实影响后续对话。
 /// - 我的日记：数据来自后端 memory_event diary（真实对话记录按天分组），
@@ -35,50 +37,52 @@ class TgaPersonaPage extends StatelessWidget {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(Tga.pagePad, 8, Tga.pagePad, 40),
         children: <Widget>[
-          // ---------- 头像 + AI 名字 ----------
+          // ---------- 头像 + 名字（跟随当前激活人格） ----------
           Center(
             child: Column(
               children: <Widget>[
                 _Avatar(store: store),
                 const SizedBox(height: 6),
-                if (store.avatarPath != null)
+                if (store.activePersona.avatarPath != null)
                   TgaButton(
                     label: '恢复默认头像',
                     color: Tga.textSub,
                     filled: false,
-                    onTap: () => store.setAvatarPath(null),
+                    onTap: () => store.setActivePersonaAvatar(null),
                   ),
                 const SizedBox(height: 8),
-                // 页面标题区显示 aiName（默认 TGA），铅笔改名真实落盘。
+                // 顶部名字区显示当前激活人格的名字，铅笔改名写回该 Persona。
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
-                    Flexible(child: Text(store.aiName, style: Tga.h1)),
+                    Flexible(
+                        child: Text(store.activePersona.name,
+                            style: Tga.h1)),
                     IconButton(
-                      tooltip: '修改 AI 名字',
+                      tooltip: '修改当前人格名字',
                       icon: Icon(Icons.edit_outlined,
                           size: 16, color: Tga.textSub),
                       onPressed: () async {
                         final String? name = await _promptText(
                           context,
-                          title: '修改 AI 名字',
-                          initial: store.aiName,
+                          title: '修改当前人格名字',
+                          initial: store.activePersona.name,
                           hint: '例如 TGA / cosmo',
                         );
-                        if (name != null && name.isNotEmpty) {
-                          store.setAiName(name);
+                        if (name != null && name.trim().isNotEmpty) {
+                          store.updateActivePersona(name: name);
                         }
                       },
                     ),
                   ],
                 ),
                 const SizedBox(height: 2),
-                Text(store.activePersona.name, style: Tga.sub),
+                Text('当前激活人格', style: Tga.sub),
               ],
             ),
           ),
 
-          // ---------- 人格列表 ----------
+          // ---------- 人格列表：每行各自头像 + 各自名字 ----------
           TgaGroupTitle(
             '人格列表',
             trailing: IconButton(
@@ -92,11 +96,15 @@ class TgaPersonaPage extends StatelessWidget {
                   initial: '',
                   hint: '给这套人格起个名字',
                 );
-                if (name != null && name.isNotEmpty) {
-                  store.addPersona(name);
+                if (name == null) return;
+                if (name.trim().isEmpty) {
                   if (!context.mounted) return;
-                  _toast(context, '已创建人格「$name」');
+                  _toast(context, '人格名字不能为空');
+                  return;
                 }
+                store.addPersona(name);
+                if (!context.mounted) return;
+                _toast(context, '已创建人格「${name.trim()}」');
               },
             ),
           ),
@@ -106,25 +114,14 @@ class TgaPersonaPage extends StatelessWidget {
               children: <Widget>[
                 for (int i = 0; i < store.personas.length; i++) ...<Widget>[
                   if (i > 0) const TgaTileDivider(),
-                  GestureDetector(
-                    // 长按：多于一条真删除，只剩最后一条改为重置为默认设定。
+                  _PersonaTile(
+                    persona: store.personas[i],
+                    active: store.personas[i].id == store.activePersonaId,
+                    // 点行切换激活人格；长按：多于一条真删除，
+                    // 只剩最后一条改为重置为默认设定。
+                    onTap: () => store.setActivePersonaId(store.personas[i].id),
                     onLongPress: () => _onPersonaLongPress(
                         context, backend, store, store.personas[i]),
-                    child: TgaIconTile(
-                      icon: store.personas[i].id == store.activePersonaId
-                          ? Icons.face_retouching_natural_rounded
-                          : Icons.face_retouching_natural_outlined,
-                      title: store.personas[i].name,
-                      subtitle: store.personas[i].id == store.activePersonaId
-                          ? '当前人格 · 长按可删除/重置'
-                          : '点选切换 · 长按可删除',
-                      showArrow: false,
-                      trailing: store.personas[i].id == store.activePersonaId
-                          ? Icon(Icons.check_circle_rounded,
-                              size: 18, color: Tga.green)
-                          : null,
-                      onTap: () => store.setActivePersonaId(store.personas[i].id),
-                    ),
                   ),
                 ],
               ],
@@ -272,7 +269,8 @@ class TgaPersonaPage extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// 头像：默认内置鹿标；点击选图 → 复制到应用文档目录 → 路径存 PersonaStore
+// 头像：每个人格独立；默认内置鹿标；点击选图 → 复制到应用文档目录
+// （按人格 id 命名，互不覆盖）→ 路径写回当前激活人格 Persona.avatarPath
 // ---------------------------------------------------------------------------
 class _Avatar extends StatelessWidget {
   const _Avatar({required this.store});
@@ -280,69 +278,139 @@ class _Avatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final String? path = store.avatarPath;
-    // 仅当自定义头像文件真实存在时才使用，否则回退内置鹿标。
-    final File? custom = (path != null && File(path).existsSync())
-        ? File(path)
-        : null;
     return GestureDetector(
       onTap: () => _pick(context),
-      child: Container(
-        width: 88,
-        height: 88,
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: <Color>[Tga.iconBlue, Tga.iconCyan],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          shape: BoxShape.circle,
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: custom != null
-            ? Image.file(
-                custom,
-                width: 88,
-                height: 88,
-                fit: BoxFit.cover,
-                // 文件损坏时如实回退到内置鹿标，不空白。
-                errorBuilder: (BuildContext _, Object _, StackTrace? _) =>
-                    _defaultLogo(),
-              )
-            : _defaultLogo(),
+      child: _PersonaAvatar(
+        avatarPath: store.activePersona.avatarPath,
+        size: 88,
       ),
     );
   }
-
-  /// 默认头像：内置 TGA 鹿标资源。
-  Widget _defaultLogo() => Image.asset(
-        'assets/logo/tangram_deer_192.png',
-        width: 88,
-        height: 88,
-        fit: BoxFit.cover,
-        errorBuilder: (BuildContext _, Object _, StackTrace? _) =>
-            Icon(Icons.smart_toy_rounded, size: 40, color: Tga.onPrimary),
-      );
 
   Future<void> _pick(BuildContext context) async {
     try {
       final XFile? picked =
           await ImagePicker().pickImage(source: ImageSource.gallery);
       if (picked == null) return;
+      final Persona p = store.activePersona;
       final Directory docs = await getApplicationDocumentsDirectory();
       final Directory dir = Directory('${docs.path}/persona');
       if (!dir.existsSync()) dir.createSync(recursive: true);
       final List<String> segs = picked.path.split('.');
       final String ext = segs.length > 1 ? segs.last : 'jpg';
-      final File target = File('${dir.path}/avatar.$ext');
+      // 按人格 id 命名：多个人格各存各的头像，互不覆盖。
+      final File target = File('${dir.path}/avatar_${p.id}.$ext');
       await File(picked.path).copy(target.path);
-      store.setAvatarPath(target.path);
+      store.setActivePersonaAvatar(target.path);
       if (!context.mounted) return;
-      _toast(context, '头像已更新，全局生效');
+      _toast(context, '「${p.name}」头像已更新');
     } on Object catch (e) {
       if (!context.mounted) return;
       _toast(context, '头像设置失败：$e');
     }
+  }
+}
+
+/// 人格圆形头像：自定义文件存在则显示图片，否则回退内置鹿标。
+class _PersonaAvatar extends StatelessWidget {
+  const _PersonaAvatar({required this.avatarPath, this.size = 38});
+  final String? avatarPath;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    // 仅当自定义头像文件真实存在时才使用，否则回退内置鹿标。
+    final String? path = avatarPath;
+    final File? custom =
+        (path != null && File(path).existsSync()) ? File(path) : null;
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: <Color>[Tga.iconBlue, Tga.iconCyan],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        shape: BoxShape.circle,
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: custom != null
+          ? Image.file(
+              custom,
+              width: size,
+              height: size,
+              fit: BoxFit.cover,
+              // 文件损坏时如实回退到内置鹿标，不空白。
+              errorBuilder: (BuildContext _, Object _, StackTrace? _) =>
+                  _defaultLogo(),
+            )
+          : _defaultLogo(),
+    );
+  }
+
+  /// 默认头像：内置 TGA 鹿标资源。
+  Widget _defaultLogo() => Image.asset(
+        'assets/logo/tangram_deer.png',
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        errorBuilder: (BuildContext _, Object _, StackTrace? _) =>
+            Icon(Icons.smart_toy_rounded,
+                size: size * 0.45, color: Tga.onPrimary),
+      );
+}
+
+/// 人格列表行：各自头像 + 各自名字 + 激活标记；点选切换，长按删除/重置。
+class _PersonaTile extends StatelessWidget {
+  const _PersonaTile({
+    required this.persona,
+    required this.active,
+    required this.onTap,
+    required this.onLongPress,
+  });
+  final Persona persona;
+  final bool active;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    Tga.syncFrom(context);
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: <Widget>[
+              _PersonaAvatar(avatarPath: persona.avatarPath),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Text(persona.name, style: Tga.body),
+                    const SizedBox(height: 3),
+                    Text(
+                        active
+                            ? '当前人格 · 长按可删除/重置'
+                            : '点选切换 · 长按可删除',
+                        style: Tga.sub),
+                  ],
+                ),
+              ),
+              if (active)
+                Icon(Icons.check_circle_rounded,
+                    size: 18, color: Tga.green),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

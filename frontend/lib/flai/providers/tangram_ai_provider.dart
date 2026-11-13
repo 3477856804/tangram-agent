@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../../bridge/backend_client.dart';
 import '../../bridge/bridge_protocol.dart';
+import '../../services/agents_store.dart';
 import '../../services/model_registry.dart';
 import '../../services/persona_store.dart';
 import '../core/models/chat_event.dart';
@@ -91,7 +92,7 @@ class TangramAiProvider implements AiProvider {
     return '云端调用失败：$trimmed';
   }
 
-  Map<String, dynamic> _payload(ChatRequest request) {
+  Map<String, dynamic> _payload(ChatRequest request, String system) {
     // 真实模型参数由注册表按当前选中项产出：云端 → API 凭据 + 模型名，
     // 本地权重 → 真实路径，内置 → 引擎标识。放在最后覆盖默认空 model。
     final Map<String, dynamic> modelParams =
@@ -127,13 +128,22 @@ class TangramAiProvider implements AiProvider {
     'temperature': persona?.temperature ?? request.temperature ?? 0.7,
     'max_tokens': persona?.maxTokens ?? request.maxTokens ?? 2048,
     'top_p': persona?.topP ?? 0.9,
-    'system': persona?.systemPrompt ?? '',
+    'system': system,
     'metadata': <String, dynamic>{
       ...?request.metadata,
       'seq': _sequence++,
     },
     ...modelParams,
     };
+  }
+
+  /// 人格 system prompt + 当前启用的自定义智能体人设（智能体中心 #14）。
+  /// 无启用智能体时与改造前完全一致；agents.json 读取失败也不影响对话。
+  Future<String> _systemWithAgents() async {
+    final String base = persona?.systemPrompt ?? '';
+    final String agents = await AgentsStore.enabledSystemPromptBlock();
+    if (agents.isEmpty) return base;
+    return base.isEmpty ? agents : '$base\n\n$agents';
   }
 
   @override
@@ -178,8 +188,10 @@ class TangramAiProvider implements AiProvider {
       });
       _active = subscription;
       try {
+        final Map<String, dynamic> payload =
+            _payload(request, await _systemWithAgents());
         final BridgeEnvelope response = await client
-            .sendControl('agent_command', _payload(request))
+            .sendControl('agent_command', payload)
             .timeout(timeout);
         if (!emitted) {
           final Map<String, dynamic>? payloadMap =

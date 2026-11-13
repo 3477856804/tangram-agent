@@ -15,11 +15,17 @@ import '../../design/tga_design.dart';
 /// - 节点/边来自后端 rpc graph_query：基于真实对话 turns 的词共现统计
 ///   （nodes:[{name,degree}]，edges:[{subject,predicate:'co-occur',obj}]），
 ///   节点数如实展示；无对话记录时显示空态 + 刷新按钮。
-/// - 斐波那契球面布局 + 透视投影：近大远小、近亮远暗；
-///   节点带径向光晕、按词哈希分五色类别配色、度数越大节点越大；
-///   边按共现权重调粗细/透明度；球面经纬网格更精致；
-///   拖拽旋转带惯性衰减，空闲时缓慢自转；双指/滚轮缩放。
-/// - 标签：度数 Top12 常显，其余随缩放渐显。
+/// - 斐波那契球面布局 + 透视投影：近大远小、近亮远暗；背面（z<0）的
+///   节点/连线/标签统一降透明度（约 0.32），正面加亮，立体感更强；
+/// - 节点径向渐变填充（中心亮边缘深）+ 同色外发光，按词哈希分五色、
+///   度数越大节点越大；选中节点白描边 + 放大动画；
+/// - 连线为沿球面微弯的贝塞尔曲线，线宽随共现权重、透明度随深度渐隐；
+/// - 球壳淡经纬网格（8 段椭圆弧，alpha 0.06）+ 顶部高光弧；配色全部取
+///   Tga.* 主题令牌，深浅主题皆适配；
+/// - 拖拽旋转带惯性衰减，空闲时缓慢自转（0.0015 rad/帧），触摸暂停；
+///   双指/滚轮缩放。
+/// - 标签：较近（z>0.25）或度数 Top8 常显，带半透明圆角底衬并贪心避让
+///   防叠字，其余节点点击选中后才显示。
 /// - 点击节点弹底部详情：实体名 / 度数 / 关联实体（真实边），
 ///   并从 memory_event diary 检索包含该词的真实对话摘录（最多 5 条，含日期），
 ///   摘录里的 URL 可复制；没有图片视频数据就不放假媒体。
@@ -40,6 +46,11 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
   double _velY = 0.0; // 角速度（rad/帧），松手后惯性衰减
   double _velX = 0.0;
   bool _dragging = false;
+
+  // ---- 选中节点（白描边 + 放大动画 + 显示其标签）----
+  int _selected = -1;
+  double _selT = 1.0; // 0→1 放大动画进度
+
   late final Ticker _ticker;
 
   // ---- 真实图谱数据（rpc graph_query）----
@@ -72,19 +83,20 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
     super.dispose();
   }
 
-  /// 每帧：非拖拽时应用惯性 + 缓慢自转。
+  /// 每帧：触摸时暂停；非拖拽时应用惯性 + 缓慢自转，并推进选中放大动画。
   void _onTick(Duration dt) {
     if (_dragging || _names.isEmpty) return;
-    if (_velY.abs() < 0.00012 && _velX.abs() < 0.00012) {
-      // 惯性耗尽后仅保持极慢自转，避免无意义高频重绘。
-      setState(() => _rotY += 0.0016);
-      return;
-    }
     setState(() {
-      _rotY += _velY;
-      _rotX = (_rotX + _velX).clamp(-1.4, 1.4).toDouble();
-      _velY *= 0.94;
-      _velX *= 0.94;
+      if (_selT < 1.0) _selT = math.min(1.0, _selT + 0.07);
+      if (_velY.abs() < 0.00012 && _velX.abs() < 0.00012) {
+        // 惯性耗尽后仅保持极慢自转。
+        _rotY += 0.0015;
+      } else {
+        _rotY += _velY;
+        _rotX = (_rotX + _velX).clamp(-1.4, 1.4).toDouble();
+        _velY *= 0.94;
+        _velX *= 0.94;
+      }
     });
   }
 
@@ -162,6 +174,8 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
         _maxWeight = maxW;
         _pos = _fibonacciSphere(names.length);
         _revision++;
+        _selected = -1;
+        _selT = 1.0;
         _loading = false;
       });
     } on Object catch (e) {
@@ -201,7 +215,16 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
         bi = i;
       }
     }
-    if (bi >= 0) _showDetails(bi);
+    if (bi >= 0) {
+      // 选中节点：白描边 + 放大动画，其标签随之显示（详情弹层逻辑不变）。
+      setState(() {
+        _selected = bi;
+        _selT = 0.0;
+      });
+      _showDetails(bi);
+    } else if (_selected >= 0) {
+      setState(() => _selected = -1);
+    }
   }
 
   void _showDetails(int idx) {
@@ -398,6 +421,8 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
                     revision: _revision,
                     screen: _screen,
                     zs: _zs,
+                    selected: _selected,
+                    selT: _selT,
                   ),
                   size: Size(size, size),
                 ),
@@ -429,6 +454,8 @@ class _SpherePainter extends CustomPainter {
     required this.revision,
     required this.screen,
     required this.zs,
+    required this.selected,
+    required this.selT,
   });
 
   final double rotX, rotY, zoom;
@@ -439,20 +466,25 @@ class _SpherePainter extends CustomPainter {
   final List<_Edge> edges;
   final int maxWeight;
   final int revision;
+  final int selected;
+  final double selT;
 
   /// 投影结果写回（命中测试用）。
   final List<Offset> screen;
   final List<double> zs;
 
-  /// 标签常显的度数 Top N。
-  static const int _labelTop = 12;
+  /// 标签常显的度数 Top N（其余点击选中后才显示）。
+  static const int _labelTop = 8;
+
+  /// 背面（z<0）节点/连线/标签统一降透明度系数。
+  static const double _backDim = 0.32;
 
   @override
   void paint(Canvas canvas, Size size) {
     final Offset center = Offset(size.width / 2, size.height / 2);
     final double radius = math.min(size.width, size.height) / 2 * 0.82 * zoom;
 
-    // 背景辉光：整体球体一层柔和径向光。
+    // 背景辉光：整体球体一层柔和径向光（跟随主题主色）。
     final Rect glowRect = Rect.fromCircle(center: center, radius: radius * 1.4);
     canvas.drawCircle(
       center,
@@ -460,7 +492,7 @@ class _SpherePainter extends CustomPainter {
       Paint()
         ..shader = RadialGradient(
           colors: <Color>[
-            Tga.primary.withValues(alpha: 0.10),
+            Tga.primary.withValues(alpha: 0.12),
             Tga.primary.withValues(alpha: 0.0),
           ],
         ).createShader(glowRect),
@@ -471,7 +503,7 @@ class _SpherePainter extends CustomPainter {
       center,
       radius * 1.02,
       Paint()
-        ..color = Tga.primary.withValues(alpha: 0.24)
+        ..color = Tga.primary.withValues(alpha: 0.18)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.1,
     );
@@ -479,17 +511,28 @@ class _SpherePainter extends CustomPainter {
     // 旋转 + 透视投影（写回 screen/zs 供命中测试）。
     screen.clear();
     zs.clear();
+    final List<_V3> rot = <_V3>[];
     for (final _V3 v in pos) {
       final _V3 r = v.rotateX(rotX).rotateY(rotY);
       final double persp = 1 + r.z * 0.32;
       screen.add(Offset(center.dx + r.x * radius * persp,
           center.dy + r.y * radius * persp));
       zs.add(r.z);
+      rot.add(r);
     }
 
+    // 球壳经纬网格 + 顶部高光弧。
     _drawMesh(canvas, center, radius);
+    _drawTopHighlight(canvas, center, radius);
 
-    // 连线：按深度从远到近；粗细/透明度随共现权重。
+    _drawEdges(canvas, center, radius, rot);
+    final List<double> nodeRs = _drawNodes(canvas);
+    _drawLabels(canvas, size, nodeRs);
+  }
+
+  /// 连线：沿球面微弯的贝塞尔曲线；线宽随共现权重，透明度随深度平方渐隐，
+  /// 背面（平均 z<0）统一降透明度，只有近端连线明显。
+  void _drawEdges(Canvas canvas, Offset center, double radius, List<_V3> rot) {
     final List<_Edge> sortedEdges = List<_Edge>.from(edges)
       ..sort((_Edge a, _Edge b) {
         final double za = (zs[a.a] + zs[a.b]) / 2;
@@ -497,88 +540,196 @@ class _SpherePainter extends CustomPainter {
         return za.compareTo(zb);
       });
     final double invMax = 1.0 / math.max(1, maxWeight);
+    final Color edgeColor = Color.lerp(Tga.primary, Tga.cyan, 0.45)!;
     for (final _Edge e in sortedEdges) {
-      final Offset p = screen[e.a];
-      final Offset q = screen[e.b];
-      final double depth = ((zs[e.a] + zs[e.b]) / 2 + 1) / 2; // 0 远 → 1 近
+      final double avgZ = (zs[e.a] + zs[e.b]) / 2;
+      final double depth = (avgZ + 1) / 2; // 0 远 → 1 近
       final double w = (e.weight * invMax).clamp(0.0, 1.0);
-      final double alpha = (0.04 + depth * 0.20) * (0.45 + w * 0.55);
-      canvas.drawLine(
-        p,
-        q,
+      double alpha = (0.05 + depth * depth * 0.30) * (0.45 + w * 0.55);
+      if (avgZ < 0) alpha *= _backDim;
+      if (alpha < 0.012) continue;
+
+      // 控制点取大圆中点外推，使连线沿球面微弯而非直穿球心。
+      final _V3 a = rot[e.a], b = rot[e.b];
+      final _V3 sum = _V3(a.x + b.x, a.y + b.y, a.z + b.z);
+      final double sl =
+          math.sqrt(sum.x * sum.x + sum.y * sum.y + sum.z * sum.z);
+      final _V3 ctrl = sl < 1e-3
+          ? _V3(a.x, a.y + 0.5, a.z)
+          : _V3(sum.x / sl * 1.05, sum.y / sl * 1.05, sum.z / sl * 1.05);
+      final double cp = 1 + ctrl.z * 0.32;
+      final Offset c = Offset(center.dx + ctrl.x * radius * cp,
+          center.dy + ctrl.y * radius * cp);
+
+      final Path path = Path()
+        ..moveTo(screen[e.a].dx, screen[e.a].dy)
+        ..quadraticBezierTo(c.dx, c.dy, screen[e.b].dx, screen[e.b].dy);
+      canvas.drawPath(
+        path,
         Paint()
-          ..color = const Color(0xFF8FA0C4).withValues(alpha: alpha)
-          ..strokeWidth = 0.4 + w * 1.7 + depth * 0.5
+          ..color = edgeColor.withValues(alpha: alpha)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.45 + w * 1.7 + depth * 0.6
           ..strokeCap = StrokeCap.round,
       );
     }
+  }
 
-    // 节点：按深度从远到近（近大远小、近亮远暗 + 径向光晕）。
+  /// 节点：径向渐变填充（中心亮、边缘深）+ 同色外发光大圆；背面整体压暗，
+  /// 正面随深度加亮；选中节点白描边并按 selT 缓动放大。
+  /// 按深度从远到近绘制，返回各节点屏幕半径（标签避让用）。
+  List<double> _drawNodes(Canvas canvas) {
     final List<int> order = List<int>.generate(pos.length, (int i) => i)
       ..sort((int a, int b) => zs[a].compareTo(zs[b]));
     final List<double> nodeRs = List<double>.filled(pos.length, 0);
     for (final int i in order) {
       final double depth = (zs[i] + 1) / 2;
+      final bool back = zs[i] < 0;
+      final bool isSel = i == selected;
       final double degFactor =
           1.0 + math.sqrt((degrees[i] > 0 ? degrees[i] : 1).toDouble()) / 6;
-      final double nodeR =
-          (2.0 + depth * 2.6) * math.min(degFactor, 2.4) * zoom;
+      double nodeR = (2.0 + depth * 2.6) * math.min(degFactor, 2.4) * zoom;
+      if (isSel) nodeR *= 1 + 0.45 * _easeOutBack(selT);
       nodeRs[i] = nodeR;
+
       final Color base =
           Tga.sphereNodes[names[i].hashCode.abs() % Tga.sphereNodes.length];
-      final Color c = Color.lerp(
-              base.withValues(alpha: 0.42), base, 0.35 + depth * 0.65) ??
-          base;
-      // 径向光晕（近端更强）。
-      if (depth > 0.45) {
-        final double haloR = nodeR * 3.0;
+
+      // 外发光：同色大圆（alpha 峰值 0.15），近端更强。
+      final double glowA =
+          (back ? 0.15 * 0.35 : 0.15 * (0.45 + depth * 0.55)) +
+              (isSel ? 0.10 : 0.0);
+      final double haloR = nodeR * 3.0;
+      canvas.drawCircle(
+        screen[i],
+        haloR,
+        Paint()
+          ..shader = RadialGradient(
+            colors: <Color>[
+              base.withValues(alpha: glowA),
+              base.withValues(alpha: 0.0),
+            ],
+          ).createShader(Rect.fromCircle(center: screen[i], radius: haloR)),
+      );
+
+      // 本体：径向渐变，中心亮、边缘深。
+      final double bodyA = back ? _backDim + 0.02 : 0.72 + depth * 0.28;
+      final Color inner = Color.lerp(base, Colors.white, 0.30 + depth * 0.30)!;
+      final Color outer = Color.lerp(base, Tga.bg, 0.45)!;
+      canvas.drawCircle(
+        screen[i],
+        nodeR,
+        Paint()
+          ..shader = RadialGradient(
+            center: const Alignment(-0.3, -0.35),
+            colors: <Color>[
+              inner.withValues(alpha: bodyA),
+              outer.withValues(alpha: bodyA),
+            ],
+          ).createShader(Rect.fromCircle(center: screen[i], radius: nodeR)),
+      );
+
+      if (isSel) {
         canvas.drawCircle(
           screen[i],
-          haloR,
+          nodeR + 1.6,
           Paint()
-            ..shader = RadialGradient(
-              colors: <Color>[
-                c.withValues(alpha: 0.30 * depth),
-                c.withValues(alpha: 0.0),
-              ],
-            ).createShader(Rect.fromCircle(center: screen[i], radius: haloR)),
+            ..color = Colors.white.withValues(alpha: 0.92)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.6,
         );
       }
-      canvas.drawCircle(screen[i], nodeR, Paint()..color = c);
+    }
+    return nodeRs;
+  }
+
+  /// 标签：只画"较近（z>0.25）或度数 Top8"的节点，其余点击选中后才显示；
+  /// 半透明圆角底衬 + 贪心避让防叠字；背面降透明度。
+  void _drawLabels(Canvas canvas, Size size, List<double> nodeRs) {
+    final List<int> cands = <int>[];
+    for (int i = 0; i < names.length && i < zs.length; i++) {
+      if (i == selected) continue; // 最后画，压在最上层
+      if (zs[i] > 0.25 || rank[i] < _labelTop) cands.add(i);
+    }
+    cands.sort((int a, int b) {
+      final int c = zs[b].compareTo(zs[a]);
+      return c != 0 ? c : rank[a].compareTo(rank[b]);
+    });
+    if (selected >= 0 && selected < names.length && selected < zs.length) {
+      cands.add(selected);
     }
 
-    // 标签：Top N 常显，其余随缩放渐显；只画前半球。
-    for (final int i in order.reversed) {
-      if (zs[i] < 0.1) continue;
-      final double depth = (zs[i] + 1) / 2;
-      final double rankAlpha = rank[i] < _labelTop
-          ? 1.0
-          : ((zoom - 1.0) / 1.2).clamp(0.0, 1.0);
+    const double padX = 4.5, padY = 2.0;
+    final List<Rect> placed = <Rect>[];
+    for (final int i in cands) {
+      final bool isSel = i == selected;
       final double alpha =
-          rankAlpha * ((depth - 0.5) / 0.5).clamp(0.0, 1.0);
-      if (alpha <= 0.03) continue;
+          zs[i] < 0 ? 0.32 : 0.55 + 0.45 * zs[i].clamp(0.0, 1.0);
       final TextPainter tp = TextPainter(
         text: TextSpan(
           text: names[i],
           style: TextStyle(
-            fontSize: 10.5,
+            fontSize: 11,
             fontWeight: FontWeight.w600,
-            color: Tga.text.withValues(alpha: alpha * 0.92),
+            color: Tga.text.withValues(alpha: alpha),
           ),
         ),
         textDirection: TextDirection.ltr,
         maxLines: 1,
         ellipsis: '…',
-      )..layout(maxWidth: 110);
-      tp.paint(canvas,
-          Offset(screen[i].dx + nodeRs[i] + 3, screen[i].dy - tp.height / 2));
+      )..layout(maxWidth: 100);
+
+      double dx = screen[i].dx + nodeRs[i] + 5;
+      if (dx + tp.width + padX * 2 > size.width - 2) {
+        dx = screen[i].dx - nodeRs[i] - 5 - tp.width - padX * 2;
+      }
+      final double dy = (screen[i].dy - tp.height / 2)
+          .clamp(padY, size.height - tp.height - padY * 2)
+          .toDouble();
+      final Rect pill =
+          Rect.fromLTWH(dx, dy, tp.width + padX * 2, tp.height + padY * 2);
+      if (!isSel) {
+        bool hit = false;
+        for (final Rect r in placed) {
+          if (r.overlaps(pill)) {
+            hit = true;
+            break;
+          }
+        }
+        if (hit) continue;
+      }
+      placed.add(pill);
+
+      final RRect bg = RRect.fromRectAndRadius(pill, const Radius.circular(5));
+      canvas.drawRRect(
+        bg,
+        Paint()
+          ..color =
+              Tga.card.withValues(alpha: 0.82 * alpha.clamp(0.35, 1.0)),
+      );
+      canvas.drawRRect(
+        bg,
+        Paint()
+          ..color = (isSel ? Tga.primary : Tga.divider)
+              .withValues(alpha: isSel ? 0.75 : 0.6 * alpha)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = isSel ? 1.1 : 0.7,
+      );
+      tp.paint(canvas, Offset(dx + padX, dy + padY));
     }
   }
 
-  /// 球面经纬网格：3 条纬线 + 2 条经线，细淡蓝。
+  /// 选中放大动画缓动（轻微回弹）。
+  static double _easeOutBack(double t) {
+    const double c1 = 1.70158, c3 = c1 + 1;
+    final double p = t - 1;
+    return 1 + c3 * p * p * p + c1 * p * p;
+  }
+
+  /// 球壳经纬网格：4 条纬线 + 4 条经线共 8 段椭圆弧，淡蓝低透明。
   void _drawMesh(Canvas canvas, Offset center, double radius) {
     final Paint p = Paint()
-      ..color = Tga.primary.withValues(alpha: 0.055)
+      ..color = Tga.primary.withValues(alpha: 0.06)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 0.7;
     void drawCircle3D(_V3 Function(int k, int steps) gen) {
@@ -601,7 +752,7 @@ class _SpherePainter extends CustomPainter {
     }
 
     // 纬线
-    for (final double y in <double>[-0.55, 0.0, 0.55]) {
+    for (final double y in <double>[-0.72, -0.24, 0.24, 0.72]) {
       final double r = math.sqrt(math.max(0, 1 - y * y));
       drawCircle3D((int k, int steps) {
         final double t = k / steps * 2 * math.pi;
@@ -609,13 +760,43 @@ class _SpherePainter extends CustomPainter {
       });
     }
     // 经线
-    for (final double ph in <double>[0.0, math.pi / 2]) {
+    for (final double ph in <double>[
+      0.0,
+      math.pi / 4,
+      math.pi / 2,
+      3 * math.pi / 4,
+    ]) {
       drawCircle3D((int k, int steps) {
         final double t = k / steps * 2 * math.pi;
-        return _V3(
-            math.cos(t) * math.cos(ph), math.sin(t), -math.cos(t) * math.sin(ph));
+        return _V3(math.cos(t) * math.cos(ph), math.sin(t),
+            -math.cos(t) * math.sin(ph));
       });
     }
+  }
+
+  /// 顶部高光弧：沿外圈左上段的横向渐变描边，深浅主题下都读作顶部受光。
+  void _drawTopHighlight(Canvas canvas, Offset center, double radius) {
+    final Color hi = Color.lerp(Tga.primary, Tga.text, 0.35)!;
+    final Rect ring = Rect.fromCircle(center: center, radius: radius * 1.02);
+    canvas.drawArc(
+      ring,
+      -math.pi * 0.90,
+      math.pi * 0.42,
+      false,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.topRight,
+          colors: <Color>[
+            hi.withValues(alpha: 0.0),
+            hi.withValues(alpha: 0.22),
+            hi.withValues(alpha: 0.0),
+          ],
+        ).createShader(ring)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.4
+        ..strokeCap = StrokeCap.round,
+    );
   }
 
   @override
@@ -623,7 +804,9 @@ class _SpherePainter extends CustomPainter {
       old.rotX != rotX ||
       old.rotY != rotY ||
       old.zoom != zoom ||
-      old.revision != revision;
+      old.revision != revision ||
+      old.selected != selected ||
+      old.selT != selT;
 }
 
 class _V3 {

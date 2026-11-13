@@ -17,6 +17,7 @@ import 'package:tangram/harness/gateway_discovery.dart';
 import 'package:tangram/harness/im_gateway.dart';
 import 'package:tangram/harness/ilink_wechat.dart';
 import 'package:tangram/harness/login_protocol.dart';
+import 'package:tangram/harness/qq_official.dart';
 import 'package:tangram/harness/qr_login_client.dart';
 import 'package:tangram/harness/store.dart';
 
@@ -121,6 +122,14 @@ class ImService {
   int _ilinkOutbound = 0;
   String _ilinkDetail = '';
 
+  // ---- QQ 官方机器人直连（bots.qq.com token + api.sgroup.qq.com wss 网关，
+  // 协议移植自 im/adapters/qq_official.py / 官方开源 SDK tencent-connect/botpy）----
+  QQOfficial? _qqOfficial;
+  int _qqInbound = 0;
+  int _qqOutbound = 0;
+  String _qqDetail = '';
+  bool _qqEventSubscribed = false;
+
   /// 与 im/feishu_bot.py FeishuBotSession._ADDONS 一致：bot 收发消息权限、
   /// 消息接收事件与卡片回调，随验证 URL 的 addons 参数预置给新建应用。
   static const Map<String, dynamic> kFeishuAppAddons = <String, dynamic>{
@@ -143,7 +152,7 @@ class ImService {
 
   /// 三个连接器与 OpenClaw 通道一一对应（QQ/微信/飞书）。
   static const List<Map<String, String>> kConnectors = <Map<String, String>>[
-    <String, String>{'id': 'qq', 'name': 'QQ', 'detail': 'OneBot / AGP 网关'},
+    <String, String>{'id': 'qq', 'name': 'QQ', 'detail': '官方机器人（AppID/Secret 直连）/ NapCat 沙箱网关'},
     <String, String>{'id': 'wechat', 'name': '微信', 'detail': 'iLink 直连（腾讯真码）/ AGP 网关'},
     <String, String>{'id': 'feishu', 'name': '飞书', 'detail': '扫码一键创建 bot 应用'},
   ];
@@ -180,6 +189,17 @@ class ImService {
     if (ilink.hasToken) {
       _ilinkDetail = 'iLink 直连 · 凭据已存本机（weixin_ilink.json）';
       _ensureIlinkReceive();
+    }
+    // QQ 官方机器人：本机已存有 AppID/Secret → 订阅事件流并恢复 wss 网关
+    // 连接（token 过期时由 QQOfficial 内部真实重新换取，连不上就如实置错）。
+    final qq = _qqOfficial ??= QQOfficial(store);
+    await qq.loadCred();
+    if (qq.hasCred) {
+      _qqDetail = '官方机器人 · 凭据已存本机（qq_official.json）';
+      _subscribeQqEvents();
+      unawaited(qq.connectGateway().catchError((Object e) {
+        onLog?.call('[im] QQ 官方机器人网关恢复失败：$e');
+      }));
     }
     _loaded = true;
   }
@@ -286,6 +306,13 @@ class ImService {
         return _loginStatus(p);
       case 'login_cancel':
         return await _cancelLogin(p);
+      // ---- QQ 官方机器人直连（真实 getAppAccessToken 验证 + wss 网关）----
+      case 'qq_official_save':
+        return await _qqOfficialSave(p);
+      case 'qq_official_status':
+        return _qqOfficialStatus();
+      case 'qq_official_disconnect':
+        return await _qqOfficialDisconnect();
       case 'get_config':
         final id = _id(p);
         return <String, dynamic>{
@@ -661,6 +688,131 @@ class ImService {
   }
 
   // ---------------------------------------------------------------------------
+  // QQ 官方机器人直连：AppID/AppSecret → 真实调用官方 getAppAccessToken 验证
+  // → token 落盘（App 私有目录 qq_official.json）→ api.sgroup.qq.com wss 网关
+  // 长连接（HELLO/IDENTIFY/READY + 心跳，协议对齐官方开源 SDK botpy）
+  // → 收到 C2C/群@ 事件后走真实推理并以 v2 被动回复 API 回发。
+  // 每一步的成败都来自官方真实应答；UI 拿到的「已连接」绝不掺假。
+  // ---------------------------------------------------------------------------
+
+  /// 保存并真实验证官方机器人凭据。成功 = 官方端点签发了 access_token；
+  /// 随后尽力建立 wss 网关连接，网关失败如实带出错误（不影响 token 已验证）。
+  Future<Map<String, dynamic>> _qqOfficialSave(Map<String, dynamic> p) async {
+    final qq = _qqOfficial ??= QQOfficial(store);
+    await qq.loadCred();
+    final String appId = (p['app_id'] ?? '').toString().trim();
+    final String secret = (p['client_secret'] ?? '').toString().trim();
+    if (appId.isEmpty || secret.isEmpty) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': 'AppID 与 AppSecret 均不能为空（QQ 开放平台 q.qq.com 机器人'
+            '「开发设置」页可查）',
+        'adapters': adapters().map((ImAdapterStatus a) => a.toJson()).toList(),
+      };
+    }
+    qq.appId = appId;
+    qq.clientSecret = secret;
+    qq.sandbox = p['sandbox'] == true;
+    final String token;
+    try {
+      token = await qq.fetchAccessToken();
+    } on Object catch (e) {
+      onLog?.call('[im] QQ 官方机器人 token 验证失败：$e');
+      return <String, dynamic>{
+        'ok': false,
+        'error': '$e',
+        'adapters': adapters().map((ImAdapterStatus a) => a.toJson()).toList(),
+      };
+    }
+    final int expiresIn =
+        (qq.expiresAt - DateTime.now().millisecondsSinceEpoch / 1000).round();
+    _subscribeQqEvents();
+    String gatewayError = '';
+    bool gatewayReady = false;
+    try {
+      await qq.connectGateway();
+      gatewayReady = qq.gatewayReady;
+    } on Object catch (e) {
+      gatewayError = '$e';
+    }
+    _qqDetail = gatewayReady
+        ? '官方机器人 · 网关已连接（READY）'
+        : '官方机器人 · token 已验证，网关未连接'
+            '${gatewayError.isNotEmpty ? '（$gatewayError）' : ''}';
+    onLog?.call('[im] QQ 官方机器人：token 已验证'
+        '（${token.length > 6 ? token.substring(0, 6) : token}…，'
+        '${expiresIn}s 有效），'
+        '网关${gatewayReady ? '已连接' : '未连接：$gatewayError'}');
+    return <String, dynamic>{
+      'ok': true,
+      'connected': true,
+      'token_expires_in': expiresIn,
+      'gateway_ready': gatewayReady,
+      'gateway_error': gatewayError,
+      'detail': _qqDetail,
+      'adapters': adapters().map((ImAdapterStatus a) => a.toJson()).toList(),
+    };
+  }
+
+  Map<String, dynamic> _qqOfficialStatus() {
+    final qq = _qqOfficial;
+    return <String, dynamic>{
+      'ok': true,
+      'status': qq?.status() ?? <String, dynamic>{'has_cred': false},
+      'detail': _qqDetail,
+      'inbound': _qqInbound,
+      'outbound': _qqOutbound,
+      'adapters': adapters().map((ImAdapterStatus a) => a.toJson()).toList(),
+    };
+  }
+
+  Future<Map<String, dynamic>> _qqOfficialDisconnect() async {
+    final qq = _qqOfficial;
+    if (qq != null) await qq.disconnectGateway();
+    _qqDetail = qq != null && qq.hasCred
+        ? '官方机器人 · 凭据已存本机，网关已手动断开'
+        : '';
+    return <String, dynamic>{
+      'ok': true,
+      'adapters': adapters().map((ImAdapterStatus a) => a.toJson()).toList(),
+    };
+  }
+
+  /// 事件流只订阅一次：入站消息 → 真实推理 → 官方 v2 被动回复 API 回发。
+  void _subscribeQqEvents() {
+    if (_qqEventSubscribed) return;
+    final qq = _qqOfficial;
+    if (qq == null) return;
+    _qqEventSubscribed = true;
+    qq.onEvent.listen((QqInboundMessage m) => unawaited(_onQqInbound(m)));
+  }
+
+  Future<void> _onQqInbound(QqInboundMessage m) async {
+    if (m.text.trim().isEmpty) return;
+    _qqInbound++;
+    String reply;
+    try {
+      reply = await infer(m.text);
+    } on Object catch (e) {
+      reply = '（这条消息处理失败了：$e）';
+    }
+    final qq = _qqOfficial;
+    if (qq == null) return;
+    try {
+      await qq.replyText(
+          scope: m.scope,
+          targetId: m.targetId,
+          text: reply,
+          msgId: m.msgId);
+      _qqOutbound++;
+      _qqDetail = '官方机器人 · 收 $_qqInbound / 发 $_qqOutbound';
+      onLog?.call('[im] QQ 官方机器人：已回复 ${m.scope}:${m.targetId}');
+    } on Object catch (e) {
+      onLog?.call('[im] QQ 官方机器人发送失败：$e');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // 飞书直连：官方设备授权流（lark_oapi register_app 同款协议，见
   // feishu_direct.dart），无需网关即可出「扫码建应用」真码。
   // ---------------------------------------------------------------------------
@@ -1004,6 +1156,35 @@ class ImService {
           configured: true,
         );
       }
+      // QQ 官方机器人直连：已连接只认两样真东西——官方端点刚签发的
+      // 有效 access_token，或 wss 网关真实 READY。二者皆无就绝不亮绿。
+      if (id == 'qq' && (_qqOfficial?.hasCred ?? false)) {
+        final QQOfficial q = _qqOfficial!;
+        final bool connected = q.tokenValid || q.gatewayReady;
+        final String detail = q.gatewayReady
+            ? (_qqDetail.isNotEmpty
+                ? _qqDetail
+                : '官方机器人 · 网关已连接（READY）')
+            : connected
+                ? '官方机器人 · token 已验证，网关未连接'
+                    '${q.lastError.isNotEmpty ? '（${q.lastError}）' : ''}'
+                : '官方机器人 · 凭据已存本机，token 已过期'
+                    '${q.lastError.isNotEmpty ? '（${q.lastError}）' : ''}';
+        return ImAdapterStatus(
+          id: id,
+          name: meta['name'] ?? id,
+          connected: connected,
+          state: q.gatewayReady
+              ? 'connected'
+              : (connected ? 'configured' : 'disconnected'),
+          detail: detail,
+          url: (cfg['url'] ?? '').toString(),
+          guid: q.appId,
+          inbound: _qqInbound,
+          outbound: _qqOutbound,
+          configured: true,
+        );
+      }
       // 飞书直连成功过（真实凭据已落盘）：渠道已授权。消息收发仍需网关
       // 侧官方长连接承接，detail 如实说明凭据来源，不虚报 AGP 连接。
       if (id == 'feishu' && _feishuDirectAuthorized) {
@@ -1073,6 +1254,9 @@ class ImService {
     _ilinkReceive = null;
     _ilink?.dispose();
     _ilink = null;
+    _qqOfficial?.dispose();
+    _qqOfficial = null;
+    _qqEventSubscribed = false;
     for (final gw in _gateways.values) {
       await gw.dispose();
     }

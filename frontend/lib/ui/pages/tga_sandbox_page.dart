@@ -1,18 +1,25 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../bridge/backend_client.dart';
 import '../../bridge/bridge_protocol.dart';
 import '../../design/tga_design.dart';
+import '../../services/persona_store.dart';
+import '../../services/sandbox_runtime.dart';
+import '../../services/ssh_sandbox.dart';
 
-/// 内置沙箱（真实化改造 + Linux 全真实执行）：
-/// - 去掉顶部假「策略」横幅；
-/// - 终端字体紧凑真实：等宽 fontSize 12、行高 1.35、letterSpacing 0，
-///   提示符随真实 cwd 变化（`tga@sandbox:~/work$`）；
-/// - 命令经 code_task shell RPC 交给**系统真实 shell** 执行：桌面端
-///   bash/sh（apt、pkg、pip、curl、gcc… 全部真命令真输出），安卓走
-///   /system/bin/sh（toybox）；真实 shell 不可用时才回退内置解释器。
-///   输出/退出码/失败原因如实回显，绝不模拟成功。
+/// 沙箱终端（问题 #2/#22 真实化）：
+/// - 「内置沙箱」：桌面端系统 bash/sh（apt/pkg/pip 真命令）；安卓
+///   /system/bin/sh（toybox，如实报 command not found），并提供
+///   「Debian 扩展包」入口——真实下载 proot + Alpine rootfs 后，
+///   apk/python/pip 在用户态里真跑（exec 被 ROM 拒绝时如实报错）。
+/// - 「远端沙箱（SSH）」：dartssh2 真实握手 + 密码/私钥认证，终端所有
+///   命令在远端真实 Linux 执行；右上「⚙」配置主机/凭据，「连接测试」
+///   走完整 SSH 认证并在远端执行 uname。
+/// - #22 紧凑真实 tty：等宽 12 号、行高 1.3、80x24、欢迎横幅 2~3 行。
 class TgaSandboxPage extends StatefulWidget {
   const TgaSandboxPage({super.key});
 
@@ -20,15 +27,30 @@ class TgaSandboxPage extends StatefulWidget {
   State<TgaSandboxPage> createState() => _TgaSandboxPageState();
 }
 
+// 终端配色（页面与 SSH 配置对话框共用）。
+const Color _termBg = Color(0xFF141A26);
+const Color _termFg = Color(0xFFCFD8E8);
+const Color _termGreen = Color(0xFF5FD6A0);
+const Color _termDim = Color(0xFF9FB0CC);
+
 class _TgaSandboxPageState extends State<TgaSandboxPage> {
   final TextEditingController _input = TextEditingController();
   final List<String> _lines = <String>[];
   bool _running = false;
 
-  static const Color _termBg = Color(0xFF141A26);
-  static const Color _termFg = Color(0xFFCFD8E8);
-  static const Color _termGreen = Color(0xFF5FD6A0);
-  static const Color _termDim = Color(0xFF9FB0CC);
+  /// 已加载的 SSH 配置（null = 未配置）。
+  SshConfig? _ssh;
+
+  /// Android Debian 扩展包状态（code_task debian_status 真实回执）。
+  Map<String, dynamic> _debian = const <String, dynamic>{};
+  Timer? _debianTimer;
+
+  static const TextStyle _ts = TextStyle(
+      fontFamily: 'monospace',
+      fontSize: 12,
+      height: 1.3,
+      letterSpacing: 0,
+      color: _termFg);
 
   @override
   void initState() {
@@ -38,6 +60,19 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
     String two(int n) => n.toString().padLeft(2, '0');
     _lines.add('Last login: ${two(now.month)} ${two(now.day)} '
         '${two(now.hour)}:${two(now.minute)} on in-app tty');
+    SshSandbox.instance.loadConfig().then((SshConfig? c) {
+      if (mounted) setState(() => _ssh = c);
+    });
+    if (Platform.isAndroid) {
+      _refreshDebianStatus();
+    }
+  }
+
+  @override
+  void dispose() {
+    _debianTimer?.cancel();
+    _input.dispose();
+    super.dispose();
   }
 
   /// 后端维护的真实 cwd：'.'=沙箱根；相对路径=根内子目录；
@@ -50,17 +85,36 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
           ? _cwd
           : '~/$_cwd';
 
-  /// 执行一条命令：走 code_task shell RPC。默认由后端交给系统真实
-  /// shell 执行（桌面 bash / 安卓 /system/bin/sh），起不来才回退内置
-  /// 解释器（pwd/ls/cd/cat/mkdir/rm/mv/cp/head/tail/wc/date/whoami/
-  /// uname/help，纯算式自动落表达式求值）。结果如实回显，失败不编造。
+  bool get _remote {
+    final String env = context.read<PersonaStore>().sandboxEnvironment;
+    return env.contains('SSH');
+  }
+
+  bool get _debianReady => _debian['installed'] == true;
+
+  /// 提示符主机名：远端 user@host / Debian root@debian / 本地 tga@sandbox。
+  String get _hostShown {
+    if (_remote) {
+      final c = _ssh;
+      return c != null && c.host.isNotEmpty
+          ? '${c.user}@${c.host.split('.').first}'
+          : 'tga@remote';
+    }
+    if (Platform.isAndroid && _debianReady) return 'root@debian';
+    return 'tga@sandbox';
+  }
+
+  /// 执行一条命令：走 code_task shell RPC，由后端按沙箱环境分流
+  /// （远端 SSH / Debian 用户态 / 系统真实 shell / 内置解释器兜底）。
+  /// 输出/退出码/失败原因全部如实回显，失败不编造。
   Future<void> _submit() async {
     final String cmd = _input.text.trim();
     if (cmd.isEmpty || _running) return;
     _input.clear();
     final String shownCwd = _cwdShown;
+    final String prompt = '$_hostShown:$shownCwd\$ ';
     setState(() {
-      _lines.add('tga@sandbox:$shownCwd\$ $cmd');
+      _lines.add('$prompt$cmd');
       _running = true;
     });
     try {
@@ -100,22 +154,250 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
     }
   }
 
-  @override
-  void dispose() {
-    _input.dispose();
-    super.dispose();
+  // ---- Debian 扩展包：真实下载进度 ----
+
+  Future<void> _refreshDebianStatus() async {
+    try {
+      final BackendClient backend = context.read<BackendClient>();
+      final BridgeEnvelope env = await backend.sendControl(
+          'code_task', <String, dynamic>{'action': 'debian_status'});
+      if (!mounted) return;
+      if (env.payload is Map) {
+        setState(() => _debian = Map<String, dynamic>.from(env.payload as Map));
+        final String step = (_debian['step'] ?? 'idle').toString();
+        if (step == 'downloading' || step == 'extracting') {
+          _debianTimer ??= Timer.periodic(
+              const Duration(milliseconds: 800), (_) => _refreshDebianStatus());
+        } else {
+          _debianTimer?.cancel();
+          _debianTimer = null;
+        }
+      }
+    } on Object {
+      // 后端未就绪：保持上次状态，不谎报。
+    }
+  }
+
+  Future<void> _installDebian() async {
+    try {
+      final BackendClient backend = context.read<BackendClient>();
+      final BridgeEnvelope env = await backend.sendControl(
+          'code_task', <String, dynamic>{'action': 'debian_install'});
+      if (!mounted) return;
+      final p = env.payload;
+      if (p is Map && p['ok'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('开始真实下载（约 4.2 MB，进度见面板）')));
+        await _refreshDebianStatus();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('启动失败：${(p is Map ? p['error'] : '未知错误')}')));
+      }
+    } on Object catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('启动失败：$e')));
+      }
+    }
+  }
+
+  void _showDebianSheet() {
+    _refreshDebianStatus();
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1B2333),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (BuildContext ctx) => StatefulBuilder(
+        builder: (BuildContext ctx, StateSetter outerSetState) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text('Debian 扩展包（proot 用户态）',
+                  style: const TextStyle(
+                      color: _termGreen,
+                      fontSize: 14,
+                      fontFamily: 'monospace')),
+              const SizedBox(height: 8),
+              Text(
+                  '下载 proot（UserLAnd arm64）+ Alpine 3.20 minirootfs，'
+                  '解包后 apk/python/pip 在本机用户态真实执行。',
+                  style: const TextStyle(color: _termDim, fontSize: 12, height: 1.4)),
+              const SizedBox(height: 12),
+              if (_debianReady)
+                Text('已就绪：${_debian['rootfs']}',
+                    style: const TextStyle(
+                        color: _termGreen, fontSize: 12, fontFamily: 'monospace'))
+              else ...<Widget>[
+                LinearProgressIndicator(
+                  value: (( _debian['percent'] as num?)?.toDouble() ?? 0) / 100,
+                  minHeight: 6,
+                  backgroundColor: const Color(0xFF2A3446),
+                  color: _termGreen,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '${_stepLabel()} · '
+                  '${_mb(_debian['downloaded'])} / ${_mb(_debian['total'])} 真实落盘字节',
+                  style: const TextStyle(color: _termDim, fontSize: 12)),
+                if ((_debian['error'] ?? '').toString().isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text('失败：${_debian['error']}',
+                        style: const TextStyle(
+                            color: Color(0xFFE86A6A), fontSize: 12)),
+                  ),
+              ],
+              const SizedBox(height: 14),
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: _debianReady || _debian['installing'] == true
+                          ? null
+                          : () async {
+                              await _installDebian();
+                              outerSetState(() {});
+                            },
+                      style: OutlinedButton.styleFrom(
+                          foregroundColor: _termGreen,
+                          side: const BorderSide(color: _termGreen)),
+                      child: Text(_debianReady
+                          ? '已安装'
+                          : _debian['installing'] == true
+                              ? '安装中…'
+                              : '下载并安装'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      style: OutlinedButton.styleFrom(
+                          foregroundColor: _termDim,
+                          side: const BorderSide(color: Color(0xFF2A3446))),
+                      child: const Text('关闭'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '注：Android 10+ 若 ROM 强制禁止执行应用私有目录文件，首次执行会'
+                '如实报错；此时请用「远端沙箱（SSH）」跑 apt。',
+                style: const TextStyle(color: Color(0xFF5A6880), fontSize: 11)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _stepLabel() => switch (_debian['step']?.toString() ?? 'idle') {
+        'downloading' => '下载中',
+        'extracting' => '解包 rootfs 中',
+        'ready' => '已就绪',
+        'failed' => '失败',
+        _ => '未安装',
+      };
+
+  static String _mb(dynamic bytes) {
+    final int b = bytes is num ? bytes.toInt() : 0;
+    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(0)} KB';
+    return '${(b / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+
+  // ---- 远端 SSH 配置 ----
+
+  void _showSshDialog() {
+    showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) => _SshConfigDialog(
+        initial: _ssh,
+        onSaved: (SshConfig cfg, bool savedReal) async {
+          setState(() => _ssh = cfg);
+          // 切到远端环境（本地记录 + 后端策略真实同步）。
+          if (context.mounted) {
+            context.read<SandboxRuntime>().setEnvironment('远端沙箱（SSH）');
+          }
+          if (!savedReal && context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content:
+                    Text('配置仅保存在内存：本机加密存储不可用（桌面缺少密钥环等）')));
+          }
+        },
+        onCleared: () {
+          setState(() => _ssh = null);
+          if (context.mounted && _remote) {
+            context.read<SandboxRuntime>().setEnvironment('内置沙箱');
+          }
+        },
+      ),
+    );
+  }
+
+  /// 欢迎横幅：按环境如实描述（2~3 行，真实 tty 风格）。
+  List<String> get _welcome {
+    if (_remote) {
+      final c = _ssh;
+      final String target = c != null && c.host.isNotEmpty ? c.display : '未配置';
+      return <String>[
+        'remote linux via ssh · $target',
+        'apt · pip · python 全部在远端真实执行；连接失败如实报错。',
+        '右上「⚙」改主机/凭据；输入 help 看说明。',
+      ];
+    }
+    if (Platform.isAndroid) {
+      if (_debianReady) {
+        return <String>[
+          'alpine 3.20 userland via proot · apk · python · pip 真实执行',
+          '（apt 为 Debian 系命令，此 rootfs 用 apk；需要 apt 请用「远端沙箱(SSH)」。）',
+        ];
+      }
+      return <String>[
+        'toybox /system/bin/sh · 安卓本机无 apt/pip（如实 command not found）',
+        '跑 apt：右上「⬇」装 Debian 扩展包（proot），或「⚙」连远端 Linux(SSH)。',
+      ];
+    }
+    return <String>[
+      'system shell bash/sh · apt · pkg · pip · curl · gcc 全部真实执行',
+      'missing commands report honestly, never faked.',
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
     Tga.syncFrom(context);
+    context.watch<PersonaStore>(); // 环境切换实时刷新
+    final String host = _hostShown;
+    final bool remote = _remote;
     return Scaffold(
       backgroundColor: Tga.bg,
       appBar: AppBar(
         backgroundColor: Tga.bg,
         elevation: 0,
         scrolledUnderElevation: 0,
-        title: Text('内置沙箱', style: Tga.h1),
+        title: Text(remote ? '沙箱终端 · 远端' : '沙箱终端', style: Tga.h1),
+        actions: <Widget>[
+          if (Platform.isAndroid && !remote)
+            IconButton(
+              icon: Icon(
+                  _debianReady
+                      ? Icons.verified_outlined
+                      : Icons.download_outlined,
+                  color: Tga.primary),
+              tooltip: 'Debian 扩展包（proot 用户态）',
+              onPressed: _showDebianSheet,
+            ),
+          IconButton(
+            icon: Icon(Icons.settings_outlined,
+                color: remote ? _termGreen : Tga.primary),
+            tooltip: '远端沙箱（SSH）配置',
+            onPressed: _showSshDialog,
+          ),
+        ],
       ),
       body: Column(
         children: <Widget>[
@@ -132,10 +414,10 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
-                  // 终端标题条
+                  // 终端标题条：主机 + 80x24
                   Container(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 10),
+                        horizontal: 14, vertical: 8),
                     color: const Color(0xFF1B2333),
                     child: Row(
                       children: <Widget>[
@@ -145,88 +427,57 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
                         const SizedBox(width: 6),
                         _dot(const Color(0xFF5FD6A0)),
                         const SizedBox(width: 12),
-                        const Text('tga@sandbox — 50x14',
-                            style: TextStyle(
-                                fontSize: 12,
-                                letterSpacing: 0,
-                                color: Color(0xFF8C99B0),
+                        Expanded(
+                          child: Text('$host — 80x24',
+                              style: const TextStyle(
+                                  fontSize: 12,
+                                  letterSpacing: 0,
+                                  color: Color(0xFF8C99B0),
+                                  fontFamily: 'monospace')),
+                        ),
+                        Text(remote
+                            ? (SshSandbox.instance.isConnected
+                                ? 'ssh · connected'
+                                : 'ssh · 未连接')
+                            : (Platform.isAndroid
+                                ? (_debianReady ? 'proot' : 'toybox')
+                                : 'bash/sh'),
+                            style: const TextStyle(
+                                fontSize: 11,
+                                color: Color(0xFF5A6880),
                                 fontFamily: 'monospace')),
                       ],
                     ),
                   ),
-                  // 欢迎语 + 能力契约 + 执行历史（靠上）
+                  // 欢迎语 + 执行历史（靠上）
                   Expanded(
                     child: ListView(
-                      padding: const EdgeInsets.all(16),
+                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
                       children: <Widget>[
-                        const Text('tga@sandbox:~\$ tangram-sandbox --version',
-                            style: TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 12,
-                                height: 1.35,
-                                letterSpacing: 0,
-                                color: _termGreen)),
-                        const Text('Tangram Sandbox v0.0.2 '
-                            '(real system shell · in-process harness)',
-                            style: TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 12,
-                                height: 1.35,
-                                letterSpacing: 0,
-                                color: _termFg)),
-                        const SizedBox(height: 8),
-                        Text(
-                            'Welcome to the real Linux workspace.\n'
-                            'Commands run in the system shell (bash/sh) '
-                            'via the code_task RPC.\n'
-                            'apt · pkg · pip · curl · gcc · grep … all real; '
-                            'missing ones report honestly.\n'
-                            'Type an expression and press Enter, e.g. 2+3*4',
-                            style: const TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 12,
-                                height: 1.35,
-                                letterSpacing: 0,
-                                color: _termFg)),
-                        const SizedBox(height: 12),
-                        const Text('tga@sandbox:~\$ cat /etc/capability_contract',
-                            style: TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 12,
-                                height: 1.35,
-                                letterSpacing: 0,
-                                color: _termGreen)),
-                        ..._contract.map(
-                          (String s) => Text(s,
-                              style: const TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 12,
-                                  height: 1.35,
-                                  letterSpacing: 0,
-                                  color: _termDim)),
-                        ),
+                        for (final String line in _welcome)
+                          Text(line, style: _ts),
                         ..._lines.map(
                           (String s) => Padding(
-                            padding: const EdgeInsets.only(top: 6),
+                            padding: const EdgeInsets.only(top: 2),
                             child: Text(s,
                                 style: TextStyle(
                                     fontFamily: 'monospace',
                                     fontSize: 12,
-                                    height: 1.35,
+                                    height: 1.3,
                                     letterSpacing: 0,
-                                    color: s.startsWith('tga@sandbox')
+                                    color: s.startsWith('$host:')
                                         ? _termGreen
                                         : _termDim)),
                           ),
                         ),
                         if (_running)
                           const Padding(
-                            padding: EdgeInsets.only(top: 6),
+                            padding: EdgeInsets.only(top: 2),
                             child: Text('running…',
                                 style: TextStyle(
                                     fontFamily: 'monospace',
                                     fontSize: 12,
-                                    height: 1.35,
+                                    height: 1.3,
                                     letterSpacing: 0,
                                     color: _termDim)),
                           ),
@@ -235,30 +486,28 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
                   ),
                   // 命令输入行（贴底部）
                   Container(
-                    padding: const EdgeInsets.fromLTRB(14, 8, 10, 12),
+                    padding: const EdgeInsets.fromLTRB(12, 6, 10, 10),
                     decoration: const BoxDecoration(
                       border: Border(
                           top: BorderSide(color: Color(0xFF2A3446), width: 1)),
                     ),
                     child: Row(
                       children: <Widget>[
-                        Text('tga@sandbox:$_cwdShown\$ ',
-                            style: const TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 12,
-                                height: 1.35,
-                                letterSpacing: 0,
-                                color: _termGreen)),
+                        Flexible(
+                          child: Text('$host:$_cwdShown\$ ',
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: 12,
+                                  height: 1.3,
+                                  letterSpacing: 0,
+                                  color: _termGreen)),
+                        ),
                         Expanded(
                           child: TextField(
                             controller: _input,
                             onSubmitted: (_) => _submit(),
-                            style: const TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 12,
-                                height: 1.35,
-                                letterSpacing: 0,
-                                color: _termFg),
+                            style: _ts,
                             cursorColor: _termGreen,
                             decoration: const InputDecoration(
                               isCollapsed: true,
@@ -294,16 +543,271 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
         height: 9,
         decoration: BoxDecoration(color: c, shape: BoxShape.circle),
       );
+}
 
-  /// 能力契约：以 shell 输出风格如实描述内置沙箱的真实边界。
-  static const List<String> _contract = <String>[
-    '1. execution : system shell (bash / sh / toybox) — real commands,',
-    '               real exit codes; dart expressions in restricted isolate',
-    '2. filesystem: default cwd = app-private sandbox dir; cd anywhere',
-    '               the OS account can reach (same as real Linux)',
-    '3. packages  : apt/pkg/pip run for real; permission or missing',
-    '               package failures are reported verbatim, never faked',
-    '4. timeout   : 60s per command, then SIGKILL (honest "timeout")',
-    '5. tools     : sandbox · current_time · recall_memory · remember_note',
-  ];
+// ---------------------------------------------------------------------------
+// 远端沙箱（SSH）配置：主机/端口/用户/密码或私钥 + 真实握手连接测试
+// ---------------------------------------------------------------------------
+class _SshConfigDialog extends StatefulWidget {
+  const _SshConfigDialog({
+    required this.initial,
+    required this.onSaved,
+    required this.onCleared,
+  });
+
+  final SshConfig? initial;
+  final Future<void> Function(SshConfig cfg, bool savedReal) onSaved;
+  final VoidCallback onCleared;
+
+  @override
+  State<_SshConfigDialog> createState() => _SshConfigDialogState();
+}
+
+class _SshConfigDialogState extends State<_SshConfigDialog> {
+  late final TextEditingController _host;
+  late final TextEditingController _port;
+  late final TextEditingController _user;
+  late final TextEditingController _password;
+  late final TextEditingController _key;
+  late final TextEditingController _passphrase;
+  late String _auth;
+
+  bool _testing = false;
+  String _result = '';
+  bool _resultOk = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final SshConfig? c = widget.initial;
+    _host = TextEditingController(text: c?.host ?? '');
+    _port = TextEditingController(text: '${c?.port ?? 22}');
+    _user = TextEditingController(text: c?.user ?? '');
+    _password = TextEditingController(text: c?.password ?? '');
+    _key = TextEditingController(text: c?.privateKey ?? '');
+    _passphrase = TextEditingController(text: c?.passphrase ?? '');
+    _auth = c?.auth ?? '密码';
+  }
+
+  @override
+  void dispose() {
+    for (final t in <TextEditingController>[
+      _host,
+      _port,
+      _user,
+      _password,
+      _key,
+      _passphrase,
+    ]) {
+      t.dispose();
+    }
+    super.dispose();
+  }
+
+  SshConfig _collect() => SshConfig(
+        host: _host.text.trim(),
+        port: int.tryParse(_port.text.trim()) ?? 22,
+        user: _user.text.trim(),
+        auth: _auth,
+        password: _auth == '密码' ? _password.text : '',
+        privateKey: _auth == '私钥' ? _key.text : '',
+        passphrase: _auth == '私钥' ? _passphrase.text : '',
+      );
+
+  /// 真实握手测试：完整 SSH 传输层协商 + 认证 + 远端执行 uname -a。
+  Future<void> _test() async {
+    final SshConfig cfg = _collect();
+    if (cfg.host.isEmpty || cfg.user.isEmpty || !cfg.usable) {
+      setState(() {
+        _result = '请填写主机、用户名与${_auth == '私钥' ? '私钥' : '密码'}';
+        _resultOk = false;
+      });
+      return;
+    }
+    setState(() {
+      _testing = true;
+      _result = '';
+    });
+    try {
+      final String info = await SshSandbox.instance.testConnection(cfg);
+      if (!mounted) return;
+      setState(() {
+        _testing = false;
+        _resultOk = true;
+        _result = '握手+认证成功：$info';
+      });
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _testing = false;
+        _resultOk = false;
+        _result = '连接失败：$e';
+      });
+    }
+  }
+
+  Future<void> _save() async {
+    final SshConfig cfg = _collect();
+    if (cfg.host.isEmpty || cfg.user.isEmpty || !cfg.usable) {
+      setState(() {
+        _resultOk = false;
+        _result = '请填写主机、用户名与${_auth == '私钥' ? '私钥' : '密码'}';
+      });
+      return;
+    }
+    final bool savedReal = await SshSandbox.instance.saveConfig(cfg);
+    if (!mounted) return;
+    await widget.onSaved(cfg, savedReal);
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  Future<void> _clear() async {
+    await SshSandbox.instance.clearConfig();
+    if (!mounted) return;
+    widget.onCleared();
+    Navigator.of(context).pop();
+  }
+
+  Widget _field(String label, TextEditingController ctrl,
+      {bool obscure = false, TextInputType? keyboard, int maxLines = 1}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: TextField(
+        controller: ctrl,
+        obscureText: obscure,
+        keyboardType: keyboard,
+        maxLines: maxLines,
+        style: const TextStyle(
+            fontFamily: 'monospace', fontSize: 13, color: _termFg),
+        decoration: InputDecoration(
+          labelText: label,
+          isDense: true,
+          labelStyle: const TextStyle(fontSize: 12, color: _termDim),
+          enabledBorder:
+              const UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF2A3446))),
+          focusedBorder:
+              const UnderlineInputBorder(borderSide: BorderSide(color: _termGreen)),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: _termBg,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('远端沙箱（SSH）',
+          style: TextStyle(
+              color: _termGreen, fontSize: 15, fontFamily: 'monospace')),
+      content: SizedBox(
+        width: 340,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              _field('主机', _host),
+              _field('端口', _port, keyboard: TextInputType.number),
+              _field('用户名', _user),
+              Row(
+                children: <Widget>[
+                  const Text('认证方式',
+                      style: TextStyle(fontSize: 12, color: _termDim)),
+                  const SizedBox(width: 12),
+                  DropdownButton<String>(
+                    value: _auth,
+                    dropdownColor: _termBg,
+                    style: const TextStyle(fontSize: 13, color: _termFg),
+                    underline: const SizedBox.shrink(),
+                    items: const <DropdownMenuItem<String>>[
+                      DropdownMenuItem<String>(value: '密码', child: Text('密码')),
+                      DropdownMenuItem<String>(value: '私钥', child: Text('私钥')),
+                    ],
+                    onChanged: (String? v) =>
+                        setState(() => _auth = v ?? '密码'),
+                  ),
+                ],
+              ),
+              if (_auth == '密码')
+                _field('密码', _password, obscure: true)
+              else ...<Widget>[
+                _field('私钥（PEM）', _key, maxLines: 5),
+                _field('私钥口令（可选）', _passphrase, obscure: true),
+              ],
+              if (_result.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 6),
+                Text(_result,
+                    style: TextStyle(
+                        fontSize: 11.5,
+                        height: 1.3,
+                        fontFamily: 'monospace',
+                        color: _resultOk ? _termGreen : const Color(0xFFE86A6A))),
+              ],
+              const SizedBox(height: 6),
+              const Text('「连接测试」= 真实 SSH 握手 + 认证 + 远端 uname；凭据加密存于本机。',
+                  style: TextStyle(fontSize: 11, color: Color(0xFF5A6880))),
+              const SizedBox(height: 10),
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: _testing ? null : _test,
+                      style: OutlinedButton.styleFrom(
+                          foregroundColor: _termGreen,
+                          side: const BorderSide(color: _termGreen)),
+                      child: _testing
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: _termGreen))
+                          : const Text('连接测试',
+                              style: TextStyle(fontSize: 13)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: _save,
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF274058),
+                          foregroundColor: _termFg),
+                      child: const Text('保存并启用',
+                          style: TextStyle(fontSize: 13)),
+                    ),
+                  ),
+                ],
+              ),
+              if (widget.initial != null) ...<Widget>[
+                const SizedBox(height: 8),
+                Row(
+                  children: <Widget>[
+                    TextButton(
+                      onPressed: () {
+                        SshSandbox.instance.disconnect();
+                        setState(() {
+                          _resultOk = false;
+                          _result = '已断开 SSH 会话。';
+                        });
+                      },
+                      child: const Text('断开连接',
+                          style: TextStyle(fontSize: 12, color: _termDim)),
+                    ),
+                    const Spacer(),
+                    TextButton(
+                      onPressed: _clear,
+                      child: const Text('清除配置',
+                          style:
+                              TextStyle(fontSize: 12, color: Color(0xFFE86A6A))),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

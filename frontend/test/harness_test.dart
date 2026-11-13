@@ -311,12 +311,27 @@ void main() {
   });
 
   group('模型注册表：用户添加的模型真实出现在选择器', () {
-    test('空态只有内置引擎，标记（本地）', () async {
+    test('空态 = 内置免费云端模型（Kilo）+ 内置引擎，兜底标记（本地）', () async {
       final reg = await ModelRegistry.forTest(store);
-      expect(reg.entries.length, 1);
-      expect(reg.entries.first.builtin, isTrue);
+      expect(reg.entries.length, 1 + kBuiltinFreeModels.length);
+      expect(reg.entries.last.builtin, isTrue);
+      expect(reg.entries.first.free, isTrue);
       expect(reg.selected.displayName, contains('（本地）'));
       expect(reg.chatParams()['model_kind'], 'builtin');
+    });
+
+    test('内置免费模型可选：chatParams 带真实 base/model、free 标记且无需密钥',
+        () async {
+      final reg = await ModelRegistry.forTest(store);
+      final free = kBuiltinFreeModels.first;
+      await reg.setSelected(free.id);
+      expect(reg.selectedId, free.id);
+      final p = reg.chatParams();
+      expect(p['api_base'], 'https://api.kilo.ai/api/gateway');
+      expect(p['model'], free.modelId);
+      expect(p['model_kind'], 'cloud');
+      expect(p['free'], isTrue);
+      expect(p['api_key'], isEmpty);
     });
 
     test('保存 API →（云端）+ 自动选中 + chatParams 携带真实凭据', () async {
