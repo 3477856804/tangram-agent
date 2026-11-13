@@ -145,6 +145,8 @@ jobs:
       PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
       - name: Install Flutter 3.50.0 (镜像直装)
         shell: pwsh
         run: |
@@ -169,6 +171,22 @@ jobs:
           export PATH="$HOME/bin:$PATH"
           python3 --version
           bash scripts/build_frontend.sh windows --extra "--release"
+      - name: Authenticode 签名（与安卓发布同一把密钥）
+        shell: pwsh
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:ANDROID_KEYSTORE_BASE64) { Write-Host '无签名密钥,跳过'; exit 0 }
+          [IO.File]::WriteAllBytes("$env:TEMP\t.jks", [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
+          & keytool -importkeystore -srckeystore "$env:TEMP\t.jks" -srcstorepass $env:STORE_PASSWORD -srcalias tangram -destkeystore "$env:TEMP\t.p12" -deststoretype PKCS12 -deststorepass $env:STORE_PASSWORD -noprompt
+          $st = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'x64' } | Select-Object -Last 1
+          if (-not $st) { $st = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
+          if (-not $st) { Write-Host 'signtool 不可用,跳过'; exit 0 }
+          $exe = "frontend/build/windows/x64/runner/Release/tangram.exe"
+          & $st sign /f "$env:TEMP\t.p12" /p $env:STORE_PASSWORD /fd SHA384 /d "TGA tangram-agent" $exe
+          & $st verify /pa /v $exe 2>&1 | Select-Object -Last 5
       - name: Package
         shell: pwsh
         run: |
@@ -376,6 +394,27 @@ jobs:
         with: { path: dist }
       - name: List
         run: find dist -type f -printf '%s %p\n' | sort -rn
+      - name: 用安卓发布私钥签名全部产物（分离签名 + 校验清单）
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$ANDROID_KEYSTORE_BASE64" ] || { echo "无密钥,跳过签名"; exit 0; }
+          sudo apt-get update -qq && sudo apt-get install -y -qq openjdk-21-jre-headless >/dev/null
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > /tmp/t.jks
+          keytool -importkeystore -srckeystore /tmp/t.jks -srcstorepass "$STORE_PASSWORD" -srcalias tangram -destkeystore /tmp/t.p12 -deststoretype PKCS12 -deststorepass "$STORE_PASSWORD" -noprompt
+          openssl pkcs12 -in /tmp/t.p12 -passin pass:"$STORE_PASSWORD" -nokeys -clcerts -out /tmp/cert.pem
+          openssl pkcs12 -in /tmp/t.p12 -passin pass:"$STORE_PASSWORD" -nocerts -nodes -out /tmp/key.pem
+          cd dist
+          find . -type f ! -name '*.sig' ! -name 'SHA256SUMS*' ! -name 'tangram-release-*' | while read -r f; do
+            openssl dgst -sha256 -sign /tmp/key.pem -out "$f.sig" "$f"
+          done
+          find . -type f ! -name '*.sig' ! -name 'SHA256SUMS.txt' ! -name 'tangram-release-*' -exec sha256sum {} \; | sed 's|\./||' | sort > SHA256SUMS.txt
+          openssl dgst -sha256 -sign /tmp/key.pem -out SHA256SUMS.sig SHA256SUMS.txt
+          cp /tmp/cert.pem tangram-release-cert.pem
+          openssl x509 -in /tmp/cert.pem -noout -subject -fingerprint -sha256
+          echo "== 已签名 =="; find . -name '*.sig' | sort
       - name: 读取版本（OTA 标签真源 = android 构建的 version.properties）
         run: |
           V=$(grep -o 'versionName=[0-9.]*' dist/android/APK_VERSION.txt | cut -d= -f2)
@@ -391,6 +430,6 @@ jobs:
           body: |
             由 GitHub Actions 自动构建（commit ${{ github.sha }}）。
             六平台产物：Android APK(arm64)/AAB · Windows x64 · Linux x64 · macOS(arm64) · iOS(未签名 ipa，需自行签名安装) · HarmonyOS(hap，尽力构建)。
-            Windows/macOS/iOS 包未签名，首次运行需手动放行。本仓库仅含安装包，不含源码。
+            全部产物均用安卓发布同一把 RSA 私钥做分离签名（同名 .sig + SHA256SUMS.txt/SHA256SUMS.sig，公钥见 tangram-release-cert.pem）；Windows tangram.exe 已用同一密钥 Authenticode 自签名（自签证书不受系统默认信任，SmartScreen 仍需放行）。iOS/HarmonyOS 包体本身按苹果/华为体系只能各自证书签名，如实标注。本仓库仅含安装包与签名文件，不含源码。
           files: dist/**/*
           fail_on_unmatched_files: false

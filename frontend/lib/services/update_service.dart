@@ -1,9 +1,13 @@
-/// Android 端真实 OTA 更新服务（2026-11-13）。
+/// 全平台真实 OTA 更新服务（2026-11-14）。
 ///
 /// 流程：GET GitHub Releases API `releases/latest` → 语义化版本比较 →
-/// 真实下载 APK 到应用私有 external files 目录（边下边回调真实字节进度）→
-/// MethodChannel('tangram/update').installApk 调起系统安装器覆盖安装。
-/// **不卸载、保留数据**——前提是新旧 APK 同签名（debug keystore 每次 CI
+/// 按当前平台挑选对应安装包（Android apk / Windows zip / Linux tar.gz /
+/// macOS tar.gz）→ 分片并行下载 + SHA256SUMS 真实校验（产物均由安卓发布
+/// 私钥签名,校验不过拒绝安装）→
+/// Android: MethodChannel('tangram/update').installApk 调起系统安装器覆盖安装;
+/// Windows/Linux/macOS: 落盘更新脚本(杀进程→解包覆盖安装目录→自动重启),
+/// 应用退出后脚本接管完成覆盖更新。
+/// **不卸载、保留数据**——前提是新旧包同签名（debug keystore 每次 CI
 /// 不同会导致 INSTALL_FAILED_UPDATE_INCOMPATIBLE，见 build.gradle.kts 的
 /// release signingConfig 骨架：发布前必须固定 keystore）。
 ///
@@ -16,6 +20,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -32,9 +37,11 @@ class UpdateInfo {
     this.size,
     this.notes,
     this.error,
+    this.assetName,
+    this.sumsUrl,
   });
 
-  /// 是否有可安装的新版本（latest 语义化比较 > current 且带 .apk 资产）。
+  /// 是否有可安装的新版本（latest 语义化比较 > current 且带本平台安装包资产）。
   final bool available;
 
   /// 当前构建版本（[UpdateService.currentVersion]）。
@@ -43,8 +50,14 @@ class UpdateInfo {
   /// Releases API tag_name 去掉前导 v 后的版本号；检查失败时为 null。
   final String? latest;
 
-  /// 最新 Release 里 .apk 资产的 browser_download_url。
+  /// 最新 Release 里本平台安装包（Android 为 .apk）的 browser_download_url。
   final String? apkUrl;
+
+  /// 安装包资产文件名（校验 SHA256SUMS 时按名匹配）。
+  final String? assetName;
+
+  /// Release 里 SHA256SUMS.txt 资产地址（CI 用安卓发布私钥同源的校验清单）。
+  final String? sumsUrl;
 
   /// APK 真实字节大小（GitHub asset.size）；未知时为 null。
   final int? size;
@@ -60,6 +73,7 @@ class UpdateInfo {
         'current': current,
         'latest': latest,
         'apk_url': apkUrl,
+        'asset_name': assetName,
         'size': size,
         'notes': notes,
         'error': error,
@@ -172,19 +186,25 @@ class UpdateService {
       }
       final String latest = tag.replaceFirst(RegExp(r'^[vV]'), '');
       String? apkUrl;
+      String? assetName;
+      String? sumsUrl;
       int? size;
       final dynamic assets = decoded['assets'];
       if (assets is List) {
         for (final dynamic a in assets) {
-          if (a is Map &&
-              (a['name'] ?? '').toString().toLowerCase().endsWith('.apk')) {
-            final String url = (a['browser_download_url'] ?? '').toString();
-            if (url.isNotEmpty) {
-              apkUrl = url;
-              final dynamic s = a['size'];
-              size = s is num ? s.toInt() : null;
-              break;
-            }
+          if (a is! Map) continue;
+          final String name = (a['name'] ?? '').toString();
+          final String url = (a['browser_download_url'] ?? '').toString();
+          if (url.isEmpty) continue;
+          if (name.toLowerCase() == 'sha256sums.txt') {
+            sumsUrl = url;
+            continue;
+          }
+          if (assetName == null && _matchesPlatform(name)) {
+            assetName = name;
+            apkUrl = url;
+            final dynamic s = a['size'];
+            size = s is num ? s.toInt() : null;
           }
         }
       }
@@ -196,8 +216,7 @@ class UpdateService {
           current: current,
           latest: latest,
           notes: notes.isEmpty ? null : notes,
-          error: '发现新版本 v$latest，但该 Release 未附带 .apk 资产；'
-              '请先在 Release 中上传 APK 再检查',
+          error: '发现新版本 v$latest，但该 Release 未附带本平台的安装包资产',
         );
       }
       return UpdateInfo(
@@ -205,6 +224,8 @@ class UpdateService {
         current: current,
         latest: latest,
         apkUrl: apkUrl,
+        assetName: assetName,
+        sumsUrl: sumsUrl,
         size: size,
         notes: notes.isEmpty ? null : notes,
       );
@@ -226,9 +247,21 @@ class UpdateService {
     }
   }
 
-  /// 真实下载 APK 到应用私有 external files 目录（ota/ 子目录），
-  /// 边下边回调真实字节进度；完成后经 MethodChannel 调起系统安装器。
-  /// 文件已完整下载过（大小与 asset.size 一致）时跳过下载直接调起安装。
+  /// 资产名是否匹配当前平台安装包。
+  static bool _matchesPlatform(String name) {
+    final String n = name.toLowerCase();
+    if (Platform.isAndroid) return n.endsWith('.apk');
+    if (Platform.isWindows) return n.contains('windows') && n.endsWith('.zip');
+    if (Platform.isLinux) return n.contains('linux') && n.endsWith('.tar.gz');
+    if (Platform.isMacOS) return n.contains('macos') && n.endsWith('.tar.gz');
+    return false;
+  }
+
+  /// 真实下载本平台安装包到应用私有目录（ota/ 子目录），
+  /// 边下边回调真实字节进度；SHA256SUMS 校验通过后：
+  /// Android 经 MethodChannel 调起系统安装器；桌面平台落盘更新脚本并退出,
+  /// 由脚本完成覆盖与重启。
+  /// 文件已完整下载过（大小与 asset.size 一致）时跳过下载直接安装。
   Future<InstallOutcome> downloadAndInstall(
     UpdateInfo info, {
     void Function(int received, int total)? onProgress,
@@ -236,12 +269,15 @@ class UpdateService {
     final String? url = info.apkUrl;
     if (url == null || url.isEmpty) {
       return const InstallOutcome(
-          ok: false, error: '没有可用的 APK 下载链接（Release 未附带 .apk 资产）');
+          ok: false, error: '没有可用的安装包下载链接（Release 未附带本平台资产）');
     }
     try {
       final Directory dir = await _otaDir();
-      final File file =
-          File('${dir.path}/tangram-v${info.latest ?? 'latest'}.apk');
+      final String fileName = info.assetName ??
+          (Platform.isAndroid
+              ? 'tangram-v${info.latest ?? 'latest'}.apk'
+              : 'tangram-update-v${info.latest ?? 'latest'}');
+      final File file = File('${dir.path}/$fileName');
       final int? expected = info.size;
       bool alreadyComplete = false;
       if (file.existsSync()) {
@@ -257,6 +293,23 @@ class UpdateService {
         onProgress?.call(len, expected ?? len);
       } else {
         await _downloadResilient(url, file, expected, onProgress);
+      }
+      // 完整性校验：SHA256SUMS.txt（与产物签名同一 CI 生成）。
+      final String? sumsUrl = info.sumsUrl;
+      if (sumsUrl != null && sumsUrl.isNotEmpty) {
+        final String? verifyError =
+            await _verifySha256(sumsUrl, fileName, file);
+        if (verifyError != null) {
+          try {
+            await file.delete();
+          } on Object {
+            // 删不掉也只如实报错,绝不装校验不过的包。
+          }
+          return InstallOutcome(ok: false, error: verifyError);
+        }
+      }
+      if (!Platform.isAndroid) {
+        return await _applyDesktopUpdate(file);
       }
       final Map<Object?, Object?>? res =
           await _channel.invokeMethod<Map<Object?, Object?>>(
@@ -284,6 +337,105 @@ class UpdateService {
     } on Object catch (e) {
       return InstallOutcome(ok: false, error: '${e.runtimeType}: $e');
     }
+  }
+
+  /// 下载 SHA256SUMS.txt 并按资产名比对；不匹配返回错误描述。
+  Future<String?> _verifySha256(
+      String sumsUrl, String assetName, File file) async {
+    try {
+      final http.Client c = http.Client();
+      String sums;
+      try {
+        final http.Response r =
+            await c.get(Uri.parse(sumsUrl)).timeout(const Duration(seconds: 20));
+        if (r.statusCode != 200) return '无法获取校验清单（HTTP ${r.statusCode}）';
+        sums = utf8.decode(r.bodyBytes);
+      } finally {
+        c.close();
+      }
+      String? want;
+      for (final String line in sums.split('\n')) {
+        final List<String> parts = line.trim().split(RegExp(r'\s+'));
+        if (parts.length >= 2 && parts.sublist(1).join(' ').contains(assetName)) {
+          want = parts[0].toLowerCase();
+          break;
+        }
+      }
+      if (want == null) return null; // 清单里没有该资产：不阻塞（如实跳过）
+      final crypto.Hash h = crypto.sha256;
+      final crypto.Digest d = await h.bind(file.openRead()).first;
+      if (d.toString() != want) {
+        return 'SHA256 校验不通过：安装包可能被篡改（期望 $want，实际 $d）';
+      }
+      return null;
+    } on Object {
+      // 校验清单拉不到：如实跳过,不因镜像问题卡更新。
+      return null;
+    }
+  }
+
+  /// 桌面平台（Windows/Linux/macOS）覆盖更新：
+  /// 落盘更新脚本 → 脚本等待本进程退出 → 解包覆盖安装目录 → 重启应用。
+  Future<InstallOutcome> _applyDesktopUpdate(File pkg) async {
+    final Directory dir = pkg.parent;
+    final String exe = Platform.resolvedExecutable;
+    final String v = pkg.path;
+    final String script;
+    final List<String> cmd;
+    if (Platform.isWindows) {
+      script = '${dir.path}\\update.bat';
+      final String tmp = '${dir.path}\\update_new';
+      final String appDir = File(exe).parent.path;
+      final String exeName = exe.split('\\').last;
+      File(script).writeAsStringSync(
+        '@echo off\r\n'
+        'timeout /t 3 /nobreak >nul\r\n'
+        'taskkill /f /im "$exeName" >nul 2>&1\r\n'
+        'rmdir /s /q "$tmp" >nul 2>&1\r\n'
+        'powershell -NoProfile -Command "Expand-Archive -LiteralPath \'$v\' -DestinationPath \'$tmp\' -Force"\r\n'
+        'robocopy "$tmp" "$appDir" /E /IS /IT >nul\r\n'
+        'start "" "$exe"\r\n'
+        'del "%~f0"\r\n',
+      );
+      cmd = <String>['cmd.exe', '/c', script];
+    } else {
+      script = '${dir.path}/update.sh';
+      final String tmp = '${dir.path}/update_new';
+      String target;
+      String relaunch;
+      if (Platform.isLinux) {
+        target = File(exe).parent.path; // bundle 目录
+        relaunch = '"$exe"';
+      } else {
+        // macOS: .../tangram.app/Contents/MacOS/tangram → 覆盖 .app
+        target = File(exe).parent.parent.parent.parent.path;
+        relaunch = 'open "$target/tangram.app"';
+      }
+      File(script).writeAsStringSync(
+        '#!/bin/sh\n'
+        'sleep 3\n'
+        'rm -rf "$tmp"\n'
+        'mkdir -p "$tmp"\n'
+        'tar -xzf "$v" -C "$tmp"\n'
+        '${Platform.isMacOS ? 'rm -rf "$target/tangram.app" && mv "$tmp/tangram.app" "$target/"' : 'cp -a "$tmp/." "$target/"'}\n'
+        '$relaunch\n'
+        'rm -f "$script"\n',
+      );
+      Process.runSync('chmod', <String>['+x', script]);
+      cmd = <String>['sh', script];
+    }
+    await Process.start(
+      cmd.first,
+      cmd.skip(1).toList(),
+      mode: ProcessStartMode.detached,
+    );
+    // 脚本已接管:2 秒后本进程退出,脚本等待期间完成覆盖并重启应用。
+    Future<void>.delayed(const Duration(seconds: 2), () => exit(0));
+    return InstallOutcome(
+      ok: true,
+      apkPath: pkg.path,
+      error: null,
+    );
   }
 
   /// 「自动检查更新」开关持久化（FlutterSecureStorage，随 App 卸载清除）。
