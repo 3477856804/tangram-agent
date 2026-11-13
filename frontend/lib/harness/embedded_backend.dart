@@ -28,7 +28,9 @@ import 'dart:io'
         File,
         FileSystemEntity,
         FileSystemEntityType,
-        Platform;
+        Platform,
+        Process,
+        ProcessSignal;
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -1204,15 +1206,33 @@ class EmbeddedBackend {
     };
   }
 
-  /// 沙箱终端真实 shell：命令在 App 私有 sandbox/ 根内执行（路径防越界），
-  /// 支持 pwd ls cd cat echo mkdir touch rm mv cp head tail wc date
-  /// whoami uname help clear。结果如实回显，命令失败就报失败，不模拟输出。
+  /// 沙箱终端真实 shell（2026-11-13 全面 Linux 化）：
+  ///
+  /// * 桌面端（Linux/macOS）：命令交给系统 **bash/sh** 真实执行——
+  ///   `apt`、`pkg-config`、`pip`、`curl`、`gcc`、`grep`、`sed`… 全部是
+  ///   真命令，存在就真跑、不存在就如实 `command not found`。默认落在
+  ///   App 私有 sandbox/ 目录，`cd` 可自由出入（和真 Linux 一样）。
+  /// * 安卓：走 /system/bin/sh（toybox 真实命令集）；无 root 时 apt 这类
+  ///   系统命令如实报权限/不存在，不模拟成功。
+  /// * 真实 shell 起不来（平台限制/权限拒绝）才回退内置 Dart 解释器
+  ///   （pwd ls cd cat echo mkdir touch rm mv cp head tail wc date
+  ///   whoami uname help clear，限定 sandbox/ 根内），并在输出如实标注。
   Future<Map<String, dynamic>> _shellExec(Map<String, dynamic> p) async {
     final raw = (p['command'] ?? '').toString().trim();
     if (raw.isEmpty) return _err('命令为空');
     final root = store.sub('sandbox').path;
     String cwd = (p['cwd'] ?? '.').toString();
-    if (!Directory('$root/$cwd').existsSync()) cwd = '.';
+    final cwdCheck = cwd.startsWith('/') ? cwd : '$root/$cwd';
+    if (!Directory(cwdCheck).existsSync()) cwd = '.';
+
+    // clear/help/纯算式保留内置语义（UI 依赖 clear 标记；算式走真实求值）。
+    final firstWord = (raw.split(RegExp(r'\s+')).first).toLowerCase();
+    final isExpression =
+        RegExp(r'^[\d\s\+\-\*\/\%\(\)\.\,]+$').hasMatch(raw) && raw.isNotEmpty;
+    if (firstWord != 'clear' && firstWord != 'help' && !isExpression) {
+      final real = await _realShellExec(raw, root, cwd);
+      if (real != null) return real;
+    }
 
     String resolve(String rel) {
       final base = rel.startsWith('/') ? '$root${rel.replaceAll(RegExp(r'/+'), '/')}'.replaceAll('//', '/') : '$root/$cwd/$rel';
@@ -1441,6 +1461,8 @@ class EmbeddedBackend {
         buf.writeln('pwd ls [-l] cd cat echo mkdir touch rm [-r] mv cp');
         buf.writeln('head tail wc date whoami uname clear help');
         buf.writeln('表达式求值请直接输入算式，如 2+3*4');
+        buf.writeln('注：本终端默认把命令交给系统真实 shell 执行，'
+            'apt/pkg/pip/curl 等系统命令按本机真实情况响应。');
       default:
         // 表达式兜底：2+3*4 之类直接走真实求值（受限 Isolate）。
         if (RegExp(r'^[\d\s\+\-\*\/\%\(\)\.\,]+$').hasMatch(raw)) {
@@ -1461,6 +1483,113 @@ class EmbeddedBackend {
       'cube': 'shell',
     };
   }
+
+  /// 真实 shell 执行：桌面端 bash/sh、安卓 /system/bin/sh（toybox）。
+  /// 返回 null 表示真实 shell 不可用（调用方回退内置解释器）。
+  /// 命令输出/退出码全部来自真实进程，绝不加工、绝不模拟成功。
+  Future<Map<String, dynamic>?> _realShellExec(
+      String raw, String root, String cwd) async {
+    final String shell;
+    if (Platform.isWindows) {
+      shell = r'C:\Windows\System32\cmd.exe';
+    } else if (Platform.isAndroid) {
+      shell = '/system/bin/sh';
+    } else if (File('/bin/bash').existsSync()) {
+      shell = '/bin/bash';
+    } else if (File('/bin/sh').existsSync()) {
+      shell = '/bin/sh';
+    } else {
+      return null;
+    }
+    if (!Platform.isWindows && !File(shell).existsSync()) {
+      debugPrint('TGA_REAL_SHELL_FAIL: no shell $shell');
+      return null;
+    }
+    final String cwdAbs =
+        cwd.startsWith('/') ? cwd : '$root/${cwd == '.' ? '' : cwd}';
+    if (!Directory(cwdAbs).existsSync()) {
+      debugPrint('TGA_REAL_SHELL_FAIL: no cwd $cwdAbs');
+      return null;
+    }
+
+    // 用唯一标记把「真实输出」与「新 cwd/退出码」分离（POSIX shell 通用）。
+    final String marker = '__TGA_END_${DateTime.now().microsecondsSinceEpoch}__';
+    final String script =
+        'cd ${_shellQuote(cwdAbs)} 2>/dev/null; $raw; __rc=\$?; '
+        'printf "\\n$marker%s$marker\$__rc\\n" "\$(pwd -P 2>/dev/null)"; '
+        'exit \$__rc';
+
+    Process proc;
+    try {
+      proc = await Process.start(
+        shell,
+        Platform.isWindows
+            ? <String>['/c', 'cd /d "$cwdAbs" && $raw']
+            : <String>['-c', script],
+        workingDirectory: cwdAbs,
+        includeParentEnvironment: true,
+        environment: <String, String>{
+          'HOME': root,
+          'TERM': 'xterm-256color',
+          'LANG': 'C.UTF-8',
+          'PS1': 'tga@sandbox:\\w\$ ',
+        },
+      );
+    } on Object catch (e, st) {
+      debugPrint('TGA_REAL_SHELL_FAIL: $e\n$st');
+      return null; // 起进程失败：回退内置解释器。
+    }
+
+    final Future<String> outF =
+        proc.stdout.transform(utf8.decoder).join();
+    final Future<String> errF =
+        proc.stderr.transform(utf8.decoder).join();
+    int exitCode = 124;
+    try {
+      exitCode = await proc.exitCode.timeout(const Duration(seconds: 60));
+    } on TimeoutException {
+      proc.kill(ProcessSignal.sigkill);
+    }
+    final String stdoutAll =
+        await outF.timeout(const Duration(seconds: 3),
+            onTimeout: () => '');
+    final String stderrAll =
+        await errF.timeout(const Duration(seconds: 3), onTimeout: () => '');
+
+    String out = stdoutAll;
+    String newCwd = cwd;
+    if (!Platform.isWindows) {
+      final int first = stdoutAll.indexOf(marker);
+      final int last = stdoutAll.lastIndexOf(marker);
+      if (first >= 0 && last > first) {
+        out = stdoutAll.substring(0, first);
+        final String tail =
+            stdoutAll.substring(last + marker.length).trim(); // <rc>
+        final String mid =
+            stdoutAll.substring(first + marker.length, last); // <pwd>
+        final int rc = int.tryParse(tail) ?? exitCode;
+        exitCode = rc;
+        final String pwd = mid.trim();
+        if (pwd.isNotEmpty) {
+          newCwd = pwd.startsWith('$root/') || pwd == root
+              ? (pwd == root ? '.' : pwd.substring(root.length + 1))
+              : pwd; // 沙箱外：如实保留绝对路径（Linux 语义）。
+        }
+      }
+    }
+    final String text = out + (stderrAll.isEmpty ? '' : '\n$stderrAll');
+    return <String, dynamic>{
+      'ok': exitCode == 0,
+      'stdout': text,
+      'error': exitCode == 0 ? '' : 'exit $exitCode',
+      'exit_code': exitCode,
+      'cwd': newCwd,
+      'cube': 'shell',
+      'real': true,
+    };
+  }
+
+  static String _shellQuote(String s) => "'${s.replaceAll("'", r"'\''")}'";
 
   /// MCP 真实同步：断开重连 mcp_servers.json 里的全部服务，
   /// HTTP/SSE 传输 → initialize + tools/list，工具注册进 AgentLoop 的

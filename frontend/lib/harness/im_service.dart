@@ -15,6 +15,7 @@ import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/feishu_direct.dart';
 import 'package:tangram/harness/gateway_discovery.dart';
 import 'package:tangram/harness/im_gateway.dart';
+import 'package:tangram/harness/ilink_wechat.dart';
 import 'package:tangram/harness/login_protocol.dart';
 import 'package:tangram/harness/qr_login_client.dart';
 import 'package:tangram/harness/store.dart';
@@ -112,6 +113,14 @@ class ImService {
   bool _feishuDirectAuthorized = false;
   String _feishuDirectDetail = '';
 
+  // ---- 微信 iLink 直连（真码由腾讯 ilinkai.weixin.qq.com 下发，5 分钟
+  // 有效，无需任何外部网关；协议移植自 im/adapters/wechat_ilink.py）----
+  IlinkWeChat? _ilink;
+  CancelTokenSource? _ilinkReceive;
+  int _ilinkInbound = 0;
+  int _ilinkOutbound = 0;
+  String _ilinkDetail = '';
+
   /// 与 im/feishu_bot.py FeishuBotSession._ADDONS 一致：bot 收发消息权限、
   /// 消息接收事件与卡片回调，随验证 URL 的 addons 参数预置给新建应用。
   static const Map<String, dynamic> kFeishuAppAddons = <String, dynamic>{
@@ -135,7 +144,7 @@ class ImService {
   /// 三个连接器与 OpenClaw 通道一一对应（QQ/微信/飞书）。
   static const List<Map<String, String>> kConnectors = <Map<String, String>>[
     <String, String>{'id': 'qq', 'name': 'QQ', 'detail': 'OneBot / AGP 网关'},
-    <String, String>{'id': 'wechat', 'name': '微信', 'detail': 'AGP 扫码授权网关'},
+    <String, String>{'id': 'wechat', 'name': '微信', 'detail': 'iLink 直连（腾讯真码）/ AGP 网关'},
     <String, String>{'id': 'feishu', 'name': '飞书', 'detail': '扫码一键创建 bot 应用'},
   ];
 
@@ -164,7 +173,68 @@ class ImService {
       _feishuDirectAuthorized = true;
       _feishuDirectDetail = '飞书直连 · 应用已创建，凭据已存本机';
     }
+    // 微信 iLink：本机已有真实凭据（此前扫过腾讯真码）→ 直接恢复
+    // getupdates 接收循环，重启 App 后微信里发消息依然是真链路。
+    final ilink = _ilink ??= IlinkWeChat(store);
+    await ilink.loadCred();
+    if (ilink.hasToken) {
+      _ilinkDetail = 'iLink 直连 · 凭据已存本机（weixin_ilink.json）';
+      _ensureIlinkReceive();
+    }
     _loaded = true;
+  }
+
+  /// 确保 iLink 接收循环在跑：getupdates 长轮询收消息 → 真实推理 →
+  /// sendmessage 原样回发。与 im/serve.py 的微信接收线程同语义。
+  void _ensureIlinkReceive() {
+    if (_ilinkReceive != null) return;
+    final ilink = _ilink;
+    if (ilink == null || !ilink.hasToken) return;
+    final CancelTokenSource src = CancelTokenSource();
+    _ilinkReceive = src;
+    unawaited(_ilinkReceiveLoop(src.token));
+  }
+
+  Future<void> _ilinkReceiveLoop(CancelToken token) async {
+    final IlinkWeChat ilink = _ilink!;
+    onLog?.call('[im] 微信 iLink 接收循环已启动（getupdates 长轮询）');
+    while (!token.isCancelled && ilink.hasToken) {
+      try {
+        final List<IlinkInboundMessage> msgs = await ilink.getUpdates();
+        for (final IlinkInboundMessage m in msgs) {
+          if (token.isCancelled) return;
+          if (m.text.trim().isEmpty) continue;
+          _ilinkInbound++;
+          String reply;
+          try {
+            reply = await infer(m.text);
+          } on Object catch (e) {
+            reply = '（这条消息处理失败了：$e）';
+          }
+          try {
+            await ilink.sendText(m.fromUserId, reply,
+                contextToken: m.contextToken);
+            _ilinkOutbound++;
+            _ilinkDetail = 'iLink 直连 · 收 $_ilinkInbound / 发 $_ilinkOutbound';
+            onLog?.call('[im] 微信 iLink：已回复 ${m.fromUserId}');
+          } on Object catch (e) {
+            onLog?.call('[im] 微信 iLink 发送失败：$e');
+          }
+        }
+      } on Object catch (e) {
+        onLog?.call('[im] 微信 iLink 接收异常：$e');
+        // 网络抖动：3 秒后继续（token 感知等待）。
+        try {
+          await Future.any<Object?>(<Future<Object?>>[
+            Future<void>.delayed(const Duration(seconds: 3)),
+            token.onCancel,
+          ]);
+        } on Object {
+          return;
+        }
+      }
+    }
+    onLog?.call('[im] 微信 iLink 接收循环已停止');
   }
 
   Future<void> _persist() async {
@@ -333,6 +403,16 @@ class ImService {
     String url =
         (p['url'] ?? _configOf(id)['url'] ?? '').toString().trim();
 
+    // 微信优先走腾讯 iLink 直连（ilinkai.weixin.qq.com，无需网关）：
+    // 点一下就直接出腾讯刚发的**真码**，5 分钟内有效；扫完在微信里发条
+    // 消息就是真链路。过期点「要新码」重新取。仅当显式配置了网关地址时
+    // 尊重用户选择走网关；直连不可用再回退网关流程。
+    if (id == 'wechat' && url.isEmpty) {
+      final Map<String, dynamic>? direct = await _startWechatIlinkDirect();
+      if (direct != null) return direct;
+      onLog?.call('[im] 微信 iLink 直连不可用，回退网关流程');
+    }
+
     // 飞书优先走官方设备授权流直连（accounts.feishu.cn，无需网关）：
     // 点一下就直接出「扫码建应用」的真实验证 URL 二维码。仅当本次/历史
     // 显式配置了网关地址时尊重用户选择走网关；直连不可用再回退网关流程。
@@ -469,6 +549,114 @@ class ImService {
         'error': '无法从网关获取二维码：$e。请确认网关已部署并接入微信/QQ 登录服务。',
         'adapters': adapters().map((ImAdapterStatus a) => a.toJson()).toList(),
       };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 微信 iLink 直连：真码由腾讯 ilinkai.weixin.qq.com 下发（5 分钟有效），
+  // 扫码确认后凭据落盘 weixin_ilink.json，getupdates 长轮询即真链路。
+  // 协议移植自 im/adapters/wechat_ilink.py（见 ilink_wechat.dart）。
+  // ---------------------------------------------------------------------------
+
+  /// 发起微信 iLink 直连登录；成功返回含腾讯真码的出码响应。
+  /// 直连不可用（网络/平台侧限制）返回 null，由调用方回退网关流程。
+  Future<Map<String, dynamic>?> _startWechatIlinkDirect() async {
+    const String id = 'wechat';
+    final IlinkWeChat ilink = _ilink ??= IlinkWeChat(store);
+    await ilink.loadCred();
+    if (ilink.hasToken) {
+      // 本机已有真实凭据：恢复接收循环即可，不必再扫一次。
+      _ensureIlinkReceive();
+      return <String, dynamic>{
+        'ok': true,
+        'active': true,
+        'direct': 'ilink',
+        'already_logged_in': true,
+        'connector': id,
+        'status': QrLoginStatus.confirmed.wire,
+        'connected': adapterOf(id).connected,
+        'detail': _ilinkDetail.isNotEmpty
+            ? _ilinkDetail
+            : 'iLink 直连 · 凭据已存本机',
+        'adapters':
+            adapters().map((ImAdapterStatus a) => a.toJson()).toList(),
+      };
+    }
+    final IlinkQrTicket qr;
+    try {
+      qr = await ilink.fetchQr();
+    } on Object catch (e) {
+      onLog?.call('[im] 微信 iLink 取码失败：$e');
+      return null;
+    }
+    await _cancelLogin(<String, dynamic>{'connector': id});
+    final _LoginSession session = _LoginSession(
+      ticket: QrLoginTicket(
+        sessionId: qr.qrcode,
+        connector: id,
+        qrContent: qr.scanContent,
+        expiresIn: qr.expiresIn,
+      ),
+      cancelSource: CancelTokenSource(),
+      connector: id,
+    )..directKind = 'ilink';
+    _sessions[id] = session;
+    onLog?.call('[im] 微信 iLink 真码已下发（${qr.expiresIn}s 有效），开始轮询');
+    unawaited(_pollIlinkDirect(session, ilink));
+    return <String, dynamic>{
+      'ok': true,
+      'active': true,
+      'direct': 'ilink',
+      'session_id': qr.qrcode,
+      'connector': id,
+      'status': QrLoginStatus.waiting.wire,
+      'qr_content': qr.scanContent,
+      'expires_in': qr.expiresIn,
+      'adapters': adapters().map((ImAdapterStatus a) => a.toJson()).toList(),
+    };
+  }
+
+  /// 后台轮询腾讯扫码状态：wait→waiting、scaned→scanned、
+  /// confirmed→落盘凭据并起接收循环；5 分钟到期→expired（UI 出「要新码」）。
+  Future<void> _pollIlinkDirect(_LoginSession s, IlinkWeChat ilink) async {
+    final CancelToken token = s.cancelSource.token;
+    final DateTime deadline =
+        DateTime.now().add(Duration(seconds: s.ticket.expiresIn));
+    while (!token.isCancelled) {
+      await Future.any<Object?>(<Future<Object?>>[
+        Future<void>.delayed(const Duration(seconds: 2)),
+        token.onCancel,
+      ]);
+      if (token.isCancelled) return;
+      if (DateTime.now().isAfter(deadline)) {
+        s.result = const QrLoginResult(
+          status: QrLoginStatus.expired,
+          error: '腾讯 iLink 真码 5 分钟已到期，点「要新码」重新取一张',
+        );
+        onLog?.call('[im] wechat iLink 二维码过期');
+        return;
+      }
+      final IlinkPollResult r = await ilink.pollQrStatus(s.ticket.sessionId);
+      switch (r.status) {
+        case 'confirmed':
+          s.result = const QrLoginResult(status: QrLoginStatus.confirmed);
+          _ilinkDetail = 'iLink 直连 · 扫码确认，凭据已落盘';
+          _ensureIlinkReceive();
+          onLog?.call('[im] wechat iLink 扫码确认（bot ${ilink.botId}）');
+          return;
+        case 'scaned':
+        case 'scanned':
+          s.result = const QrLoginResult(status: QrLoginStatus.scanned);
+        case 'expired':
+          s.result = const QrLoginResult(
+            status: QrLoginStatus.expired,
+            error: '二维码已在微信侧过期，点「要新码」重新获取',
+          );
+          return;
+        default:
+          s.result = const QrLoginResult(status: QrLoginStatus.waiting);
+          if (r.error.isNotEmpty) s.pollError = r.error;
+      }
     }
   }
 
@@ -688,10 +876,10 @@ class ImService {
     final _LoginSession? s = _sessions.remove(id);
     if (s != null) {
       s.cancelSource.cancel('user_cancel');
-      if (s.directFlow != null) {
-        // 直连会话没有服务端取消端点（官方设备码到期自动失效），
+      if (s.directFlow != null || s.directKind == 'ilink') {
+        // 直连会话没有服务端取消端点（官方设备码/腾讯真码到期自动失效），
         // 只需停掉本地轮询。
-        s.directFlow!.dispose();
+        s.directFlow?.dispose();
       } else {
         final String url = (_configOf(id)['url'] ?? '').toString();
         if (url.isNotEmpty) {
@@ -797,6 +985,25 @@ class ImService {
     final cfg = _configOf(id);
     final configured = (cfg['url'] ?? '').toString().trim().isNotEmpty;
     if (gw == null) {
+      // 微信 iLink 直连：凭据真实存在且接收循环在跑 → 已连接（真链路），
+      // 收发计数来自 getupdates/sendmessage 真实调用。
+      if (id == 'wechat' && (_ilink?.hasToken ?? false)) {
+        final bool running = _ilinkReceive != null;
+        return ImAdapterStatus(
+          id: id,
+          name: meta['name'] ?? id,
+          connected: running,
+          state: running ? 'connected' : 'configured',
+          detail: _ilinkDetail.isNotEmpty
+              ? _ilinkDetail
+              : 'iLink 直连 · 凭据已存本机',
+          url: (cfg['url'] ?? '').toString(),
+          guid: _ilink!.botId,
+          inbound: _ilinkInbound,
+          outbound: _ilinkOutbound,
+          configured: true,
+        );
+      }
       // 飞书直连成功过（真实凭据已落盘）：渠道已授权。消息收发仍需网关
       // 侧官方长连接承接，detail 如实说明凭据来源，不虚报 AGP 连接。
       if (id == 'feishu' && _feishuDirectAuthorized) {
@@ -862,6 +1069,10 @@ class ImService {
       s.cancelSource.cancel('dispose');
     }
     _sessions.clear();
+    _ilinkReceive?.cancel('dispose');
+    _ilinkReceive = null;
+    _ilink?.dispose();
+    _ilink = null;
     for (final gw in _gateways.values) {
       await gw.dispose();
     }
@@ -889,4 +1100,7 @@ class _LoginSession {
   FeishuDirectFlow? directFlow;
   String? deviceCode;
   int pollInterval = 5;
+
+  /// 直连会话类型：'ilink'（微信腾讯直连）。非空即无网关取消端点。
+  String? directKind;
 }

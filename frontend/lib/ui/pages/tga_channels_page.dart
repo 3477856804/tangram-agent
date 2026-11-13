@@ -73,10 +73,13 @@ class _TgaChannelsPageState extends State<TgaChannelsPage> {
     try {
       final String? raw = await _storage.read(key: _authKey);
       if (raw != null && raw.isNotEmpty) {
-        _authorized
-          ..clear()
-          ..addAll(((jsonDecode(raw) as Map)['connected'] as List? ?? [])
-              .map((dynamic e) => e.toString()));
+        final dynamic decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          _authorized
+            ..clear()
+            ..addAll(((decoded['connected'] as List?) ?? <dynamic>[])
+                .map((dynamic e) => e.toString()));
+        }
       }
     } on Object {
       // 安全存储不可用时仅影响兜底展示。
@@ -85,9 +88,24 @@ class _TgaChannelsPageState extends State<TgaChannelsPage> {
     if (mounted) setState(() => _loading = false);
   }
 
+  /// 安全读取根 Provider：任何情况下都绝不因 Provider 缺失抛出未捕获异常
+  /// （未捕获的异步异常在 release 模式会直接终止进程 = 用户看到的崩溃）。
+  BackendClient? _safeClient() {
+    try {
+      if (!mounted) return null;
+      return context.read<BackendClient>();
+    } on Object {
+      return null;
+    }
+  }
+
   /// 拉取真实网关连接状态（im_event{action:'status'}）。
   Future<void> _refreshStatus() async {
-    final BackendClient client = context.read<BackendClient>();
+    final BackendClient? client = _safeClient();
+    if (client == null) {
+      if (mounted) setState(() => _error = '后端未就绪：稍后点右上角刷新重试');
+      return;
+    }
     try {
       final BridgeEnvelope env =
           await client.sendControl('im_event', <String, dynamic>{
@@ -142,11 +160,18 @@ class _TgaChannelsPageState extends State<TgaChannelsPage> {
   }
 
   void _showQr(_Channel ch) {
+    final BackendClient? client = _safeClient();
+    if (client == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('后端未就绪，暂时无法发起授权')),
+      );
+      return;
+    }
     showDialog<void>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.45), // 列表压暗
       builder: (BuildContext ctx) => _QrAuthSheet(
-        client: context.read<BackendClient>(),
+        client: client,
         channel: ch,
         onConfirmed: () => _markAuthorized(ch.id),
       ),
@@ -282,6 +307,14 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
   Timer? _timer;
   bool _persisted = false;
 
+  /// 真码有效期倒计时（腾讯 iLink 真码 5 分钟有效；网关码同样按
+  /// expires_in 如实倒计时）。归零即过期，出「要新码」按钮。
+  int _remaining = 0;
+  Timer? _cdTimer;
+  bool _expired = false;
+
+  bool get _needsNewCode => _expired || _status == 'error';
+
   /// 无网关引导模式：二维码内容是网关部署说明的真实 URL（不是伪造登录码），
   /// 下方给出如实文案 + 手填网关地址入口（填了自动重试出码）。
   bool _guide = false;
@@ -297,8 +330,30 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
   @override
   void dispose() {
     _timer?.cancel();
+    _cdTimer?.cancel();
     _gwCtl.dispose();
     super.dispose();
+  }
+
+  /// 出码成功后开始 5 分钟倒计时；归零即标记过期并停轮询。
+  void _startCountdown(int seconds) {
+    _cdTimer?.cancel();
+    _expired = false;
+    _remaining = seconds <= 0 ? 300 : seconds;
+    _cdTimer = Timer.periodic(const Duration(seconds: 1), (Timer t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      setState(() {
+        if (_remaining > 0) _remaining -= 1;
+        if (_remaining == 0) {
+          _expired = true;
+          _timer?.cancel();
+          _error = '真码 5 分钟已到期，点「要新码」重新取一张';
+        }
+      });
+    });
   }
 
   Map<String, dynamic> _map(BridgeEnvelope env) {
@@ -316,11 +371,14 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
 
   Future<void> _requestQr({String? gatewayUrl}) async {
     _timer?.cancel();
+    _cdTimer?.cancel();
     setState(() {
       _status = 'loading';
       _error = '';
       _guide = false;
       _guideText = '';
+      _expired = false;
+      _remaining = 0;
     });
     try {
       final BridgeEnvelope env = await widget.client.sendControl(
@@ -384,6 +442,9 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
         _image = img;
         _status = 'waiting';
       });
+      final int ttl =
+          (m['expires_in'] is num) ? (m['expires_in'] as num).toInt() : 300;
+      _startCountdown(ttl);
       _timer = Timer.periodic(const Duration(seconds: 1), (Timer _) => _poll());
     } on Object catch (e) {
       if (!mounted) return;
@@ -415,10 +476,12 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
       await _onConfirmed();
     } else if (s == 'expired' || s == 'error') {
       _timer?.cancel();
+      _cdTimer?.cancel();
       setState(() {
         _status = 'error';
+        _expired = s == 'expired';
         _error = s == 'expired'
-            ? '二维码已过期，请重新获取'
+            ? '真码已过期，点「要新码」重新获取'
             : _friendlyError(m['error']?.toString() ?? _error);
       });
     } else if (s == 'scanned' && _status != 'scanned') {
@@ -527,7 +590,7 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
                 ),
               ),
             const SizedBox(height: 20),
-            // 取消 / 保存到相册
+            // 取消 / 要新码（过期或失败时）/ 保存到相册（有码时）
             Row(
               children: <Widget>[
                 Expanded(
@@ -551,19 +614,31 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: GestureDetector(
-                    onTap: _hasQr ? _saveToAlbum : null,
+                    onTap: _needsNewCode
+                        ? () => _requestQr(
+                            gatewayUrl: _gwCtl.text.trim().isEmpty
+                                ? null
+                                : _gwCtl.text.trim())
+                        : (_hasQr ? _saveToAlbum : null),
                     child: Container(
                       height: 40,
                       decoration: BoxDecoration(
-                        color: _hasQr ? Tga.primary : Tga.bgSoft,
+                        color: _needsNewCode
+                            ? Tga.primary
+                            : (_hasQr ? Tga.primary : Tga.bgSoft),
                         borderRadius: BorderRadius.circular(11),
                       ),
                       alignment: Alignment.center,
-                      child: Text('保存到相册',
+                      child: Text(
+                          _needsNewCode
+                              ? '要新码'
+                              : '保存到相册',
                           style: TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.w600,
-                              color: _hasQr ? Tga.onPrimary : Tga.textDim)),
+                              color: _needsNewCode || _hasQr
+                                  ? Tga.onPrimary
+                                  : Tga.textDim)),
                     ),
                   ),
                 ),
@@ -579,6 +654,9 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
 
   String _hint() {
     if (_guide) return _guideText;
+    if (_expired) {
+      return _error.isEmpty ? '真码 5 分钟已到期，点「要新码」重新取一张' : _error;
+    }
     switch (_status) {
       case 'scanned':
         return '已扫码，请在手机上确认授权';
@@ -587,10 +665,15 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
       case 'error':
         return _error.isEmpty ? '暂时拿不到二维码' : _error;
       default:
+        if (widget.channel.id == 'wechat') {
+          return '腾讯 iLink 刚发的真码，有效 ${_remaining}s；'
+              '扫完在微信里发条消息就是真链路';
+        }
         if (widget.channel.id == 'feishu') {
           return '请用飞书 App 扫码并确认——官方设备授权，扫码即自动创建 bot 应用';
         }
-        return '请使用${widget.channel.name}扫码并确认授权';
+        return '请使用${widget.channel.name}扫码并确认授权'
+            '（真码有效 ${_remaining}s）';
     }
   }
 
@@ -629,7 +712,10 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
           return Image.memory(_image!,
               width: _qrSize.toDouble(),
               height: _qrSize.toDouble(),
-              fit: BoxFit.contain);
+              fit: BoxFit.contain,
+              errorBuilder: (BuildContext c, Object e, StackTrace? s) =>
+                  Icon(Icons.broken_image_rounded,
+                      size: 42, color: Tga.orange));
         }
         return QrImageView(
           data: _content,

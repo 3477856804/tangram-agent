@@ -5,12 +5,14 @@ import '../../bridge/backend_client.dart';
 import '../../bridge/bridge_protocol.dart';
 import '../../design/tga_design.dart';
 
-/// 内置沙箱（真实化改造）：
+/// 内置沙箱（真实化改造 + Linux 全真实执行）：
 /// - 去掉顶部假「策略」横幅；
 /// - 终端字体紧凑真实：等宽 fontSize 12、行高 1.35、letterSpacing 0，
-///   提示符 `tga@sandbox:~$`，欢迎语/能力契约输出更像 Linux shell；
-/// - 终端执行走现有 code_task RPC（eval → 受限 Isolate 真实求值），
-///   输出/失败原因如实回显，不再用演示假回显。
+///   提示符随真实 cwd 变化（`tga@sandbox:~/work$`）；
+/// - 命令经 code_task shell RPC 交给**系统真实 shell** 执行：桌面端
+///   bash/sh（apt、pkg、pip、curl、gcc… 全部真命令真输出），安卓走
+///   /system/bin/sh（toybox）；真实 shell 不可用时才回退内置解释器。
+///   输出/退出码/失败原因如实回显，绝不模拟成功。
 class TgaSandboxPage extends StatefulWidget {
   const TgaSandboxPage({super.key});
 
@@ -38,16 +40,25 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
         '${two(now.hour)}:${two(now.minute)} on in-app tty');
   }
 
-  String _cwd = '~';
+  /// 后端维护的真实 cwd：'.'=沙箱根；相对路径=根内子目录；
+  /// '/' 开头=已 cd 到系统绝对路径（和真 Linux 一样）。
+  String _cwd = '.';
 
-  /// 执行一条命令：走 code_task shell RPC（沙箱根内真实文件操作，
-  /// pwd/ls/cd/cat/mkdir/rm/mv/cp/head/tail/wc/date/whoami/uname/help，
-  /// 纯算式自动落表达式求值）。结果如实回显，失败不编造。
+  String get _cwdShown => _cwd == '.'
+      ? '~'
+      : _cwd.startsWith('/')
+          ? _cwd
+          : '~/$_cwd';
+
+  /// 执行一条命令：走 code_task shell RPC。默认由后端交给系统真实
+  /// shell 执行（桌面 bash / 安卓 /system/bin/sh），起不来才回退内置
+  /// 解释器（pwd/ls/cd/cat/mkdir/rm/mv/cp/head/tail/wc/date/whoami/
+  /// uname/help，纯算式自动落表达式求值）。结果如实回显，失败不编造。
   Future<void> _submit() async {
     final String cmd = _input.text.trim();
     if (cmd.isEmpty || _running) return;
     _input.clear();
-    final String shownCwd = _cwd;
+    final String shownCwd = _cwdShown;
     setState(() {
       _lines.add('tga@sandbox:$shownCwd\$ $cmd');
       _running = true;
@@ -59,16 +70,14 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
         <String, dynamic>{
           'action': 'shell',
           'command': cmd,
-          'cwd': _cwd == '~' ? '.' : _cwd.substring(2),
+          'cwd': _cwd,
         },
       );
       final dynamic payload = env.payload;
       if (!mounted) return;
       setState(() {
         if (payload is Map) {
-          final String rel = (payload['cwd'] ?? '.').toString();
-          _cwd = rel == '.' ? '~' : '~/';
-          if (rel != '.') _cwd = '~/$rel';
+          _cwd = (payload['cwd'] ?? '.').toString();
           final String out = (payload['stdout'] ?? '').toString();
           if (out.contains('\x1bclear\x1b')) {
             _lines.clear();
@@ -157,8 +166,8 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
                                 height: 1.35,
                                 letterSpacing: 0,
                                 color: _termGreen)),
-                        const Text('Tangram Sandbox v0.0.1 '
-                            '(pure-dart in-process harness)',
+                        const Text('Tangram Sandbox v0.0.2 '
+                            '(real system shell · in-process harness)',
                             style: TextStyle(
                                 fontFamily: 'monospace',
                                 fontSize: 12,
@@ -166,12 +175,14 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
                                 letterSpacing: 0,
                                 color: _termFg)),
                         const SizedBox(height: 8),
-                        const Text(
-                            'Welcome to the isolated agent workspace.\n'
-                            'Commands run in a restricted Isolate via the '
-                            'code_task RPC.\n'
+                        Text(
+                            'Welcome to the real Linux workspace.\n'
+                            'Commands run in the system shell (bash/sh) '
+                            'via the code_task RPC.\n'
+                            'apt · pkg · pip · curl · gcc · grep … all real; '
+                            'missing ones report honestly.\n'
                             'Type an expression and press Enter, e.g. 2+3*4',
-                            style: TextStyle(
+                            style: const TextStyle(
                                 fontFamily: 'monospace',
                                 fontSize: 12,
                                 height: 1.35,
@@ -231,8 +242,8 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
                     ),
                     child: Row(
                       children: <Widget>[
-                        const Text('tga@sandbox:~\$ ',
-                            style: TextStyle(
+                        Text('tga@sandbox:$_cwdShown\$ ',
+                            style: const TextStyle(
                                 fontFamily: 'monospace',
                                 fontSize: 12,
                                 height: 1.35,
@@ -286,10 +297,13 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
 
   /// 能力契约：以 shell 输出风格如实描述内置沙箱的真实边界。
   static const List<String> _contract = <String>[
-    '1. execution : dart expression evaluated in a restricted isolate',
-    '2. filesystem: writable root = app-private sandbox dir only',
-    '3. network   : subject to policy, outside authorized dirs -> denied',
-    '4. timeout   : enforced by sandbox_policy.timeout_seconds',
+    '1. execution : system shell (bash / sh / toybox) — real commands,',
+    '               real exit codes; dart expressions in restricted isolate',
+    '2. filesystem: default cwd = app-private sandbox dir; cd anywhere',
+    '               the OS account can reach (same as real Linux)',
+    '3. packages  : apt/pkg/pip run for real; permission or missing',
+    '               package failures are reported verbatim, never faked',
+    '4. timeout   : 60s per command, then SIGKILL (honest "timeout")',
     '5. tools     : sandbox · current_time · recall_memory · remember_note',
   ];
 }
