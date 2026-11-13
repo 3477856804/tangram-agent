@@ -122,15 +122,13 @@ jobs:
           head -1 /tmp/badge.txt
           echo "versionName=$TGA_VER versionCode=$TGA_CODE 构建时间=$(date -u +%FT%TZ)" | tee frontend/build/APK_VERSION.txt
           sha256sum "$APK" | tee -a frontend/build/APK_VERSION.txt
-      - name: Collect(只收最终安装包,不收中间产物)
+      - name: Collect(最终产物六文件之 Android .apk)
         run: |
           set -euo pipefail
           mkdir -p out
           APK=$(find frontend/build/app/outputs -name 'app-release.apk' -not -path '*intermediary*' | head -1)
           [ -n "$APK" ] || APK=$(find frontend/build -name 'app-release.apk' -not -path '*intermediary*' | head -1)
-          cp -f "$APK" out/tangram-agent.apk
-          AAB=$(find frontend/build/app/outputs/bundle -name '*.aab' 2>/dev/null | head -1 || true)
-          [ -n "$AAB" ] && cp -f "$AAB" out/app-release.aab
+          cp -f "$APK" out/tangram-android-arm64.apk
           cp frontend/build/APK_VERSION.txt out/ || true
           ls -l out
       - uses: actions/upload-artifact@v4
@@ -171,29 +169,59 @@ jobs:
           export PATH="$HOME/bin:$PATH"
           python3 --version
           bash scripts/build_frontend.sh windows --extra "--release"
-      - name: Authenticode 签名（与安卓发布同一把密钥）
+      - name: Inno Setup 安装器 + Authenticode 签名（与安卓发布同一把密钥）
         shell: pwsh
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if (-not $env:ANDROID_KEYSTORE_BASE64) { Write-Host '无签名密钥,跳过'; exit 0 }
-          [IO.File]::WriteAllBytes("$env:TEMP\t.jks", [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
-          & keytool -importkeystore -srckeystore "$env:TEMP\t.jks" -srcstorepass $env:STORE_PASSWORD -srcalias tangram -destkeystore "$env:TEMP\t.p12" -deststoretype PKCS12 -deststorepass $env:STORE_PASSWORD -noprompt
-          $st = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'x64' } | Select-Object -Last 1
-          if (-not $st) { $st = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
-          if (-not $st) { Write-Host 'signtool 不可用,跳过'; exit 0 }
-          $exe = "frontend/build/windows/x64/runner/Release/tangram.exe"
-          & $st sign /f "$env:TEMP\t.p12" /p $env:STORE_PASSWORD /fd SHA384 /d "TGA tangram-agent" $exe
-          & $st verify /pa /v $exe 2>&1 | Select-Object -Last 5
-      - name: Package
-        shell: pwsh
-        run: |
           New-Item -ItemType Directory -Force -Path out | Out-Null
           $b = "frontend/build/windows/x64/runner/Release"
           if (-not (Test-Path "$b/tangram.exe")) { Get-ChildItem -Recurse frontend/build | Select-Object -First 40 FullName; exit 1 }
-          Compress-Archive -Path "$b/*" -DestinationPath out/tangram-windows-x64.zip -Force
+          # 版本号 = 发布通道最新 tag +1（与 android job 同一公式）
+          $ver = try {
+            $t = (Invoke-RestMethod 'https://api.github.com/repos/3477856804/tangram-agent-releases/releases/latest' -Headers @{'User-Agent'='ci'}).tag_name.TrimStart('v')
+            $p = $t.Split('.'); [int]$a=$p[0]; [int]$m=$p[1]; [int]$q=[int]$p[2]+1
+            if ($q -gt 99) { $m++; $q=0; if ($m -gt 99) { $a++; $m=0 } }
+            if ($q -eq 0) { "$a.0.0" } elseif ($m -eq 0) { "$a.0.$q" } else { "$a.$m.$('{0:d2}' -f $q)" }
+          } catch { "0.0.1" }
+          $iss = @(
+            '[Setup]',
+            'AppName=TGA tangram-agent',
+            "AppVersion=$ver",
+            'AppPublisher=Cosmo',
+            'DefaultDirName={autopf}\tangram',
+            'DisableProgramGroupPage=yes',
+            'OutputDir=out',
+            'OutputBaseFilename=tangram-windows-x64',
+            'Compression=lzma2',
+            'SolidCompression=yes',
+            'ArchitecturesAllowed=x64compatible',
+            'ArchitecturesInstallIn64BitMode=x64compatible',
+            'WizardStyle=modern',
+            '[Files]',
+            "Source: `"$b\*`"; DestDir: `"{app}`"; Flags: recursesubdirs ignoreversion",
+            '[Icons]',
+            "Name: `"{autoprograms}\TGA`"; Filename: `"{app}\tangram.exe`"",
+            "Name: `"{autodesktop}\TGA`"; Filename: `"{app}\tangram.exe`"",
+            '[Run]',
+            "Filename: `"{app}\tangram.exe`"; Description: `"{cm:LaunchProgram,TGA}`"; Flags: nowait postinstall skipifsilent"
+          )
+          Set-Content -Path tangram.iss -Value $iss -Encoding UTF8
+          choco install innosetup -y --limit-output | Out-Null
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' /Q tangram.iss
+          Move-Item -Force "out\tangram-windows-x64.exe" "out\tangram-windows-x64-installer.exe"
+          if ($env:ANDROID_KEYSTORE_BASE64) {
+            [IO.File]::WriteAllBytes("$env:TEMP\t.jks", [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
+            & keytool -importkeystore -srckeystore "$env:TEMP\t.jks" -srcstorepass $env:STORE_PASSWORD -srcalias tangram -destkeystore "$env:TEMP\t.p12" -deststoretype PKCS12 -deststorepass $env:STORE_PASSWORD -noprompt
+            $st = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'x64' } | Select-Object -Last 1
+            if (-not $st) { $st = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
+            if ($st) {
+              & $st sign /f "$env:TEMP\t.p12" /p $env:STORE_PASSWORD /fd SHA384 /d "TGA tangram-agent" /su "TGA Installer" "out\tangram-windows-x64-installer.exe"
+              & $st verify /pa "out\tangram-windows-x64-installer.exe" 2>&1 | Select-Object -Last 3
+            } else { Write-Host 'signtool 不可用,安装包未签名' }
+          }
           Get-ChildItem out
       - uses: actions/upload-artifact@v4
         with: { name: windows-x64, path: out/*, if-no-files-found: error }
@@ -240,13 +268,40 @@ jobs:
           fi
           cd ..
           bash scripts/build_frontend.sh linux --extra "--release"
-      - name: Package
+      - name: Package(最终产物六文件之 Linux .deb)
         run: |
           set -euo pipefail
           mkdir -p out
           B=frontend/build/linux/x64/release/bundle
           [ -f "$B/tangram" ] || { echo "未找到 tangram 可执行文件"; ls -R frontend/build/linux 2>/dev/null | head -30; exit 1; }
-          tar -czf out/tangram-linux-x64.tar.gz -C "$B" .
+          VER=$(python3 - <<'EOF'
+          import json, urllib.request
+          try:
+              t = json.load(urllib.request.urlopen(
+                  "https://api.github.com/repos/3477856804/tangram-agent-releases/releases/latest", timeout=20))["tag_name"].lstrip("v")
+              a, m, q = (int(x) for x in t.split(".")); q += 1
+              if q > 99: m += 1; q = 0
+              if m > 99: a += 1; m = 0
+              print(f"{a}.{m}.{q}" if m else f"{a}.0.{q}")
+          except Exception:
+              print("0.0.1")
+          EOF
+          )
+          STG=/tmp/deb; rm -rf "$STG"; mkdir -p "$STG/opt/tangram" "$STG/usr/bin" "$STG/DEBIAN"
+          cp -a "$B/." "$STG/opt/tangram/"
+          printf '#!/bin/sh\nexec /opt/tangram/tangram "$@"\n' > "$STG/usr/bin/tangram"
+          chmod 755 "$STG/usr/bin/tangram"
+          cat > "$STG/DEBIAN/control" <<EOF
+          Package: tangram-agent
+          Version: $VER
+          Architecture: amd64
+          Maintainer: Zhang Yu <3477856804@qq.com>
+          Priority: optional
+          Description: TGA tangram-agent - 七域合一 Agent 工作站
+           闭源商业软件 (c) Cosmo. All rights reserved.
+          EOF
+          dpkg-deb --build --root-owner-group "$STG" out/tangram-linux-x64.deb
+          dpkg-deb -f out/tangram-linux-x64.deb Package Version Architecture
           ls -l out
       - uses: actions/upload-artifact@v4
         with: { name: linux-x64, path: out/*, if-no-files-found: error }
@@ -276,14 +331,18 @@ jobs:
           tail -3 frontend/pubspec.yaml
       - name: Build macOS (host arch, 未签名)
         run: bash scripts/build_frontend.sh macos --extra "--release"
-      - name: Package
+      - name: Package(最终产物六文件之 macOS .dmg)
         run: |
           set -euo pipefail
           mkdir -p out
           APP=$(find frontend/build/macos -name "tangram.app" -maxdepth 6 | head -1)
           [ -n "$APP" ] || { echo "未找到 tangram.app"; exit 1; }
           codesign --force --deep --sign - "$APP" 2>/dev/null || true
-          tar -czf "out/tangram-macos-$(uname -m).tar.gz" -C "$(dirname "$APP")" "$(basename "$APP")"
+          STAGE=$(mktemp -d)
+          cp -a "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "TGA tangram-agent" -srcfolder "$STAGE" -ov -format UDZO "out/tangram-macos-$(uname -m).dmg"
+          rm -rf "$STAGE"
           ls -l out
       - uses: actions/upload-artifact@v4
         with: { name: macos, path: out/*, if-no-files-found: error }
@@ -385,7 +444,7 @@ jobs:
   # ================= Release =================
   release:
     needs: [android, windows, linux, macos, ios, harmonyos]
-    if: ${{ always() && (github.event_name == 'push' || inputs.make_release) }}
+    if: ${{ (github.event_name == 'push' || inputs.make_release) && needs.android.result == 'success' && needs.windows.result == 'success' && needs.linux.result == 'success' && needs.macos.result == 'success' && needs.ios.result == 'success' }}
     runs-on: ubuntu-latest
     permissions: { contents: write }
     steps:
@@ -394,32 +453,17 @@ jobs:
         with: { path: dist }
       - name: List
         run: find dist -type f -printf '%s %p\n' | sort -rn
-      - name: 用安卓发布私钥签名全部产物（分离签名 + 校验清单）
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-        run: |
-          set -euo pipefail
-          [ -n "$ANDROID_KEYSTORE_BASE64" ] || { echo "无密钥,跳过签名"; exit 0; }
-          sudo apt-get update -qq && sudo apt-get install -y -qq openjdk-21-jre-headless >/dev/null
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > /tmp/t.jks
-          keytool -importkeystore -srckeystore /tmp/t.jks -srcstorepass "$STORE_PASSWORD" -srcalias tangram -destkeystore /tmp/t.p12 -deststoretype PKCS12 -deststorepass "$STORE_PASSWORD" -noprompt
-          openssl pkcs12 -in /tmp/t.p12 -passin pass:"$STORE_PASSWORD" -nokeys -clcerts -out /tmp/cert.pem
-          openssl pkcs12 -in /tmp/t.p12 -passin pass:"$STORE_PASSWORD" -nocerts -nodes -out /tmp/key.pem
-          cd dist
-          find . -type f ! -name '*.sig' ! -name 'SHA256SUMS*' ! -name 'tangram-release-*' | while read -r f; do
-            openssl dgst -sha256 -sign /tmp/key.pem -out "$f.sig" "$f"
-          done
-          find . -type f ! -name '*.sig' ! -name 'SHA256SUMS.txt' ! -name 'tangram-release-*' -exec sha256sum {} \; | sed 's|\./||' | sort > SHA256SUMS.txt
-          openssl dgst -sha256 -sign /tmp/key.pem -out SHA256SUMS.sig SHA256SUMS.txt
-          cp /tmp/cert.pem tangram-release-cert.pem
-          openssl x509 -in /tmp/cert.pem -noout -subject -fingerprint -sha256
-          echo "== 已签名 =="; find . -name '*.sig' | sort
       - name: 读取版本（OTA 标签真源 = android 构建的 version.properties）
         run: |
           V=$(grep -o 'versionName=[0-9.]*' dist/android/APK_VERSION.txt | cut -d= -f2)
           [ -n "$V" ] || V=$(tr -d '[:space:]' < VERSION)
           echo "TGA_VER=$V" >> "$GITHUB_ENV"
+      - name: 只保留六个安装包（清掉版本说明等辅助文件）
+        run: |
+          set -euo pipefail
+          find dist -type f ! -name '*.apk' ! -name '*.exe' ! -name '*.deb' ! -name '*.dmg' ! -name '*.ipa' ! -name '*.hap' -delete
+          find dist -type d -empty -delete || true
+          echo "== 最终产物 =="; find dist -type f | sort
       - name: Publish Release（发布通道仓库，公开仅产物；源码仓库保持私有）
         uses: softprops/action-gh-release@v2
         with:
@@ -429,7 +473,34 @@ jobs:
           name: TGA tangram-agent v${{ env.TGA_VER }}（CI 全平台）
           body: |
             由 GitHub Actions 自动构建（commit ${{ github.sha }}）。
-            六平台产物：Android APK(arm64)/AAB · Windows x64 · Linux x64 · macOS(arm64) · iOS(未签名 ipa，需自行签名安装) · HarmonyOS(hap，尽力构建)。
-            全部产物均用安卓发布同一把 RSA 私钥做分离签名（同名 .sig + SHA256SUMS.txt/SHA256SUMS.sig，公钥见 tangram-release-cert.pem）；Windows tangram.exe 已用同一密钥 Authenticode 自签名（自签证书不受系统默认信任，SmartScreen 仍需放行）。iOS/HarmonyOS 包体本身按苹果/华为体系只能各自证书签名，如实标注。本仓库仅含安装包与签名文件，不含源码。
+            最终产物恰好六个安装包：
+            - Windows：tangram-windows-x64-installer.exe（安装器，已用安卓发布同一把 RSA 私钥 Authenticode 自签名）
+            - macOS：tangram-macos-arm64.dmg（ad-hoc 签名，首跑需右键打开放行）
+            - Linux：tangram-linux-x64.deb
+            - Android：tangram-android-arm64.apk（keystore 正式签名，OTA 覆盖安装）
+            - iOS：tangram-ios-arm64-unsigned.ipa（CI 无苹果开发者证书，需自行签名安装）
+            - HarmonyOS：tangram-harmonyos.hap（尽力构建；ohos Flutter 与本项目存在代差，可能缺席）
+            全部安装包完整性由下方 SHA256 清单 + 安卓发布同一把 RSA 私钥的签名保证（App 内 OTA 自动校验）。本仓库仅含安装包，不含源码。
           files: dist/**/*
           fail_on_unmatched_files: false
+      - name: 用安卓发布私钥签名产物校验清单,写入 Release 正文（产物保持恰好 6 个文件）
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          [ -n "$ANDROID_KEYSTORE_BASE64" ] || { echo "无密钥,跳过"; exit 0; }
+          sudo apt-get update -qq && sudo apt-get install -y -qq openjdk-21-jre-headless >/dev/null
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > /tmp/t.jks
+          keytool -importkeystore -srckeystore /tmp/t.jks -srcstorepass "$STORE_PASSWORD" -srcalias tangram -destkeystore /tmp/t.p12 -deststoretype PKCS12 -deststorepass "$STORE_PASSWORD" -noprompt
+          openssl pkcs12 -in /tmp/t.p12 -passin pass:"$STORE_PASSWORD" -nokeys -clcerts -out /tmp/cert.pem
+          openssl pkcs12 -in /tmp/t.p12 -passin pass:"$STORE_PASSWORD" -nocerts -nodes -out /tmp/key.pem
+          (cd dist && find . -type f -exec sha256sum {} \; | sed 's|\./||' | sort) > /tmp/sums.txt
+          SIG=$(openssl dgst -sha256 -sign /tmp/key.pem -out /dev/stdout /tmp/sums.txt | base64 -w0)
+          FP=$(openssl x509 -in /tmp/cert.pem -noout -fingerprint -sha256 | cut -d= -f2)
+          RID=$(curl -s -H "Authorization: Bearer $RELEASE_PAT" "https://api.github.com/repos/3477856804/tangram-agent-releases/releases/tags/v${TGA_VER}" | jq -r .id)
+          BODY=$(curl -s -H "Authorization: Bearer $RELEASE_PAT" "https://api.github.com/repos/3477856804/tangram-agent-releases/releases/$RID" | jq -r .body)
+          { echo "$BODY"; echo; echo '## 产物校验（SHA256 + 安卓发布私钥 RSA-SHA256 签名）'; echo; echo '```'; cat /tmp/sums.txt; echo '```'; echo; echo "签名(base64): $SIG"; echo "证书指纹(SHA256): $FP"; } > /tmp/newbody.json
+          jq -Rs '{body:.}' /tmp/newbody.json > /tmp/payload.json
+          curl -s -X PATCH -H "Authorization: Bearer $RELEASE_PAT" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/3477856804/tangram-agent-releases/releases/$RID" -d @/tmp/payload.json -o /dev/null -w "body 更新: %{http_code}\n"

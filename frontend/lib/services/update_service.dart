@@ -247,14 +247,30 @@ class UpdateService {
     }
   }
 
-  /// 资产名是否匹配当前平台安装包。
+  /// 资产名是否匹配当前平台安装包（六文件格式：exe/dmg/deb/apk/ipa/hap，
+  /// 兼容历史 zip/tar.gz）。
   static bool _matchesPlatform(String name) {
     final String n = name.toLowerCase();
     if (Platform.isAndroid) return n.endsWith('.apk');
-    if (Platform.isWindows) return n.contains('windows') && n.endsWith('.zip');
-    if (Platform.isLinux) return n.contains('linux') && n.endsWith('.tar.gz');
-    if (Platform.isMacOS) return n.contains('macos') && n.endsWith('.tar.gz');
+    if (Platform.isWindows) {
+      return n.contains('windows') && (n.endsWith('.exe') || n.endsWith('.zip'));
+    }
+    if (Platform.isLinux) {
+      return n.contains('linux') && (n.endsWith('.deb') || n.endsWith('.tar.gz'));
+    }
+    if (Platform.isMacOS) {
+      return n.contains('macos') && (n.endsWith('.dmg') || n.endsWith('.tar.gz'));
+    }
     return false;
+  }
+
+  /// 从 Release 正文的「产物校验」代码块解析本资产的期望 SHA256。
+  static String? _sha256FromNotes(String? notes, String? assetName) {
+    if (notes == null || assetName == null) return null;
+    final RegExp line = RegExp(
+        r'([0-9a-f]{64})\s+\S*' + RegExp.escape(assetName) + r'\S*');
+    final RegExpMatch? m = line.firstMatch(notes);
+    return m?.group(1);
   }
 
   /// 真实下载本平台安装包到应用私有目录（ota/ 子目录），
@@ -294,19 +310,22 @@ class UpdateService {
       } else {
         await _downloadResilient(url, file, expected, onProgress);
       }
-      // 完整性校验：SHA256SUMS.txt（与产物签名同一 CI 生成）。
-      final String? sumsUrl = info.sumsUrl;
-      if (sumsUrl != null && sumsUrl.isNotEmpty) {
-        final String? verifyError =
-            await _verifySha256(sumsUrl, fileName, file);
-        if (verifyError != null) {
-          try {
-            await file.delete();
-          } on Object {
-            // 删不掉也只如实报错,绝不装校验不过的包。
-          }
-          return InstallOutcome(ok: false, error: verifyError);
+      // 完整性校验：优先 Release 正文的产物校验清单（六文件方案,清单由
+      // 安卓发布私钥签名）,兼容历史 SHA256SUMS.txt 资产。校验不过删包拒装。
+      String? verifyError = await _verifyAgainstExpected(
+          _sha256FromNotes(info.notes, info.assetName), file);
+      if (verifyError == null &&
+          info.sumsUrl != null &&
+          info.sumsUrl!.isNotEmpty) {
+        verifyError = await _verifySha256(info.sumsUrl!, fileName, file);
+      }
+      if (verifyError != null) {
+        try {
+          await file.delete();
+        } on Object {
+          // 删不掉也只如实报错,绝不装校验不过的包。
         }
+        return InstallOutcome(ok: false, error: verifyError);
       }
       if (!Platform.isAndroid) {
         return await _applyDesktopUpdate(file);
@@ -336,6 +355,20 @@ class UpdateService {
           error: '当前平台未实现 installApk（MethodChannel tangram/update 仅 Android）');
     } on Object catch (e) {
       return InstallOutcome(ok: false, error: '${e.runtimeType}: $e');
+    }
+  }
+
+  /// 与期望 SHA256 比对；期望为空则跳过。不匹配返回错误描述。
+  Future<String?> _verifyAgainstExpected(String? expected, File file) async {
+    if (expected == null || expected.isEmpty) return null;
+    try {
+      final crypto.Digest d = await crypto.sha256.bind(file.openRead()).first;
+      if (d.toString() != expected.toLowerCase()) {
+        return 'SHA256 校验不通过：安装包可能被篡改（期望 $expected，实际 $d）';
+      }
+      return null;
+    } on Object catch (e) {
+      return '校验失败：$e';
     }
   }
 
@@ -375,11 +408,13 @@ class UpdateService {
   }
 
   /// 桌面平台（Windows/Linux/macOS）覆盖更新：
-  /// 落盘更新脚本 → 脚本等待本进程退出 → 解包覆盖安装目录 → 重启应用。
+  /// 落盘更新脚本 → 脚本等待本进程退出 → 安装/解包覆盖 → 重启应用。
+  /// 支持新六文件格式（exe 安装器 / deb / dmg）与历史 zip/tar.gz。
   Future<InstallOutcome> _applyDesktopUpdate(File pkg) async {
     final Directory dir = pkg.parent;
     final String exe = Platform.resolvedExecutable;
     final String v = pkg.path;
+    final String lower = v.toLowerCase();
     final String script;
     final List<String> cmd;
     if (Platform.isWindows) {
@@ -387,13 +422,17 @@ class UpdateService {
       final String tmp = '${dir.path}\\update_new';
       final String appDir = File(exe).parent.path;
       final String exeName = exe.split('\\').last;
+      final String installStep = lower.endsWith('.exe')
+          // 官方安装器静默覆盖（Inno 会装回原目录）
+          ? '"$v" /SILENT /NORESTART /SUPPRESSMSGBOXES\r\n'
+          : 'rmdir /s /q "$tmp" >nul 2>&1\r\n'
+              'powershell -NoProfile -Command "Expand-Archive -LiteralPath \'$v\' -DestinationPath \'$tmp\' -Force"\r\n'
+              'robocopy "$tmp" "$appDir" /E /IS /IT >nul\r\n';
       File(script).writeAsStringSync(
         '@echo off\r\n'
         'timeout /t 3 /nobreak >nul\r\n'
         'taskkill /f /im "$exeName" >nul 2>&1\r\n'
-        'rmdir /s /q "$tmp" >nul 2>&1\r\n'
-        'powershell -NoProfile -Command "Expand-Archive -LiteralPath \'$v\' -DestinationPath \'$tmp\' -Force"\r\n'
-        'robocopy "$tmp" "$appDir" /E /IS /IT >nul\r\n'
+        '$installStep'
         'start "" "$exe"\r\n'
         'del "%~f0"\r\n',
       );
@@ -403,21 +442,33 @@ class UpdateService {
       final String tmp = '${dir.path}/update_new';
       String target;
       String relaunch;
+      String unpack;
       if (Platform.isLinux) {
         target = File(exe).parent.path; // bundle 目录
         relaunch = '"$exe"';
+        unpack = lower.endsWith('.deb')
+            ? '(cd "$tmp" && ar x "$v")\n'
+                'tar -xf "$tmp"/data.tar.* -C "$tmp"\n'
+                'cp -a "$tmp"/opt/tangram/. "$target/"\n'
+            : 'tar -xzf "$v" -C "$tmp"\n' 'cp -a "$tmp"/. "$target/"\n';
       } else {
         // macOS: .../tangram.app/Contents/MacOS/tangram → 覆盖 .app
         target = File(exe).parent.parent.parent.parent.path;
         relaunch = 'open "$target/tangram.app"';
+        unpack = lower.endsWith('.dmg')
+            ? 'hdiutil attach "$v" -nobrowse -mountpoint "$tmp/mnt" >/dev/null\n'
+                'rm -rf "$target/tangram.app"\n'
+                'cp -R "$tmp/mnt/tangram.app" "$target/"\n'
+                'hdiutil detach "$tmp/mnt" >/dev/null || true\n'
+            : 'tar -xzf "$v" -C "$tmp"\n'
+                'rm -rf "$target/tangram.app" && mv "$tmp/tangram.app" "$target/"\n';
       }
       File(script).writeAsStringSync(
         '#!/bin/sh\n'
         'sleep 3\n'
         'rm -rf "$tmp"\n'
         'mkdir -p "$tmp"\n'
-        'tar -xzf "$v" -C "$tmp"\n'
-        '${Platform.isMacOS ? 'rm -rf "$target/tangram.app" && mv "$tmp/tangram.app" "$target/"' : 'cp -a "$tmp/." "$target/"'}\n'
+        '$unpack'
         '$relaunch\n'
         'rm -f "$script"\n',
       );
