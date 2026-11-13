@@ -1,9 +1,9 @@
 name: sync-gitee
-# 开发者只推 Gitee；本工作流每 15 分钟检查一次，内容有变就同步到 GitHub
-# 并触发 build-all（全平台构建 + 版本自动进位 + Release 发布 + OTA）。
+# 主同步通道 = Gitee 原生「仓库镜像→推送到 GitHub」(gitee 国内服务器推 GitHub,
+# 秒级、免认证墙)。GitHub runner 在海外连不上 gitee.com,故本工作流不再定时拉取,
+# 仅保留手动兜底:镜像故障时可手动 dispatch 一次(需 gitee 可达时才会成功)。
+# 推送到达 GitHub main 后由 build-all.yml 的 push 触发自动构建 + OTA。
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -12,18 +12,20 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
-      - name: Gitee → GitHub 同步（内容变化时强推，保持单提交）
+      - name: Gitee → GitHub 兜底同步（快速失败，不占额度）
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          export GIT_HTTP_LOW_SPEED_LIMIT=1024 GIT_HTTP_LOW_SPEED_TIME=20
           git init -q repo && cd repo
           GITEE_URL="https://COSMOnb666:${GITEE_TOKEN}@gitee.com/COSMOnb666/tangram-agent.git"
           GH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/3477856804/tangram-agent.git"
           GS=$(git ls-remote "$GITEE_URL" main | cut -f1 || true)
-          [ -n "$GS" ] || { echo "Gitee 读取失败（检查 GITEE_TOKEN Secret）"; exit 1; }
+          [ -n "$GS" ] || { echo "Gitee 不可达（海外 runner 常态）。请改用 Gitee 仓库镜像推送。"; exit 1; }
           GB=$(git ls-remote "$GH_URL" main | cut -f1 || true)
           if [ "$GS" = "$GB" ]; then echo "无变化: $GS"; exit 0; fi
           git fetch -q "$GITEE_URL" main
