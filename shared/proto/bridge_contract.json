@@ -1,0 +1,92 @@
+{
+  "$schema": "https://tangram.local/bridge/v1/contract.json",
+  "name": "PythonBridge",
+  "version": "1.0.0",
+  "transport": "dart-bridge FFI（Dart 侧唯一通道）",
+  "note": "所有 Dart ↔ Python 交互只允许走 PythonBridge。高频 token 与 Agent 状态全留 Dart 侧。",
+  "control": {
+    "doc": "RPC / 能力协商 / reload / Agent 指令 / 模型路由 / 插件生命周期 / IM 事件 / 更新状态 / 依赖事件 / 感知事件 / 主动任务 / 安全审批 / 代码任务 / 责任追溯 / 设备文件 / 工作蒸馏（agent = model + harness，产出用户自己的模型）",
+    "method_domains": [
+      "rpc",
+      "capability_negotiation",
+      "reload",
+      "agent_command",
+      "model_route",
+      "plugin_lifecycle",
+      "im_event",
+      "update_status",
+      "dependency_event",
+      "perception_event",
+      "proactive_task",
+      "security_approval",
+      "code_task",
+      "responsibility_trace",
+      "device_file",
+      "distill"
+    ]
+  },
+  "hot_path": {
+    "doc": "流式 token / 流式音频 / 图片结果 / 子 Agent 状态 / 图谱结果 / SceneDescription / Diff / 测试报告 / 感知流 / 原始字节",
+    "topics": [
+      "stream_token",
+      "stream_audio",
+      "image_result",
+      "subagent_state",
+      "graph_result",
+      "scene_description",
+      "diff",
+      "test_report",
+      "perception_stream",
+      "raw_bytes"
+    ]
+  },
+  "multimodal": {
+    "doc": "音频 PCM / 图片二进制 / 模态对齐",
+    "channels": [
+      "audio_pcm",
+      "image_binary",
+      "modality_align"
+    ]
+  },
+  "realtime_event": {
+    "doc": "传感器 / 屏幕 / 窗口 / 情境 / 系统事件",
+    "categories": [
+      "sensor",
+      "screen",
+      "window",
+      "context",
+      "system_event"
+    ]
+  },
+  "async_callback": {
+    "doc": "Python → Dart FIFO 异步回调队列",
+    "direction": "python_to_dart",
+    "type": "fifo"
+  },
+  "distill": {
+    "doc": "工作蒸馏（agent = model + harness）。两条来源：本地下载基底模型（local）或调用 OpenAI 兼容 API（api）；采集真实工作轨迹 → 蒸馏训练 → 产出用户自己的私人模型 + 模型卡。",
+    "equation": "agent = model + harness",
+    "sources": ["local", "api"],
+    "actions": ["version", "catalog", "download", "models", "work", "distill", "describe"],
+    "result_fields": ["ok", "action", "data", "error"],
+    "product_version_frozen": "0.0.1"
+  },
+  "flak": {
+    "doc": "FLAK 地基三层契约（推理 / RAG / UI 分离）。换后端只改装配点，AgentRuntime 与桥协议不动。",
+    "layers": [
+      "inference",
+      "rag",
+      "ui"
+    ],
+    "backend_kinds": [
+      "bundled",
+      "llamadart",
+      "flak_native",
+      "remote"
+    ],
+    "default_backend": "bundled",
+    "degradation": "原生库或 GGUF 缺失时自动回退 bundled，对话主路径不中断。",
+    "capability_negotiation_control": "capability_negotiation",
+    "note": "高频 token 与 Agent 状态全留 Dart 侧；能力协商结果不进 hot-path。"
+  }
+}

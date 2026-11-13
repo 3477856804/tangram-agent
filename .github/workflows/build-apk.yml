@@ -1,0 +1,42 @@
+name: build-apk
+
+# 单 Android APK 快速构建（全平台请用 build-all.yml）。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PUB_HOSTED_URL: https://pub.flutter-io.cn
+  FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - name: Install Flutter 3.50.0 (镜像直装)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/flutter && sudo chown "$USER" /opt/flutter
+          curl -fL -C - --max-time 600 --retry 5 --retry-all-errors -o /tmp/f.tar.xz https://storage.flutter-io.cn/flutter_infra_release/releases/stable/linux/flutter_linux_3.50.0-stable.tar.xz
+          tar -xJf /tmp/f.tar.xz -C /opt/flutter --strip-components=1
+          echo /opt/flutter/bin >> "$GITHUB_PATH"
+          /opt/flutter/bin/flutter --version
+      - name: Android SDK 36
+        run: |
+          set -euo pipefail
+          SDKM="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM="$(command -v sdkmanager)"
+          yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+          "$SDKM" "platform-tools" "platforms;android-36" "build-tools;36.0.0" 2>&1 | tail -3
+      - name: Python 构建依赖 (pillow)
+        run: python3 -m pip install --quiet --upgrade pillow || true
+      - name: Build APK (release, arm64)
+        run: bash scripts/build_frontend.sh android --extra "--release" --extra "--target-platform" --extra "android-arm64"
+      - uses: actions/upload-artifact@v4
+        with: { name: tangram-agent-apk, path: tangram-agent.apk, if-no-files-found: error }

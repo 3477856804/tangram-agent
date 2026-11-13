@@ -1,0 +1,46 @@
+{
+  "$schema": "https://tangram.agent/schema/cube_schema.json",
+  "schemaVersion": "1.0.0",
+  "name": "tangram-cube-contract",
+  "description": "内置沙箱能力契约：声明应用可执行的操作（cube）及其所需能力。沙箱启动时按此契约做能力校验，缺失即进入 _refusal 状态，零执行、零暂存写入。",
+  "allowDegrade": false,
+  "backends": {
+    "dart": {
+      "kind": "builtin",
+      "isolate": true,
+      "note": "纯 Dart 执行体，随 APK 内置，不依赖任何外部解释器（无 Python、无 JS 引擎子进程）。"
+    }
+  },
+  "cubes": {
+    "run_test": {
+      "description": "运行内置测试套件并汇总结果。",
+      "backend": "dart",
+      "requires": ["isolatedExec"],
+      "allowDegrade": false
+    },
+    "eval_expression": {
+      "description": "在受限命名空间里安全求值算术/逻辑表达式，禁止函数调用、属性访问与导入。",
+      "backend": "dart",
+      "requires": ["safeEval"],
+      "allowDegrade": false
+    },
+    "sql_query": {
+      "description": "对本地 SQLite 记忆库做只读查询。",
+      "backend": "dart",
+      "requires": ["localDb"],
+      "allowDegrade": false
+    },
+    "file_read": {
+      "description": "只读访问沙箱目录内的文件（不越界到应用沙盒之外）。",
+      "backend": "dart",
+      "requires": ["fsRead"],
+      "allowDegrade": false
+    }
+  },
+  "capabilities": {
+    "isolatedExec": "在独立 Isolate 中执行，不共享主 isolate 状态，异常不外泄。",
+    "safeEval": "受限表达式求值：仅允许数字、字符串、布尔、列表/字典字面量与基础运算符。",
+    "localDb": "仅允许对本地只读数据库句柄执行 SELECT。",
+    "fsRead": "仅允许在沙箱根目录内的相对路径读取。"
+  }
+}

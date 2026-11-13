@@ -1,0 +1,186 @@
+import 'dart:async';
+import 'package:flutter/material.dart';
+import '../../../core/theme/flai_theme.dart';
+import '../onboarding_config.dart';
+import '../onboarding_controller.dart';
+import '../widgets/typing_text.dart';
+
+class FlaiRevealScreen extends StatefulWidget {
+  const FlaiRevealScreen({
+    super.key,
+    required this.controller,
+    required this.step,
+  });
+
+  final OnboardingController controller;
+  final RevealStep step;
+
+  @override
+  State<FlaiRevealScreen> createState() => _FlaiRevealScreenState();
+}
+
+class _FlaiRevealScreenState extends State<FlaiRevealScreen>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _animController;
+  late final Animation<double> _scaleAnimation;
+  late final Animation<double> _glowAnimation;
+
+  bool _showName = false;
+  bool _nameComplete = false;
+  Timer? _holdTimer;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _animController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+
+    _scaleAnimation = Tween<double>(begin: 0.5, end: 1.0).animate(
+      CurvedAnimation(parent: _animController, curve: Curves.easeOutBack),
+    );
+
+    _glowAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _animController, curve: Curves.easeOut),
+    );
+
+    _animController.forward().then((_) {
+      if (mounted) setState(() => _showName = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _holdTimer?.cancel();
+    _animController.dispose();
+    super.dispose();
+  }
+
+  void _onNameComplete() {
+    if (!mounted) return;
+    setState(() => _nameComplete = true);
+    _holdTimer = Timer(widget.step.holdDuration, () {
+      if (mounted) widget.controller.next();
+    });
+  }
+
+  String get _title =>
+      (widget.step.title ?? 'Meet {name}')
+          .replaceAll('{name}', widget.controller.assistantName);
+
+  String get _subtitle =>
+      widget.step.subtitle ?? 'Your AI assistant is ready';
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FlaiTheme.of(context);
+    final config = widget.controller.config;
+
+    final glowColor = config.revealGradient.isNotEmpty
+        ? config.revealGradient.first
+        : theme.colors.primary;
+
+    final logoWidget = config.revealLogo ??
+        config.splashLogo ??
+        _DefaultRevealLogo(gradient: config.revealGradient);
+
+    return Scaffold(
+      backgroundColor: theme.colors.background,
+      body: Center(
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: theme.spacing.xl),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              AnimatedBuilder(
+                animation: _animController,
+                builder: (context, child) {
+                  final glow = _glowAnimation.value;
+                  return Container(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: glowColor.withAlpha(
+                            (0.4 * glow * 255).round(),
+                          ),
+                          blurRadius: 40.0 * glow,
+                          spreadRadius: 8.0 * glow,
+                        ),
+                      ],
+                    ),
+                    child: ScaleTransition(
+                      scale: _scaleAnimation,
+                      child: child,
+                    ),
+                  );
+                },
+                child: logoWidget,
+              ),
+
+              SizedBox(height: theme.spacing.xxl),
+
+              if (_showName)
+                TypingText(
+                  text: _title,
+                  style: theme.typography.xl.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: theme.colors.foreground,
+                  ),
+                  onComplete: _onNameComplete,
+                ),
+
+              SizedBox(height: theme.spacing.md),
+
+              AnimatedOpacity(
+                opacity: _nameComplete ? 1.0 : 0.0,
+                duration: const Duration(milliseconds: 600),
+                child: Text(
+                  _subtitle,
+                  textAlign: TextAlign.center,
+                  style: theme.typography.sm.copyWith(
+                    color: theme.colors.mutedForeground,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DefaultRevealLogo extends StatelessWidget {
+  const _DefaultRevealLogo({required this.gradient});
+
+  final List<Color> gradient;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FlaiTheme.of(context);
+    final colors = gradient.length >= 2
+        ? gradient
+        : [const Color(0xFF818CF8), const Color(0xFF34D399)];
+
+    return Container(
+      width: 96,
+      height: 96,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          colors: colors,
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+      child: Icon(
+        Icons.auto_awesome_rounded,
+        color: theme.colors.primaryForeground,
+        size: 48,
+      ),
+    );
+  }
+}

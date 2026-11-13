@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OTA 下载目录 FileProvider 映射：
+     external-files-path = /Android/data/<pkg>/files（getExternalStorageDirectory）
+     files-path          = /data/data/<pkg>/files（getApplicationDocumentsDirectory 兜底）
+     Dart 侧把 APK 下到 <base>/ota/，两者均被 "." 通配覆盖。 -->
+<paths>
+    <external-files-path name="external_files" path="." />
+    <files-path name="internal_files" path="." />
+</paths>

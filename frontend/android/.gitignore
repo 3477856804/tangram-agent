@@ -1,0 +1,18 @@
+gradle-wrapper.jar
+/.gradle
+/captures/
+/gradlew
+/gradlew.bat
+/local.properties
+GeneratedPluginRegistrant.java
+.cxx/
+
+# Remember to never publicly share your keystore.
+# See https://flutter.dev/to/reference-keystore
+key.properties
+**/*.keystore
+**/*.jks
+# OTA 固定签名密钥：随仓库分发以保证所有 CI 构建同签名（覆盖安装/OTA 前提）。
+# 若改用 CI secret 托管，删除下面两行放行即可。
+!keystore/tangram-release.jks
+!keystore.properties

@@ -1,0 +1,61 @@
+name: tangram
+description: 檀阁瑞木 Tangram —— 个人专属 AI Agent 全平台运行时 + 3D 数字人桌宠。
+publish_to: 'none'
+version: 0.0.1+1
+
+environment:
+  # llamadart（端侧 GGUF 真推理）要求 Dart >=3.10.7；Flutter 3.41+ 满足。
+  sdk: '>=3.10.7 <4.0.0'
+  flutter: '>=3.41.0'
+
+dependencies:
+  cupertino_icons: ^2.0.0
+  file_picker: ^8.0.0
+  flutter:
+    sdk: flutter
+  flutter_markdown: ^0.7.0
+  flutter_secure_storage: ^9.2.4
+  go_router: ^14.8.1
+  google_sign_in: ^6.2.1
+  http: ^1.2.2
+  image_picker: ^1.1.2
+  # 端侧 GGUF 真推理（llama.cpp / Dart FFI，见 harness/local_inference.dart）
+  llamadart: 0.19.0
+  markdown: ^7.1.1
+  nested: ^1.0.0
+  path: ^1.9.0
+  path_provider: ^2.1.2
+  provider: ^6.1.2
+  qr_flutter: ^4.1.0
+  share_plus: ^10.1.4
+  sign_in_with_apple: ^6.0.2
+  speech_to_text: ^7.0.0
+  url_launcher: ^6.3.1
+  vector_math: ^2.1.4
+  # OpenClaw AGP 通道真实 WebSocket 连接（见 harness/im_gateway.dart）
+  web_socket_channel: ^3.0.1
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+  flutter_test:
+    sdk: flutter
+  test: ^1.25.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/logo/
+    - assets/schema/
+    - assets/icons/
+
+# Dart native-assets 构建钩子：把 llama.cpp 运行时（预置在 tool/native/llamadart，
+# 官方 v0.9.0 release，SHA256 已校验）真实打进 APK，实现端侧 GGUF 推理。
+# 只选 llama_cpp + cpu 后端，跳过 LiteRT-LM / Vulkan 的联网下载，构建可离线复现。
+hooks:
+  user_defines:
+    llamadart:
+      llamadart_native_path: tool/native/llamadart
+      llamadart_native_runtimes: [llama_cpp]
+      llamadart_native_backends:
+        platforms:
+          android: [cpu]

@@ -1,0 +1,60 @@
+# 构建/运行期生成物
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+build/
+frontend/build/
+frontend/.dart_tool/
+frontend/.idea/
+frontend/.metadata
+frontend/android/local.properties
+frontend/android/.gradle/
+frontend/android/build/
+frontend/android/.cxx/
+frontend/android/.kotlin/
+frontend/android/tangram_android.iml
+frontend/windows/
+frontend/linux/
+frontend/macos/
+frontend/ios/
+frontend/web/
+*.iml
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# 运行时状态
+data/
+logs/
+tmp/
+*.log
+.tangram-data/
+
+# 模型权重（用户本地下载，不入库）
+*.pt
+*.safetensors
+*.bin
+*.pth
+*.ckpt
+
+# 凭据
+.env
+.env.*
+*.token
+*credentials*
+*secret*.json
+
+# 构建交付物
+*.apk
+tangram-agent.apk
+
+# 签名密钥绝不入库（CI 从 Secret 还原）
+frontend/android/keystore.properties
+frontend/android/keystore/*.jks
+*.jks
+*.keystore

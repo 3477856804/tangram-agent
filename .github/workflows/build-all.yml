@@ -1,0 +1,332 @@
+name: build-all-platforms
+
+# 全平台一键构建：Android APK/AAB、Windows x64、Linux x64、macOS(arm64)、Web。
+# Flutter 3.50.0 一律从国内镜像 storage.flutter-io.cn 直装（GitHub 云 runner 拉
+# storage.googleapis.com 常出现 HTTP/2 INTERNAL_ERROR）。
+# 触发：Actions 面板 Run workflow（可勾选发布 Release），或 push 到 main。
+
+on:
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: '构建完成后发布 GitHub Release（可直接下载）'
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-all.yml'
+      - 'frontend/**'
+      - 'scripts/**'
+
+permissions:
+  contents: write
+
+env:
+  PUB_HOSTED_URL: https://pub.flutter-io.cn
+  FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
+
+jobs:
+  # ================= Android =================
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - name: Install Flutter 3.50.0 (镜像直装)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/flutter && sudo chown "$USER" /opt/flutter
+          curl -fL -C - --max-time 600 --retry 5 --retry-all-errors -o /tmp/f.tar.xz \
+            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/linux/flutter_linux_3.50.0-stable.tar.xz
+          tar -xJf /tmp/f.tar.xz -C /opt/flutter --strip-components=1
+          echo /opt/flutter/bin >> "$GITHUB_PATH"
+          /opt/flutter/bin/flutter --version
+      - name: Android SDK 36
+        run: |
+          set -euo pipefail
+          SDKM="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM="$(command -v sdkmanager)"
+          yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+          "$SDKM" "platform-tools" "platforms;android-36" "build-tools;36.0.0" 2>&1 | tail -3
+      - name: Python 构建依赖 (pillow)
+        run: |
+          python3 -m pip install --quiet --upgrade pillow || python3 -m pip install --quiet --break-system-packages pillow
+      - name: 签名还原与版本 bump（密钥仅存 CI Secret，仓库不落盘）
+        working-directory: frontend/android
+        run: |
+          set -euo pipefail
+          [ -n "$ANDROID_KEYSTORE_BASE64" ] || { echo "缺少 Secret ANDROID_KEYSTORE_BASE64"; exit 1; }
+          mkdir -p keystore
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore/tangram-release.jks
+          chmod 600 keystore/tangram-release.jks
+          printf 'storeFile=keystore/tangram-release.jks\nkeyAlias=tangram\n' > keystore.properties
+          # 版本号真源 = 发布通道最新 Release 标签，自动进位（0.0.1→…→0.0.99→0.1.0）
+          python3 - <<'EOF' | tee /tmp/bump.txt
+          import json, urllib.request
+          def latest():
+              try:
+                  r = urllib.request.urlopen(
+                      "https://api.github.com/repos/3477856804/tangram-agent-releases/releases/latest",
+                      timeout=20)
+                  return json.load(r)["tag_name"].lstrip("v")
+              except Exception:
+                  return None
+          v = latest()
+          if v:
+              major, minor, patch = (int(x) for x in v.split("."))
+              patch += 1
+              if patch > 99:
+                  minor += 1; patch = 0
+                  if minor > 99:
+                      major += 1; minor = 0
+          else:
+              major, minor, patch = 0, 0, 1
+          name = (f"{major}.{minor}.0" if patch == 0
+                  else f"{major}.0.{patch}" if minor == 0
+                  else f"{major}.{minor}.{patch:02d}")
+          code = major * 10_000_000 + minor * 100_000 + patch * 1_000
+          open("version.properties", "w").write(
+              f"major={major}\nminor={minor}\npatch={patch}\nbuild=0\n")
+          print(f"versionName={name}")
+          print(f"versionCode={code}")
+          EOF
+          echo "TGA_VER=$(grep versionName /tmp/bump.txt | cut -d= -f2)" >> "$GITHUB_ENV"
+          echo "TGA_CODE=$(grep versionCode /tmp/bump.txt | cut -d= -f2)" >> "$GITHUB_ENV"
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      - name: Build APK (release)
+        run: bash scripts/build_frontend.sh android --extra "--release" --extra "--target-platform" --extra "android-arm64" --extra "--dart-define=TANGRAM_VERSION=$TGA_VER"
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      - name: Build AAB
+        continue-on-error: true
+        run: cd frontend && flutter build appbundle --release --target-platform android-arm64 --dart-define=TANGRAM_VERSION=$TGA_VER
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      - name: 签名校验与发布记录
+        run: |
+          set -euo pipefail
+          APK=$(find frontend/build -name 'app-release.apk' | head -1)
+          AH="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          # 先落盘再截断：避免 pipefail 下 head 关闭管道引发 SIGPIPE(141) 误杀构建
+          # build-tools 可能有多个版本目录：glob 展开成多路径会被当成参数，取最新版
+          BT=$(ls -d "$AH"/build-tools/*/ | sort -V | tail -1)
+          "$BT"apksigner verify --print-certs "$APK" > /tmp/sig.txt
+          head -8 /tmp/sig.txt
+          "$BT"aapt dump badging "$APK" > /tmp/badge.txt
+          head -1 /tmp/badge.txt
+          echo "versionName=$TGA_VER versionCode=$TGA_CODE 构建时间=$(date -u +%FT%TZ)" | tee frontend/build/APK_VERSION.txt
+          sha256sum "$APK" | tee -a frontend/build/APK_VERSION.txt
+      - name: Collect
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find . -name "*.apk" -type f -exec cp -f {} out/ \;
+          find . -name "*.aab" -type f -exec cp -f {} out/ \;
+          cp frontend/build/APK_VERSION.txt out/ || true
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with: { name: android, path: out/*, if-no-files-found: error }
+
+  # ================= Windows =================
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Flutter 3.50.0 (镜像直装)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dst = 'C:\flutter'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          curl.exe -fsSL --retry 5 --retry-all-errors -o "$env:TEMP\f.zip" `
+            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/windows/flutter_windows_3.50.0-stable.zip
+          Expand-Archive -Path "$env:TEMP\f.zip" -DestinationPath 'C:\' -Force
+          echo 'C:\flutter\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & 'C:\flutter\bin\flutter.bat' --version
+      - name: Python 构建依赖 (pillow)
+        shell: pwsh
+        run: python -m pip install --quiet --upgrade pillow
+      - name: Build Windows x64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/bin"
+          printf '#!/bin/sh\nexec python "$@"\n' > "$HOME/bin/python3"
+          chmod +x "$HOME/bin/python3"
+          export PATH="$HOME/bin:$PATH"
+          python3 --version
+          bash scripts/build_frontend.sh windows --extra "--release"
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $b = "frontend/build/windows/x64/runner/Release"
+          if (-not (Test-Path "$b/tangram.exe")) { Get-ChildItem -Recurse frontend/build | Select-Object -First 40 FullName; exit 1 }
+          Compress-Archive -Path "$b/*" -DestinationPath out/tangram-windows-x64.zip -Force
+          Get-ChildItem out
+      - uses: actions/upload-artifact@v4
+        with: { name: windows-x64, path: out/*, if-no-files-found: error }
+
+  # ================= Linux =================
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux 构建依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libsecret-1-dev libjsoncpp-dev
+      - name: Install Flutter 3.50.0 (镜像直装)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/flutter && sudo chown "$USER" /opt/flutter
+          curl -fL -C - --max-time 600 --retry 5 --retry-all-errors -o /tmp/f.tar.xz \
+            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/linux/flutter_linux_3.50.0-stable.tar.xz
+          tar -xJf /tmp/f.tar.xz -C /opt/flutter --strip-components=1
+          echo /opt/flutter/bin >> "$GITHUB_PATH"
+          /opt/flutter/bin/flutter --version
+      - name: Python 构建依赖 (pillow)
+        run: |
+          python3 -m pip install --quiet --upgrade pillow || python3 -m pip install --quiet --break-system-packages pillow
+      - name: 移除 hooks（桌面端不打包 Android 预编译库）
+        run: |
+          cp frontend/pubspec.yaml /tmp/pubspec.yaml.bak
+          python3 -c "p='frontend/pubspec.yaml'; s=open(p,encoding='utf-8').read(); i=s.find(chr(10)+'hooks:'); open(p,'w',encoding='utf-8').write(s[:i] if i>0 else s); print('hooks removed:', i>0)"
+      - name: Build Linux x64
+        run: |
+          set -euo pipefail
+          cd frontend
+          # json.hpp 在新 clang 下 -Werror(deprecated literal operator)：
+          # 必须把 operator "" _json 整体收紧为 operator""_json 才真正消除告警
+          /opt/flutter/bin/flutter pub get || true
+          JH=$(find "$HOME/.pub-cache" -name json.hpp -path '*flutter_secure_storage*' 2>/dev/null | head -1 || true)
+          if [ -n "$JH" ]; then
+            sed -i 's/operator[[:space:]]*""[[:space:]]*_json_pointer/operator""_json_pointer/g; s/operator[[:space:]]*""[[:space:]]*_json/operator""_json/g' "$JH"
+            echo "patched: $JH"
+          else
+            echo "WARN: json.hpp not found"
+          fi
+          cd ..
+          bash scripts/build_frontend.sh linux --extra "--release"
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          B=frontend/build/linux/x64/release/bundle
+          [ -f "$B/tangram" ] || { echo "未找到 tangram 可执行文件"; ls -R frontend/build/linux 2>/dev/null | head -30; exit 1; }
+          tar -czf out/tangram-linux-x64.tar.gz -C "$B" .
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with: { name: linux-x64, path: out/*, if-no-files-found: error }
+
+  # ================= macOS =================
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Flutter 3.50.0 (镜像直装)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/f.zip \
+            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/macos/flutter_macos_3.50.0-stable.zip
+          mkdir -p "$HOME/flutter-sdk"
+          unzip -q /tmp/f.zip -d "$HOME/flutter-sdk"
+          echo "$HOME/flutter-sdk/flutter/bin" >> "$GITHUB_PATH"
+          "$HOME/flutter-sdk/flutter/bin/flutter" --version
+      - name: Python 构建依赖 (pillow)
+        run: |
+          python3 -m pip install --quiet --upgrade pillow || python3 -m pip install --quiet --break-system-packages pillow
+      - name: 移除 hooks（桌面端不打包 Android 预编译库）
+        run: |
+          cp frontend/pubspec.yaml /tmp/pubspec.yaml.bak
+          python3 -c "import re; p='frontend/pubspec.yaml'; s=open(p,encoding='utf-8').read(); i=s.find(chr(10)+'hooks:'); open(p,'w',encoding='utf-8').write(s[:i] if i>0 else s); print('hooks removed:', i>0)"
+          tail -3 frontend/pubspec.yaml
+      - name: Build macOS (host arch, 未签名)
+        run: bash scripts/build_frontend.sh macos --extra "--release"
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          APP=$(find frontend/build/macos -name "tangram.app" -maxdepth 6 | head -1)
+          [ -n "$APP" ] || { echo "未找到 tangram.app"; exit 1; }
+          codesign --force --deep --sign - "$APP" 2>/dev/null || true
+          tar -czf "out/tangram-macos-$(uname -m).tar.gz" -C "$(dirname "$APP")" "$(basename "$APP")"
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: out/*, if-no-files-found: error }
+
+  # ================= Web =================
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Flutter 3.50.0 (镜像直装)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/flutter && sudo chown "$USER" /opt/flutter
+          curl -fL -C - --max-time 600 --retry 5 --retry-all-errors -o /tmp/f.tar.xz \
+            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/linux/flutter_linux_3.50.0-stable.tar.xz
+          tar -xJf /tmp/f.tar.xz -C /opt/flutter --strip-components=1
+          echo /opt/flutter/bin >> "$GITHUB_PATH"
+          /opt/flutter/bin/flutter --version
+      - name: Build Web
+        run: |
+          set -euo pipefail
+          if [ ! -d frontend/web ]; then
+            TMP=$(mktemp -d); ( cd "$TMP" && flutter create --platforms=web --project-name tangram . >/dev/null )
+            cp -a "$TMP/web" frontend/; rm -rf "$TMP"
+          fi
+          ( cd frontend && flutter pub get && flutter build web --release )
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          tar -czf out/tangram-web.tar.gz -C frontend/build/web .
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with: { name: web, path: out/*, if-no-files-found: warn }
+
+  # ================= Release =================
+  release:
+    needs: [android, windows, linux, macos, web]
+    if: ${{ always() && (github.event_name == 'push' || inputs.make_release) }}
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist }
+      - name: List
+        run: find dist -type f -printf '%s %p\n' | sort -rn
+      - name: 读取版本（OTA 标签真源 = android 构建的 version.properties）
+        run: |
+          V=$(grep -o 'versionName=[0-9.]*' dist/android/APK_VERSION.txt | cut -d= -f2)
+          [ -n "$V" ] || V=$(tr -d '[:space:]' < VERSION)
+          echo "TGA_VER=$V" >> "$GITHUB_ENV"
+      - name: Publish Release（发布通道仓库，公开仅产物；源码仓库保持私有）
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: 3477856804/tangram-agent-releases
+          token: ${{ secrets.RELEASE_PAT }}
+          tag_name: v${{ env.TGA_VER }}
+          name: TGA tangram-agent v${{ env.TGA_VER }}（CI 全平台）
+          body: |
+            由 GitHub Actions 自动构建（commit ${{ github.sha }}）。
+            Android APK(arm64)/AAB · Windows x64 · Linux x64 · macOS · Web。
+            Windows/macOS 包未签名，首次运行需手动放行。
+          files: dist/**/*
+          fail_on_unmatched_files: false

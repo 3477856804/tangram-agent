@@ -1,0 +1,32 @@
+name: sync-gitee
+# 开发者只推 Gitee；本工作流每 15 分钟检查一次，内容有变就同步到 GitHub
+# 并触发 build-all（全平台构建 + 版本自动进位 + Release 发布 + OTA）。
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gitee → GitHub 同步（内容变化时强推，保持单提交）
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init -q repo && cd repo
+          GITEE_URL="https://COSMOnb666:${GITEE_TOKEN}@gitee.com/COSMOnb666/tangram-agent.git"
+          GH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/3477856804/tangram-agent.git"
+          GS=$(git ls-remote "$GITEE_URL" main | cut -f1 || true)
+          [ -n "$GS" ] || { echo "Gitee 读取失败（检查 GITEE_TOKEN Secret）"; exit 1; }
+          GB=$(git ls-remote "$GH_URL" main | cut -f1 || true)
+          if [ "$GS" = "$GB" ]; then echo "无变化: $GS"; exit 0; fi
+          git fetch -q "$GITEE_URL" main
+          git checkout -qB main FETCH_HEAD
+          git push -q --force "$GH_URL" main
+          echo "已同步 ${GB:-∅} → $GS，push 事件将自动触发全平台构建"
