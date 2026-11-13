@@ -196,7 +196,14 @@ jobs:
             '      Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream("payload.zip");',
             '      string tmp = Path.Combine(Path.GetTempPath(), "tangram-payload.zip");',
             '      using (var fs = File.Create(tmp)) { s.CopyTo(fs); }',
-            '      ZipFile.ExtractToDirectory(tmp, dest, true);',
+            '      using (ZipArchive z = ZipFile.OpenRead(tmp)) {',
+            '        foreach (ZipArchiveEntry e in z.Entries) {',
+            '          if (e.FullName.EndsWith("/")) continue;',
+            '          string fp = Path.Combine(dest, e.FullName.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar));',
+            '          Directory.CreateDirectory(Path.GetDirectoryName(fp));',
+            '          e.ExtractToFile(fp, true);',
+            '        }',
+            '      }',
             '      File.Delete(tmp);',
             '    }',
             '    Process.Start(exe);',
@@ -380,10 +387,10 @@ jobs:
         with: { node-version: '20' }
       - name: ohos Flutter SDK(SIG master 镜像,含 build hap;海外 runner 直连 gitee 会超时)
         env:
-          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+          GH_PAT: ${{ secrets.GH_CLASSIC_PAT }}
         run: |
           set -euo pipefail
-          curl -fL --retry 3 -H "Authorization: Bearer $RELEASE_PAT" -o /tmp/ohf.zip \
+          curl -fL --retry 3 -H "Authorization: Bearer $GH_PAT" -o /tmp/ohf.zip \
             "https://github.com/3477856804/ohos-flutter-mirror/releases/download/v1/flutter_flutter-master-ohos.zip"
           mkdir -p /tmp/ohf && unzip -q /tmp/ohf.zip -d /tmp/ohf
           sudo mkdir -p /opt/ohos-flutter && sudo chown "$USER" /opt/ohos-flutter
