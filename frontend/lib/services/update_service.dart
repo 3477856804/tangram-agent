@@ -256,7 +256,10 @@ class UpdateService {
       return n.contains('windows') && (n.endsWith('.exe') || n.endsWith('.zip'));
     }
     if (Platform.isLinux) {
-      return n.contains('linux') && (n.endsWith('.deb') || n.endsWith('.tar.gz'));
+      return n.contains('linux') &&
+          (n.endsWith('.appimage') ||
+              n.endsWith('.deb') ||
+              n.endsWith('.tar.gz'));
     }
     if (Platform.isMacOS) {
       return n.contains('macos') && (n.endsWith('.dmg') || n.endsWith('.tar.gz'));
@@ -422,9 +425,10 @@ class UpdateService {
       final String tmp = '${dir.path}\\update_new';
       final String appDir = File(exe).parent.path;
       final String exeName = exe.split('\\').last;
-      final String installStep = lower.endsWith('.exe')
-          // 官方安装器静默覆盖（Inno 会装回原目录）
-          ? '"$v" /SILENT /NORESTART /SUPPRESSMSGBOXES\r\n'
+      final bool portable = lower.endsWith('.exe');
+      // 便携单文件 exe:自解压到 %LOCALAPPDATA%\tangram 并自行拉起新应用。
+      final String installStep = portable
+          ? '"$v"\r\n'
           : 'rmdir /s /q "$tmp" >nul 2>&1\r\n'
               'powershell -NoProfile -Command "Expand-Archive -LiteralPath \'$v\' -DestinationPath \'$tmp\' -Force"\r\n'
               'robocopy "$tmp" "$appDir" /E /IS /IT >nul\r\n';
@@ -433,7 +437,7 @@ class UpdateService {
         'timeout /t 3 /nobreak >nul\r\n'
         'taskkill /f /im "$exeName" >nul 2>&1\r\n'
         '$installStep'
-        'start "" "$exe"\r\n'
+        '${portable ? '' : 'start "" "$exe"\r\n'}'
         'del "%~f0"\r\n',
       );
       cmd = <String>['cmd.exe', '/c', script];
@@ -444,13 +448,20 @@ class UpdateService {
       String relaunch;
       String unpack;
       if (Platform.isLinux) {
-        target = File(exe).parent.path; // bundle 目录
-        relaunch = '"$exe"';
-        unpack = lower.endsWith('.deb')
-            ? '(cd "$tmp" && ar x "$v")\n'
-                'tar -xf "$tmp"/data.tar.* -C "$tmp"\n'
-                'cp -a "$tmp"/opt/tangram/. "$target/"\n'
-            : 'tar -xzf "$v" -C "$tmp"\n' 'cp -a "$tmp"/. "$target/"\n';
+        if (lower.endsWith('.appimage')) {
+          // 单文件 AppImage:直接以新包拉起,旧文件由用户/缓存清理替换。
+          unpack = 'chmod +x "$v"\n';
+          relaunch = '"$v" >/dev/null 2>&1 &\n';
+          target = '';
+        } else {
+          target = File(exe).parent.path; // bundle 目录
+          relaunch = '"$exe"';
+          unpack = lower.endsWith('.deb')
+              ? '(cd "$tmp" && ar x "$v")\n'
+                  'tar -xf "$tmp"/data.tar.* -C "$tmp"\n'
+                  'cp -a "$tmp"/opt/tangram/. "$target/"\n'
+              : 'tar -xzf "$v" -C "$tmp"\n' 'cp -a "$tmp"/. "$target/"\n';
+        }
       } else {
         // macOS: .../tangram.app/Contents/MacOS/tangram → 覆盖 .app
         target = File(exe).parent.parent.parent.parent.path;

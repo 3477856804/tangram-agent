@@ -169,7 +169,7 @@ jobs:
           export PATH="$HOME/bin:$PATH"
           python3 --version
           bash scripts/build_frontend.sh windows --extra "--release"
-      - name: Inno Setup 安装器 + Authenticode 签名（与安卓发布同一把密钥）
+      - name: 单文件便携 exe（IExpress 自解压,双击即运行,同一把安卓密钥签名）
         shell: pwsh
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -179,48 +179,47 @@ jobs:
           New-Item -ItemType Directory -Force -Path out | Out-Null
           $b = "frontend/build/windows/x64/runner/Release"
           if (-not (Test-Path "$b/tangram.exe")) { Get-ChildItem -Recurse frontend/build | Select-Object -First 40 FullName; exit 1 }
-          # 版本号 = 发布通道最新 tag +1（与 android job 同一公式）
-          $ver = try {
-            $t = (Invoke-RestMethod 'https://api.github.com/repos/3477856804/tangram-agent-releases/releases/latest' -Headers @{'User-Agent'='ci'}).tag_name.TrimStart('v')
-            $p = $t.Split('.'); [int]$a=$p[0]; [int]$m=$p[1]; [int]$q=[int]$p[2]+1
-            if ($q -gt 99) { $m++; $q=0; if ($m -gt 99) { $a++; $m=0 } }
-            if ($q -eq 0) { "$a.0.0" } elseif ($m -eq 0) { "$a.0.$q" } else { "$a.$m.$('{0:d2}' -f $q)" }
-          } catch { "0.0.1" }
-          $iss = @(
-            '[Setup]',
-            'AppName=TGA tangram-agent',
-            "AppVersion=$ver",
-            'AppPublisher=Cosmo',
-            'DefaultDirName={autopf}\tangram',
-            'DisableProgramGroupPage=yes',
-            'OutputDir=out',
-            'OutputBaseFilename=tangram-windows-x64',
-            'Compression=lzma2',
-            'SolidCompression=yes',
-            'ArchitecturesAllowed=x64compatible',
-            'ArchitecturesInstallIn64BitMode=x64compatible',
-            'WizardStyle=modern',
-            '[Files]',
-            "Source: `"$b\*`"; DestDir: `"{app}`"; Flags: recursesubdirs ignoreversion",
-            '[Icons]',
-            "Name: `"{autoprograms}\TGA`"; Filename: `"{app}\tangram.exe`"",
-            "Name: `"{autodesktop}\TGA`"; Filename: `"{app}\tangram.exe`"",
-            '[Run]',
-            "Filename: `"{app}\tangram.exe`"; Description: `"{cm:LaunchProgram,TGA}`"; Flags: nowait postinstall skipifsilent"
+          Compress-Archive -Path "$b/*" -DestinationPath tangram-payload.zip -Force
+          # 首次双击解压到 %LOCALAPPDATA%\tangram 并运行;之后秒开(已存在则跳过解压)
+          $bat = @(
+            '@echo off',
+            'set DEST=%LOCALAPPDATA%\tangram',
+            'if not exist "%DEST%\tangram.exe" powershell -NoProfile -Command "Expand-Archive -LiteralPath ''%~dp0tangram-payload.zip'' -DestinationPath ''%DEST%'' -Force"',
+            'start "" "%DEST%\tangram.exe"',
+            'exit /b 0'
           )
-          Set-Content -Path tangram.iss -Value $iss -Encoding UTF8
-          choco install innosetup -y --limit-output | Out-Null
-          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' /Q tangram.iss
-          Move-Item -Force "out\tangram-windows-x64.exe" "out\tangram-windows-x64-installer.exe"
+          Set-Content -Path run.bat -Value $bat -Encoding ASCII
+          $sed = @(
+            '[Version]',
+            'Version=1.0',
+            'Setup=1',
+            '[Options]',
+            'PackageName=TGA tangram-agent',
+            "TargetName=$PWD\out\tangram-windows-x64.exe",
+            'AppLaunched=run.bat',
+            'SecurityLevel=1',
+            'Compression=1',
+            'ShowInstallUI=false',
+            'ShowBeginPrompt=false',
+            'ShowCopyrightDialog=false',
+            'AllowAppSourceFiles=false',
+            'RebootIfNeeded=false',
+            '[SourceFiles]',
+            '1=run.bat',
+            '2=tangram-payload.zip'
+          )
+          Set-Content -Path tangram.sed -Value $sed -Encoding ASCII
+          & "$env:WINDIR\System32\iexpress.exe" /N tangram.sed
+          if (-not (Test-Path out\tangram-windows-x64.exe)) { Write-Host 'IExpress 未产出 exe'; exit 1 }
           if ($env:ANDROID_KEYSTORE_BASE64) {
             [IO.File]::WriteAllBytes("$env:TEMP\t.jks", [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
             & keytool -importkeystore -srckeystore "$env:TEMP\t.jks" -srcstorepass $env:STORE_PASSWORD -srcalias tangram -destkeystore "$env:TEMP\t.p12" -deststoretype PKCS12 -deststorepass $env:STORE_PASSWORD -noprompt
             $st = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'x64' } | Select-Object -Last 1
             if (-not $st) { $st = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
             if ($st) {
-              & $st sign /f "$env:TEMP\t.p12" /p $env:STORE_PASSWORD /fd SHA384 /d "TGA tangram-agent" /su "TGA Installer" "out\tangram-windows-x64-installer.exe"
-              & $st verify /pa "out\tangram-windows-x64-installer.exe" 2>&1 | Select-Object -Last 3
-            } else { Write-Host 'signtool 不可用,安装包未签名' }
+              & $st sign /f "$env:TEMP\t.p12" /p $env:STORE_PASSWORD /fd SHA384 /d "TGA tangram-agent" out\tangram-windows-x64.exe
+              & $st verify /pa out\tangram-windows-x64.exe 2>&1 | Select-Object -Last 3
+            } else { Write-Host 'signtool 不可用,exe 未签名' }
           }
           Get-ChildItem out
       - uses: actions/upload-artifact@v4
@@ -268,40 +267,22 @@ jobs:
           fi
           cd ..
           bash scripts/build_frontend.sh linux --extra "--release"
-      - name: Package(最终产物六文件之 Linux .deb)
+      - name: Package(最终产物六文件之 Linux .AppImage 单文件)
         run: |
           set -euo pipefail
           mkdir -p out
           B=frontend/build/linux/x64/release/bundle
           [ -f "$B/tangram" ] || { echo "未找到 tangram 可执行文件"; ls -R frontend/build/linux 2>/dev/null | head -30; exit 1; }
-          VER=$(python3 - <<'EOF'
-          import json, urllib.request
-          try:
-              t = json.load(urllib.request.urlopen(
-                  "https://api.github.com/repos/3477856804/tangram-agent-releases/releases/latest", timeout=20))["tag_name"].lstrip("v")
-              a, m, q = (int(x) for x in t.split(".")); q += 1
-              if q > 99: m += 1; q = 0
-              if m > 99: a += 1; m = 0
-              print(f"{a}.{m}.{q}" if m else f"{a}.0.{q}")
-          except Exception:
-              print("0.0.1")
-          EOF
-          )
-          STG=/tmp/deb; rm -rf "$STG"; mkdir -p "$STG/opt/tangram" "$STG/usr/bin" "$STG/DEBIAN"
-          cp -a "$B/." "$STG/opt/tangram/"
-          printf '#!/bin/sh\nexec /opt/tangram/tangram "$@"\n' > "$STG/usr/bin/tangram"
-          chmod 755 "$STG/usr/bin/tangram"
-          cat > "$STG/DEBIAN/control" <<EOF
-          Package: tangram-agent
-          Version: $VER
-          Architecture: amd64
-          Maintainer: Zhang Yu <3477856804@qq.com>
-          Priority: optional
-          Description: TGA tangram-agent - 七域合一 Agent 工作站
-           闭源商业软件 (c) Cosmo. All rights reserved.
-          EOF
-          dpkg-deb --build --root-owner-group "$STG" out/tangram-linux-x64.deb
-          dpkg-deb -f out/tangram-linux-x64.deb Package Version Architecture
+          AD=AppDir; rm -rf "$AD"; mkdir -p "$AD"
+          cp -a "$B/." "$AD/"
+          cp frontend/assets/logo/tangram_deer_192.png "$AD/tangram.png"
+          printf '[Desktop Entry]\nType=Application\nName=TGA tangram-agent\nComment=七域合一 Agent 工作站\nExec=tangram\nIcon=tangram\nTerminal=false\nCategories=Utility;\n' > "$AD/tangram.desktop"
+          printf '#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "$HERE/tangram" "$@"\n' > "$AD/AppRun"
+          chmod +x "$AD/AppRun"
+          curl -fL --retry 3 -o /tmp/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /tmp/appimagetool
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 /tmp/appimagetool "$AD" out/tangram-linux-x64.AppImage
           ls -l out
       - uses: actions/upload-artifact@v4
         with: { name: linux-x64, path: out/*, if-no-files-found: error }
@@ -461,7 +442,7 @@ jobs:
       - name: 只保留六个安装包（清掉版本说明等辅助文件）
         run: |
           set -euo pipefail
-          find dist -type f ! -name '*.apk' ! -name '*.exe' ! -name '*.deb' ! -name '*.dmg' ! -name '*.ipa' ! -name '*.hap' -delete
+          find dist -type f ! -name '*.apk' ! -name '*.exe' ! -name '*.AppImage' ! -name '*.appimage' ! -name '*.dmg' ! -name '*.ipa' ! -name '*.hap' -delete
           find dist -type d -empty -delete || true
           echo "== 最终产物 =="; find dist -type f | sort
       - name: Publish Release（发布通道仓库，公开仅产物；源码仓库保持私有）
@@ -474,9 +455,9 @@ jobs:
           body: |
             由 GitHub Actions 自动构建（commit ${{ github.sha }}）。
             最终产物恰好六个安装包：
-            - Windows：tangram-windows-x64-installer.exe（安装器，已用安卓发布同一把 RSA 私钥 Authenticode 自签名）
+            - Windows：tangram-windows-x64.exe（单文件便携版，双击即运行免安装，已用安卓发布同一把 RSA 私钥 Authenticode 自签名）
             - macOS：tangram-macos-arm64.dmg（ad-hoc 签名，首跑需右键打开放行）
-            - Linux：tangram-linux-x64.deb
+            - Linux：tangram-linux-x64.AppImage（单文件，chmod +x 后双击即运行）
             - Android：tangram-android-arm64.apk（keystore 正式签名，OTA 覆盖安装）
             - iOS：tangram-ios-arm64-unsigned.ipa（CI 无苹果开发者证书，需自行签名安装）
             - HarmonyOS：tangram-harmonyos.hap（尽力构建；ohos Flutter 与本项目存在代差，可能缺席）
