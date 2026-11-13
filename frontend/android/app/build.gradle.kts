@@ -101,6 +101,12 @@ android {
             signingConfig = releaseSigning ?: signingConfigs.getByName("debug")
         }
     }
+
+    lint {
+        // 本 App 走自有 OTA 分发、不上 Google Play；targetSdk=28 是沙箱
+        // proot 用户态可执行的硬前提，禁用「targetSdk 过期」这条 Play 专用 lint。
+        disable += "ExpiredTargetSdkVersion"
+    }
 }
 
 // 发布防呆：assembleRelease 缺口令直接失败，不产出 debug 签名包混入发布。

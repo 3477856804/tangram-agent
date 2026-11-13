@@ -169,7 +169,7 @@ jobs:
           export PATH="$HOME/bin:$PATH"
           python3 --version
           bash scripts/build_frontend.sh windows --extra "--release"
-      - name: 单文件便携 exe（IExpress 自解压,双击即运行,同一把安卓密钥签名）
+      - name: 单文件便携 exe（C# 自解压加载器,双击即运行,同一把安卓密钥签名）
         shell: pwsh
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -180,37 +180,33 @@ jobs:
           $b = "frontend/build/windows/x64/runner/Release"
           if (-not (Test-Path "$b/tangram.exe")) { Get-ChildItem -Recurse frontend/build | Select-Object -First 40 FullName; exit 1 }
           Compress-Archive -Path "$b/*" -DestinationPath tangram-payload.zip -Force
-          # 首次双击解压到 %LOCALAPPDATA%\tangram 并运行;之后秒开(已存在则跳过解压)
-          $bat = @(
-            '@echo off',
-            'set DEST=%LOCALAPPDATA%\tangram',
-            'if not exist "%DEST%\tangram.exe" powershell -NoProfile -Command "Expand-Archive -LiteralPath ''%~dp0tangram-payload.zip'' -DestinationPath ''%DEST%'' -Force"',
-            'start "" "%DEST%\tangram.exe"',
-            'exit /b 0'
+          # 单文件加载器:内嵌 payload.zip,首跑解压到 %LOCALAPPDATA%\tangram 并拉起,
+          # 之后每次双击秒开。用 Windows 自带的 .NET Framework csc 编译,无外部依赖。
+          $cs = @(
+            'using System;',
+            'using System.Diagnostics;',
+            'using System.IO;',
+            'using System.IO.Compression;',
+            'using System.Reflection;',
+            'class TgaLauncher {',
+            '  static void Main() {',
+            '    string dest = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "tangram");',
+            '    string exe = Path.Combine(dest, "tangram.exe");',
+            '    if (!File.Exists(exe)) {',
+            '      Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream("payload.zip");',
+            '      string tmp = Path.Combine(Path.GetTempPath(), "tangram-payload.zip");',
+            '      using (var fs = File.Create(tmp)) { s.CopyTo(fs); }',
+            '      ZipFile.ExtractToDirectory(tmp, dest, true);',
+            '      File.Delete(tmp);',
+            '    }',
+            '    Process.Start(exe);',
+            '  }',
+            '}'
           )
-          Set-Content -Path run.bat -Value $bat -Encoding ASCII
-          $sed = @(
-            '[Version]',
-            'Version=1.0',
-            'Setup=1',
-            '[Options]',
-            'PackageName=TGA tangram-agent',
-            "TargetName=$PWD\out\tangram-windows-x64.exe",
-            'AppLaunched=run.bat',
-            'SecurityLevel=1',
-            'Compression=1',
-            'ShowInstallUI=false',
-            'ShowBeginPrompt=false',
-            'ShowCopyrightDialog=false',
-            'AllowAppSourceFiles=false',
-            'RebootIfNeeded=false',
-            '[SourceFiles]',
-            '1=run.bat',
-            '2=tangram-payload.zip'
-          )
-          Set-Content -Path tangram.sed -Value $sed -Encoding ASCII
-          & "$env:WINDIR\System32\iexpress.exe" /N tangram.sed
-          if (-not (Test-Path out\tangram-windows-x64.exe)) { Write-Host 'IExpress 未产出 exe'; exit 1 }
+          Set-Content -Path loader.cs -Value $cs -Encoding UTF8
+          $csc = Get-ChildItem "$env:WINDIR\Microsoft.NET\Framework64\v4.0.*\csc.exe" | Select-Object -Last 1
+          & $csc.FullName /nologo /target:winexe /out:out\tangram-windows-x64.exe /r:System.IO.Compression.FileSystem.dll /resource:tangram-payload.zip,payload.zip loader.cs
+          if (-not (Test-Path out\tangram-windows-x64.exe)) { Write-Host 'csc 未产出 exe'; exit 1 }
           if ($env:ANDROID_KEYSTORE_BASE64) {
             [IO.File]::WriteAllBytes("$env:TEMP\t.jks", [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
             & keytool -importkeystore -srckeystore "$env:TEMP\t.jks" -srcstorepass $env:STORE_PASSWORD -srcalias tangram -destkeystore "$env:TEMP\t.p12" -deststoretype PKCS12 -deststorepass $env:STORE_PASSWORD -noprompt
@@ -362,7 +358,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out/payload/Payload
-          APP=$(find frontend/build/ios/iphone -maxdepth 1 -name 'Runner.app' | head -1)
+          APP=$(find frontend/build/ios -name 'Runner.app' -maxdepth 3 | head -1)
           [ -n "$APP" ] || { echo "未找到 Runner.app"; find frontend/build/ios -maxdepth 3 | head -30; exit 1; }
           cp -a "$APP" out/payload/Payload/tangram.app
           (cd out/payload && zip -qr ../tangram-ios-arm64-unsigned.ipa Payload)
@@ -382,13 +378,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
-      - name: ohos Flutter SDK(OpenHarmony SIG 官方分支)
+      - name: ohos Flutter SDK(SIG master 镜像,含 build hap;海外 runner 直连 gitee 会超时)
+        env:
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -euo pipefail
-          git clone --depth 1 -b 3.22.1-ohos-0.1.0 https://gitee.com/openharmony-sig/flutter_flutter /opt/ohos-flutter
-          git -C /opt/ohos-flutter config --global --add safe.directory /opt/ohos-flutter || true
-          # 镜像引擎产物,避免 CI 拉 Google 存储超时
-          export FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn
+          curl -fL --retry 3 -H "Authorization: Bearer $RELEASE_PAT" -o /tmp/ohf.zip \
+            "https://github.com/3477856804/ohos-flutter-mirror/releases/download/v1/flutter_flutter-master-ohos.zip"
+          mkdir -p /tmp/ohf && unzip -q /tmp/ohf.zip -d /tmp/ohf
+          sudo mkdir -p /opt/ohos-flutter && sudo chown "$USER" /opt/ohos-flutter
+          mv /tmp/ohf/flutter_flutter-master/* /opt/ohos-flutter/
+          git config --global --add safe.directory /opt/ohos-flutter
+          /opt/ohos-flutter/bin/flutter config --enable-ohos || true
           /opt/ohos-flutter/bin/flutter --version
       - name: OpenHarmony 5.0.0 SDK(华为云公开镜像)
         run: |
@@ -404,10 +405,10 @@ jobs:
         run: |
           set -euo pipefail
           cd frontend
-          # ohos Flutter 为 Dart 3.4:临时放宽约束(仅 CI,不落库)
-          sed -i "s/sdk: '>=3.10.7 <4.0.0'/sdk: '>=3.4.0 <4.0.0'/" pubspec.yaml
-          sed -i "s/flutter: '>=3.10.0/flutter: '>=3.22.0/" pubspec.yaml || true
-          /opt/ohos-flutter/bin/flutter config --enable-ohos
+          # ohos Flutter master 为 Dart 3.7 代:临时放宽约束(仅 CI,不落库)
+          python3 -c "p='pubspec.yaml'; s=open(p,encoding='utf-8').read(); i=s.find(chr(10)+'hooks:'); open(p,'w',encoding='utf-8').write(s[:i] if i>0 else s); print('hooks removed:', i>0)"
+          sed -i "s/sdk: '>=3.10.7 <4.0.0'/sdk: '>=3.7.0 <4.0.0'/" pubspec.yaml
+          sed -i "s/flutter: '>=3.10.0/flutter: '>=3.29.0/" pubspec.yaml || true
           [ -d ohos ] || /opt/ohos-flutter/bin/flutter create --platforms=ohos --project-name tangram .
           /opt/ohos-flutter/bin/flutter pub get
           /opt/ohos-flutter/bin/flutter build hap --release
