@@ -1,6 +1,6 @@
 name: build-all-platforms
 
-# 全平台一键构建：Android APK/AAB、Windows x64、Linux x64、macOS(arm64)、Web。
+# 全平台一键构建：Android APK/AAB、Windows x64、Linux x64、macOS(arm64)、iOS(未签名 ipa)、HarmonyOS(hap,尽力构建)。产物仓库只放安装包,不含任何源码。
 # Flutter 3.50.0 一律从国内镜像 storage.flutter-io.cn 直装（GitHub 云 runner 拉
 # storage.googleapis.com 常出现 HTTP/2 INTERNAL_ERROR）。
 # 触发：Actions 面板 Run workflow（可勾选发布 Release），或 push 到 main。
@@ -122,12 +122,15 @@ jobs:
           head -1 /tmp/badge.txt
           echo "versionName=$TGA_VER versionCode=$TGA_CODE 构建时间=$(date -u +%FT%TZ)" | tee frontend/build/APK_VERSION.txt
           sha256sum "$APK" | tee -a frontend/build/APK_VERSION.txt
-      - name: Collect
+      - name: Collect(只收最终安装包,不收中间产物)
         run: |
           set -euo pipefail
           mkdir -p out
-          find . -name "*.apk" -type f -exec cp -f {} out/ \;
-          find . -name "*.aab" -type f -exec cp -f {} out/ \;
+          APK=$(find frontend/build/app/outputs -name 'app-release.apk' -not -path '*intermediary*' | head -1)
+          [ -n "$APK" ] || APK=$(find frontend/build -name 'app-release.apk' -not -path '*intermediary*' | head -1)
+          cp -f "$APK" out/tangram-agent.apk
+          AAB=$(find frontend/build/app/outputs/bundle -name '*.aab' 2>/dev/null | head -1 || true)
+          [ -n "$AAB" ] && cp -f "$AAB" out/app-release.aab
           cp frontend/build/APK_VERSION.txt out/ || true
           ls -l out
       - uses: actions/upload-artifact@v4
@@ -267,42 +270,103 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: macos, path: out/*, if-no-files-found: error }
 
-  # ================= Web =================
-  web:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    continue-on-error: true
+  # ================= iOS =================
+  # 未签名 ipa:CI 无苹果开发者证书,产物为 --no-codesign 包,供自行签名
+  # (Xcode/esign)或开发者设备安装;发布说明中如实标注。
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Install Flutter 3.50.0 (镜像直装)
         run: |
           set -euo pipefail
-          sudo mkdir -p /opt/flutter && sudo chown "$USER" /opt/flutter
-          curl -fL -C - --max-time 600 --retry 5 --retry-all-errors -o /tmp/f.tar.xz \
-            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/linux/flutter_linux_3.50.0-stable.tar.xz
-          tar -xJf /tmp/f.tar.xz -C /opt/flutter --strip-components=1
-          echo /opt/flutter/bin >> "$GITHUB_PATH"
-          /opt/flutter/bin/flutter --version
-      - name: Build Web
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/f.zip \
+            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/macos/flutter_macos_3.50.0-stable.zip
+          mkdir -p "$HOME/flutter-sdk"
+          unzip -q /tmp/f.zip -d "$HOME/flutter-sdk"
+          echo "$HOME/flutter-sdk/flutter/bin" >> "$GITHUB_PATH"
+          "$HOME/flutter-sdk/flutter/bin/flutter" --version
+      - name: Python 构建依赖 (pillow)
+        run: |
+          python3 -m pip install --quiet --upgrade pillow || python3 -m pip install --quiet --break-system-packages pillow
+      - name: 移除 hooks（iOS 不打包 Android 预编译库）
+        run: |
+          python3 -c "p='frontend/pubspec.yaml'; s=open(p,encoding='utf-8').read(); i=s.find(chr(10)+'hooks:'); open(p,'w',encoding='utf-8').write(s[:i] if i>0 else s); print('hooks removed:', i>0)"
+      - name: Build iOS (release, 未签名)
         run: |
           set -euo pipefail
-          if [ ! -d frontend/web ]; then
-            TMP=$(mktemp -d); ( cd "$TMP" && flutter create --platforms=web --project-name tangram . >/dev/null )
-            cp -a "$TMP/web" frontend/; rm -rf "$TMP"
-          fi
-          ( cd frontend && flutter pub get && flutter build web --release )
+          cd frontend
+          [ -d ios ] || flutter create --platforms=ios --project-name tangram .
+          flutter pub get
+          flutter build ios --release --no-codesign
+      - name: Package ipa
+        run: |
+          set -euo pipefail
+          mkdir -p out/payload/Payload
+          APP=$(find frontend/build/ios/iphone -maxdepth 1 -name 'Runner.app' | head -1)
+          [ -n "$APP" ] || { echo "未找到 Runner.app"; find frontend/build/ios -maxdepth 3 | head -30; exit 1; }
+          cp -a "$APP" out/payload/Payload/tangram.app
+          (cd out/payload && zip -qr ../tangram-ios-arm64-unsigned.ipa Payload)
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with: { name: ios, path: out/tangram-ios-arm64-unsigned.ipa, if-no-files-found: error }
+
+  # ================= HarmonyOS =================
+  # OpenHarmony 版 Flutter(ohos 分支)+ 官方 SDK(华为云镜像)尽力构建 hap。
+  # 注:ohos Flutter 目前最高 3.22.1(Dart 3.4),与本项目 Dart 3.10 API 存在
+  # 代差,构建可能失败;失败不阻塞其余平台发布(continue-on-error)。
+  harmonyos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: ohos Flutter SDK(OpenHarmony SIG 官方分支)
+        run: |
+          set -euo pipefail
+          git clone --depth 1 -b 3.22.1-ohos-0.1.0 https://gitee.com/openharmony-sig/flutter_flutter /opt/ohos-flutter
+          git -C /opt/ohos-flutter config --global --add safe.directory /opt/ohos-flutter || true
+          # 镜像引擎产物,避免 CI 拉 Google 存储超时
+          export FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn
+          /opt/ohos-flutter/bin/flutter --version
+      - name: OpenHarmony 5.0.0 SDK(华为云公开镜像)
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o /tmp/ohos-sdk.tar.gz \
+            https://repo.huaweicloud.com/openharmony/os/5.0.0-Release/ohos-sdk-windows_linux-public.tar.gz
+          mkdir -p /tmp/ohos-sdk && tar -xf /tmp/ohos-sdk.tar.gz -C /tmp/ohos-sdk
+          mkdir -p "$HOME/ohos-sdk/linux"
+          find /tmp/ohos-sdk -name '*-linux-x64-*.zip' -exec unzip -q {} -d "$HOME/ohos-sdk/linux" \;
+          ls "$HOME/ohos-sdk/linux" | head
+          echo "OHOS_SDK_HOME=$HOME/ohos-sdk/linux" >> "$GITHUB_ENV"
+      - name: Build HAP
+        run: |
+          set -euo pipefail
+          cd frontend
+          # ohos Flutter 为 Dart 3.4:临时放宽约束(仅 CI,不落库)
+          sed -i "s/sdk: '>=3.10.7 <4.0.0'/sdk: '>=3.4.0 <4.0.0'/" pubspec.yaml
+          sed -i "s/flutter: '>=3.10.0/flutter: '>=3.22.0/" pubspec.yaml || true
+          /opt/ohos-flutter/bin/flutter config --enable-ohos
+          [ -d ohos ] || /opt/ohos-flutter/bin/flutter create --platforms=ohos --project-name tangram .
+          /opt/ohos-flutter/bin/flutter pub get
+          /opt/ohos-flutter/bin/flutter build hap --release
       - name: Package
         run: |
           set -euo pipefail
           mkdir -p out
-          tar -czf out/tangram-web.tar.gz -C frontend/build/web .
+          HAP=$(find frontend/build/ohos -name '*.hap' | head -1)
+          [ -n "$HAP" ] || { echo "未找到 hap"; exit 1; }
+          cp "$HAP" out/tangram-harmonyos.hap
           ls -l out
       - uses: actions/upload-artifact@v4
-        with: { name: web, path: out/*, if-no-files-found: warn }
+        with: { name: harmonyos, path: out/tangram-harmonyos.hap, if-no-files-found: warn }
 
   # ================= Release =================
   release:
-    needs: [android, windows, linux, macos, web]
+    needs: [android, windows, linux, macos, ios, harmonyos]
     if: ${{ always() && (github.event_name == 'push' || inputs.make_release) }}
     runs-on: ubuntu-latest
     permissions: { contents: write }
@@ -326,7 +390,7 @@ jobs:
           name: TGA tangram-agent v${{ env.TGA_VER }}（CI 全平台）
           body: |
             由 GitHub Actions 自动构建（commit ${{ github.sha }}）。
-            Android APK(arm64)/AAB · Windows x64 · Linux x64 · macOS · Web。
-            Windows/macOS 包未签名，首次运行需手动放行。
+            六平台产物：Android APK(arm64)/AAB · Windows x64 · Linux x64 · macOS(arm64) · iOS(未签名 ipa，需自行签名安装) · HarmonyOS(hap，尽力构建)。
+            Windows/macOS/iOS 包未签名，首次运行需手动放行。本仓库仅含安装包，不含源码。
           files: dist/**/*
           fail_on_unmatched_files: false
