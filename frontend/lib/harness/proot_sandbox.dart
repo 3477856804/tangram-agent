@@ -233,7 +233,8 @@ class ProotSandbox {
       throw StateError('下载 ${Uri.parse(url).pathSegments.last} '
           '失败：HTTP ${resp.statusCode}');
     }
-    final int fileTotal = resp.contentLength > 0 ? resp.contentLength : -1;
+    final int? respLen = resp.contentLength;
+    final int fileTotal = (respLen != null && respLen > 0) ? respLen : -1;
     if (target.existsSync()) target.deleteSync();
     final IOSink sink = target.openWrite();
     final int base = _received;
