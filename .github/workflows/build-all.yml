@@ -222,6 +222,14 @@ jobs:
             if (-not $st) { $st = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
             if ($st) {
               & $st sign /f "$env:TEMP\t.p12" /p $env:STORE_PASSWORD /fd SHA384 /d "TGA tangram-agent" out\tangram-windows-x64.exe
+              # 自签名根不受信任,signtool 校验必报"chain terminated in a root"退出码 1,
+              # 但签名已成功嵌入(Successfully signed)。以 Get-AuthenticodeSignature 为准。
+              if ($LASTEXITCODE -ne 0) {
+                $sig = Get-AuthenticodeSignature "out\tangram-windows-x64.exe"
+                if ($null -eq $sig.SignerCertificate) { Write-Host '签名未嵌入,真失败'; exit 1 }
+                Write-Host '自签名已嵌入,忽略根不受信任的校验报错(预期行为)'
+                $LASTEXITCODE = 0
+              }
               & $st verify /pa out\tangram-windows-x64.exe 2>&1 | Select-Object -Last 3
             } else { Write-Host 'signtool 不可用,exe 未签名' }
           }
