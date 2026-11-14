@@ -1,6 +1,6 @@
 name: build-all-platforms
 
-# 全平台一键构建：Android APK/AAB、Windows x64、Linux x64、macOS(arm64)、iOS(未签名 ipa)、HarmonyOS(hap,尽力构建)。产物仓库只放安装包,不含任何源码。
+# 全平台一键构建：Android APK/AAB、Windows x64、Linux x64、macOS(arm64)、iOS(未签名 ipa)。产物仓库只放安装包,不含任何源码。
 # Flutter 3.50.0 一律从国内镜像 storage.flutter-io.cn 直装（GitHub 云 runner 拉
 # storage.googleapis.com 常出现 HTTP/2 INTERNAL_ERROR）。
 # 触发：Actions 面板 Run workflow（可勾选发布 Release），或 push 到 main。
@@ -373,64 +373,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: ios, path: out/tangram-ios-arm64-unsigned.ipa, if-no-files-found: error }
 
-  # ================= HarmonyOS =================
-  # OpenHarmony 版 Flutter(ohos 分支)+ 官方 SDK(华为云镜像)尽力构建 hap。
-  # 注:ohos Flutter 目前最高 3.22.1(Dart 3.4),与本项目 Dart 3.10 API 存在
-  # 代差,构建可能失败;失败不阻塞其余平台发布(continue-on-error)。
-  harmonyos:
-    runs-on: ubuntu-latest
-    timeout-minutes: 150
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '20' }
-      - name: ohos Flutter SDK(SIG master 镜像,含 build hap;公开仓库匿名下载)
-        run: |
-          set -euo pipefail
-          curl -fL --retry 3 -o /tmp/ohf.zip \
-            "https://github.com/3477856804/ohos-flutter-mirror/releases/download/v1/flutter_flutter-master-ohos.zip"
-          mkdir -p /tmp/ohf && unzip -q /tmp/ohf.zip -d /tmp/ohf
-          sudo mkdir -p /opt/ohos-flutter && sudo chown "$USER" /opt/ohos-flutter
-          mv /tmp/ohf/flutter_flutter-master/* /opt/ohos-flutter/
-          git config --global --add safe.directory /opt/ohos-flutter
-          /opt/ohos-flutter/bin/flutter config --enable-ohos || true
-          /opt/ohos-flutter/bin/flutter --version
-      - name: OpenHarmony 5.0.0 SDK(华为云公开镜像)
-        run: |
-          set -euo pipefail
-          curl -fL --retry 3 -o /tmp/ohos-sdk.tar.gz \
-            https://repo.huaweicloud.com/openharmony/os/5.0.0-Release/ohos-sdk-windows_linux-public.tar.gz
-          mkdir -p /tmp/ohos-sdk && tar -xf /tmp/ohos-sdk.tar.gz -C /tmp/ohos-sdk
-          mkdir -p "$HOME/ohos-sdk/linux"
-          find /tmp/ohos-sdk -name '*-linux-x64-*.zip' -exec unzip -q {} -d "$HOME/ohos-sdk/linux" \;
-          ls "$HOME/ohos-sdk/linux" | head
-          echo "OHOS_SDK_HOME=$HOME/ohos-sdk/linux" >> "$GITHUB_ENV"
-      - name: Build HAP
-        run: |
-          set -euo pipefail
-          cd frontend
-          # ohos Flutter master 为 Dart 3.7 代:临时放宽约束(仅 CI,不落库)
-          python3 -c "p='pubspec.yaml'; s=open(p,encoding='utf-8').read(); i=s.find(chr(10)+'hooks:'); open(p,'w',encoding='utf-8').write(s[:i] if i>0 else s); print('hooks removed:', i>0)"
-          sed -i "s/sdk: '>=3.10.7 <4.0.0'/sdk: '>=3.7.0 <4.0.0'/" pubspec.yaml
-          sed -i "s/flutter: '>=3.10.0/flutter: '>=3.29.0/" pubspec.yaml || true
-          [ -d ohos ] || /opt/ohos-flutter/bin/flutter create --platforms=ohos --project-name tangram .
-          /opt/ohos-flutter/bin/flutter pub get
-          /opt/ohos-flutter/bin/flutter build hap --release
-      - name: Package
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          HAP=$(find frontend/build/ohos -name '*.hap' | head -1)
-          [ -n "$HAP" ] || { echo "未找到 hap"; exit 1; }
-          cp "$HAP" out/tangram-harmonyos.hap
-          ls -l out
-      - uses: actions/upload-artifact@v4
-        with: { name: harmonyos, path: out/tangram-harmonyos.hap, if-no-files-found: warn }
-
   # ================= Release =================
   release:
-    needs: [android, windows, linux, macos, ios, harmonyos]
+    needs: [android, windows, linux, macos, ios]
     if: ${{ (github.event_name == 'push' || inputs.make_release) && needs.android.result == 'success' && needs.windows.result == 'success' && needs.linux.result == 'success' && needs.macos.result == 'success' && needs.ios.result == 'success' }}
     runs-on: ubuntu-latest
     permissions: { contents: write }
@@ -445,10 +390,10 @@ jobs:
           V=$(grep -o 'versionName=[0-9.]*' dist/android/APK_VERSION.txt | cut -d= -f2)
           [ -n "$V" ] || V=$(tr -d '[:space:]' < VERSION)
           echo "TGA_VER=$V" >> "$GITHUB_ENV"
-      - name: 只保留六个安装包（清掉版本说明等辅助文件）
+      - name: 只保留五个安装包（清掉版本说明等辅助文件）
         run: |
           set -euo pipefail
-          find dist -type f ! -name '*.apk' ! -name '*.exe' ! -name '*.AppImage' ! -name '*.appimage' ! -name '*.dmg' ! -name '*.ipa' ! -name '*.hap' -delete
+          find dist -type f ! -name '*.apk' ! -name '*.exe' ! -name '*.AppImage' ! -name '*.appimage' ! -name '*.dmg' ! -name '*.ipa' -delete
           find dist -type d -empty -delete || true
           echo "== 最终产物 =="; find dist -type f | sort
       - name: Publish Release（发布通道仓库，公开仅产物；源码仓库保持私有）
@@ -460,17 +405,16 @@ jobs:
           name: TGA tangram-agent v${{ env.TGA_VER }}（CI 全平台）
           body: |
             由 GitHub Actions 自动构建（commit ${{ github.sha }}）。
-            最终产物恰好六个安装包：
+            最终产物恰好五个安装包：
             - Windows：tangram-windows-x64.exe（单文件便携版，双击即运行免安装，已用安卓发布同一把 RSA 私钥 Authenticode 自签名）
             - macOS：tangram-macos-arm64.dmg（ad-hoc 签名，首跑需右键打开放行）
             - Linux：tangram-linux-x64.AppImage（单文件，chmod +x 后双击即运行）
             - Android：tangram-android-arm64.apk（keystore 正式签名，OTA 覆盖安装）
             - iOS：tangram-ios-arm64-unsigned.ipa（CI 无苹果开发者证书，需自行签名安装）
-            - HarmonyOS：tangram-harmonyos.hap（尽力构建；ohos Flutter 与本项目存在代差，可能缺席）
             全部安装包完整性由下方 SHA256 清单 + 安卓发布同一把 RSA 私钥的签名保证（App 内 OTA 自动校验）。本仓库仅含安装包，不含源码。
           files: dist/**/*
           fail_on_unmatched_files: false
-      - name: 用安卓发布私钥签名产物校验清单,写入 Release 正文（产物保持恰好 6 个文件）
+      - name: 用安卓发布私钥签名产物校验清单,写入 Release 正文（产物保持恰好 5 个文件）
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
