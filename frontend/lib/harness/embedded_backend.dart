@@ -43,6 +43,7 @@ import 'package:tangram/harness/local_inference.dart';
 import 'package:tangram/harness/mcp_client.dart';
 import 'package:tangram/harness/proot_sandbox.dart';
 import 'package:tangram/harness/store.dart';
+import 'package:tangram/services/model_registry.dart' show kBuiltinFreeModels;
 import 'package:tangram/services/ssh_sandbox.dart';
 import 'package:tangram/services/update_service.dart';
 
@@ -3029,6 +3030,20 @@ class EmbeddedBackend {
               'model_kind': 'cloud',
             };
           }
+        }
+      }
+      // 内置免费云端模型（Kilo 网关 :free 档）不落注册表文件，在代码表里；
+      // IM 通道必须同样解析，否则 App 内选了免费模型、微信/QQ 对话会
+      // 退化成内置 AgentLoop 兜底回复。
+      for (final e in kBuiltinFreeModels) {
+        if (e.id == selectedId) {
+          return <String, dynamic>{
+            'api_base': e.apiBase ?? '',
+            'api_key': '',
+            'model': e.modelId ?? '',
+            'model_kind': 'cloud',
+            'free': true,
+          };
         }
       }
       // 选中本地权重：扫描 downloads/ 下真实存在的 .gguf 文件。
