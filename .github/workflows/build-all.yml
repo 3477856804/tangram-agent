@@ -230,7 +230,6 @@ jobs:
                 Write-Host '自签名已嵌入,忽略根不受信任的校验报错(预期行为)'
                 $LASTEXITCODE = 0
               }
-              & $st verify /pa out\tangram-windows-x64.exe 2>&1 | Select-Object -Last 3
             } else { Write-Host 'signtool 不可用,exe 未签名' }
           }
           Get-ChildItem out
