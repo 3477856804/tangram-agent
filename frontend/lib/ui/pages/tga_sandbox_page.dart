@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../bridge/backend_client.dart';
@@ -20,6 +21,8 @@ import '../../services/ssh_sandbox.dart';
 ///   命令在远端真实 Linux 执行；右上「⚙」配置主机/凭据，「连接测试」
 ///   走完整 SSH 认证并在远端执行 uname。
 /// - #22 紧凑真实 tty：等宽 12 号、行高 1.3、80x24、欢迎横幅 2~3 行。
+/// - 命令输入内联在缓冲区末尾（Termux 式）：提示符 + 实时回显 + 光标，
+///   不再有独立底部输入框；↑/↓ 翻历史、点空白聚焦、提交后自动滚到底。
 class TgaSandboxPage extends StatefulWidget {
   const TgaSandboxPage({super.key});
 
@@ -33,9 +36,17 @@ const Color _termFg = Color(0xFFCFD8E8);
 const Color _termGreen = Color(0xFF5FD6A0);
 const Color _termDim = Color(0xFF9FB0CC);
 
-class _TgaSandboxPageState extends State<TgaSandboxPage> {
+class _TgaSandboxPageState extends State<TgaSandboxPage>
+    with WidgetsBindingObserver {
   final TextEditingController _input = TextEditingController();
+  final FocusNode _inputFocus = FocusNode();
+  final ScrollController _scroll = ScrollController();
   final List<String> _lines = <String>[];
+
+  // ↑/↓ 翻命令历史；-1 表示正在起草新命令，_draft 暂存被历史覆盖前的输入。
+  final List<String> _history = <String>[];
+  int _historyIndex = -1;
+  String _draft = '';
   bool _running = false;
 
   /// 已加载的 SSH 配置（null = 未配置）。
@@ -55,6 +66,7 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // 会话建立时间真实取当前时刻（打开本页即一次真实登录）。
     final DateTime now = DateTime.now();
     String two(int n) => n.toString().padLeft(2, '0');
@@ -66,13 +78,28 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
     if (Platform.isAndroid) {
       _refreshDebianStatus();
     }
+    _scrollToEnd();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _debianTimer?.cancel();
+    _inputFocus.dispose();
+    _scroll.dispose();
     _input.dispose();
     super.dispose();
+  }
+
+  // 不可见时停掉 Debian 进度轮询，回前台再恢复，避免退后台仍空转发热。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (Platform.isAndroid) _refreshDebianStatus();
+    } else {
+      _debianTimer?.cancel();
+      _debianTimer = null;
+    }
   }
 
   /// 后端维护的真实 cwd：'.'=沙箱根；相对路径=根内子目录；
@@ -104,19 +131,121 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
     return 'tga@sandbox';
   }
 
+  void _scrollToEnd() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
+  }
+
+  void _setInput(String text) {
+    _input.text = text;
+    _input.selection = TextSelection.collapsed(offset: text.length);
+  }
+
+  void _historyUp() {
+    if (_history.isEmpty || _historyIndex == 0) return;
+    if (_historyIndex < 0) {
+      _draft = _input.text;
+      _historyIndex = _history.length - 1;
+    } else {
+      _historyIndex--;
+    }
+    _setInput(_history[_historyIndex]);
+  }
+
+  void _historyDown() {
+    if (_historyIndex < 0) return;
+    if (_historyIndex < _history.length - 1) {
+      _historyIndex++;
+      _setInput(_history[_historyIndex]);
+    } else {
+      _historyIndex = -1;
+      _setInput(_draft);
+    }
+  }
+
+  /// 内联命令输入行：渲染在缓冲区末尾而非独立底部输入框，输入随光标实时
+  /// 可见（真实 tty 手感）；↑/↓ 翻历史，点执行或软键盘「发送」提交。
+  Widget _inlineInput(String host) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Focus(
+        onKeyEvent: (FocusNode node, KeyEvent event) {
+          if (event is KeyDownEvent || event is KeyRepeatEvent) {
+            if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+              _historyUp();
+              return KeyEventResult.handled;
+            }
+            if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+              _historyDown();
+              return KeyEventResult.handled;
+            }
+          }
+          return KeyEventResult.ignored;
+        },
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('$host:$_cwdShown\$ ',
+                style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    height: 1.3,
+                    letterSpacing: 0,
+                    color: _termGreen)),
+            Expanded(
+              child: TextField(
+                key: const ValueKey<String>('tga-inline-input'),
+                controller: _input,
+                focusNode: _inputFocus,
+                autofocus: true,
+                readOnly: _running,
+                maxLines: 1,
+                textInputAction: TextInputAction.send,
+                onSubmitted: (_) => _submit(),
+                style: _ts,
+                cursorColor: _termGreen,
+                cursorWidth: 2,
+                decoration: const InputDecoration(
+                  isCollapsed: true,
+                  border: InputBorder.none,
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+            ),
+            GestureDetector(
+              onTap: _running ? null : _submit,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: Icon(Icons.play_arrow_rounded,
+                    size: 18, color: _running ? _termDim : _termGreen),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// 执行一条命令：走 code_task shell RPC，由后端按沙箱环境分流
   /// （远端 SSH / Debian 用户态 / 系统真实 shell / 内置解释器兜底）。
   /// 输出/退出码/失败原因全部如实回显，失败不编造。
   Future<void> _submit() async {
     final String cmd = _input.text.trim();
     if (cmd.isEmpty || _running) return;
-    _input.clear();
+    _setInput('');
+    if (_history.isEmpty || _history.last != cmd) _history.add(cmd);
+    _historyIndex = -1;
+    _draft = '';
     final String shownCwd = _cwdShown;
     final String prompt = '$_hostShown:$shownCwd\$ ';
     setState(() {
       _lines.add('$prompt$cmd');
       _running = true;
     });
+    _scrollToEnd();
     try {
       final BackendClient backend = context.read<BackendClient>();
       final BridgeEnvelope env = await backend.sendControl(
@@ -145,12 +274,16 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
         }
         _running = false;
       });
+      _scrollToEnd();
+      _inputFocus.requestFocus();
     } on Object catch (e) {
       if (!mounted) return;
       setState(() {
         _lines.add('sandbox: $e');
         _running = false;
       });
+      _scrollToEnd();
+      _inputFocus.requestFocus();
     }
   }
 
@@ -335,84 +468,45 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
                       ],
                     ),
                   ),
-                  // 欢迎语 + 执行历史（靠上）
+                  // 欢迎语 + 执行历史 + 内联输入行（同一缓冲区，贴着最新输出）
                   Expanded(
-                    child: ListView(
-                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                      children: <Widget>[
-                        for (final String line in _welcome)
-                          Text(line, style: _ts),
-                        ..._lines.map(
-                          (String s) => Padding(
-                            padding: const EdgeInsets.only(top: 2),
-                            child: Text(s,
-                                style: TextStyle(
-                                    fontFamily: 'monospace',
-                                    fontSize: 12,
-                                    height: 1.3,
-                                    letterSpacing: 0,
-                                    color: s.startsWith('$host:')
-                                        ? _termGreen
-                                        : _termDim)),
-                          ),
-                        ),
-                        if (_running)
-                          const Padding(
-                            padding: EdgeInsets.only(top: 2),
-                            child: Text('running…',
-                                style: TextStyle(
-                                    fontFamily: 'monospace',
-                                    fontSize: 12,
-                                    height: 1.3,
-                                    letterSpacing: 0,
-                                    color: _termDim)),
-                          ),
-                      ],
-                    ),
-                  ),
-                  // 命令输入行（贴底部）
-                  Container(
-                    padding: const EdgeInsets.fromLTRB(12, 6, 10, 10),
-                    decoration: const BoxDecoration(
-                      border: Border(
-                          top: BorderSide(color: Color(0xFF2A3446), width: 1)),
-                    ),
-                    child: Row(
-                      children: <Widget>[
-                        Flexible(
-                          child: Text('$host:$_cwdShown\$ ',
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 12,
-                                  height: 1.3,
-                                  letterSpacing: 0,
-                                  color: _termGreen)),
-                        ),
-                        Expanded(
-                          child: TextField(
-                            controller: _input,
-                            onSubmitted: (_) => _submit(),
-                            style: _ts,
-                            cursorColor: _termGreen,
-                            decoration: const InputDecoration(
-                              isCollapsed: true,
-                              border: InputBorder.none,
-                              hintText: 'enter command…',
-                              hintStyle: TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 12,
-                                  letterSpacing: 0,
-                                  color: Color(0xFF5A6880)),
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onTap: () => _inputFocus.requestFocus(),
+                      child: ListView(
+                        controller: _scroll,
+                        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                        children: <Widget>[
+                          for (final String line in _welcome)
+                            Text(line, style: _ts),
+                          ..._lines.map(
+                            (String s) => Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Text(s,
+                                  style: TextStyle(
+                                      fontFamily: 'monospace',
+                                      fontSize: 12,
+                                      height: 1.3,
+                                      letterSpacing: 0,
+                                      color: s.startsWith('$host:')
+                                          ? _termGreen
+                                          : _termDim)),
                             ),
                           ),
-                        ),
-                        GestureDetector(
-                          onTap: _running ? null : _submit,
-                          child: const Icon(Icons.play_arrow_rounded,
-                              size: 20, color: _termGreen),
-                        ),
-                      ],
+                          if (_running)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 2),
+                              child: Text('running…',
+                                  style: TextStyle(
+                                      fontFamily: 'monospace',
+                                      fontSize: 12,
+                                      height: 1.3,
+                                      letterSpacing: 0,
+                                      color: _termDim)),
+                            ),
+                          _inlineInput(host),
+                        ],
+                      ),
                     ),
                   ),
                 ],
@@ -446,7 +540,8 @@ class _DebianSheetBody extends StatefulWidget {
   State<_DebianSheetBody> createState() => _DebianSheetBodyState();
 }
 
-class _DebianSheetBodyState extends State<_DebianSheetBody> {
+class _DebianSheetBodyState extends State<_DebianSheetBody>
+    with WidgetsBindingObserver {
   StreamSubscription<BridgeEnvelope>? _hotSub;
   Timer? _poll;
 
@@ -466,6 +561,7 @@ class _DebianSheetBodyState extends State<_DebianSheetBody> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _hotSub = widget.client.onHotPath.listen((BridgeEnvelope env) {
       if (env.topic != 'proot_progress') return;
       final dynamic p = env.payload;
@@ -482,9 +578,21 @@ class _DebianSheetBodyState extends State<_DebianSheetBody> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _hotSub?.cancel();
     _poll?.cancel();
     super.dispose();
+  }
+
+  // 退后台停轮询、回前台按真实状态恢复，避免不可见时空转发热。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _pollStatus();
+    } else {
+      _poll?.cancel();
+      _poll = null;
+    }
   }
 
   Future<void> _pollStatus() async {

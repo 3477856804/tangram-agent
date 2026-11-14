@@ -710,17 +710,12 @@ class _UpdateDialogState extends State<TgaSettingsUpdateDialog> {
       content = <Widget>[
         Text('v${info.current} → v${info.latest} · '
             '安装包 ${UpdateService.formatSize(info.size)}'),
-        if (info.notes != null && info.notes!.isNotEmpty) ...<Widget>[
-          const SizedBox(height: 12),
-          Text('更新说明', style: Tga.body),
-          const SizedBox(height: 4),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 220),
-            child: SingleChildScrollView(
-              child: Text(info.notes!, style: Tga.caption),
-            ),
-          ),
-        ],
+        // 更新公告恒定只显示这一句，不渲染远端 Release 正文：
+        // 旧版本 Release 若仍带构建细节，也不会在 App 内泄露。
+        const SizedBox(height: 12),
+        Text('更新说明', style: Tga.body),
+        const SizedBox(height: 4),
+        Text(UpdateService.releaseNotes, style: Tga.caption),
       ];
       actions = <Widget>[
         TextButton(

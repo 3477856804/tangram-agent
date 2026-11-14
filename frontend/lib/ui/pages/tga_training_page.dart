@@ -147,7 +147,9 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
   bool _testing = false;
 
   // ---- 知识蒸馏（真实对话语料 → 知识蒸馏包）----
-  int _dialogTurns = 0; // distill describe 的 harness.dialog_turns
+  int _dialogTurns = 0; // distill describe 的 harness.dialog_turns（消息条数）
+  int _distillPairs = 0; // 真实可蒸馏的 user→assistant 问答对数
+  int _distillMinPairs = 3; // 后端门槛，UI 与执行条件保持一致
   bool _distillRunning = false;
   Map<String, dynamic>? _distillResult; // run 成功后的 data（name/pairs/topics）
   String? _distillError; // run 失败时的真实错误，如实展示
@@ -239,7 +241,8 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
     }
   }
 
-  /// 拉真实对话语料条数（distill describe → harness.dialog_turns）。
+  /// 拉真实语料状态（distill describe → harness）：消息条数、可蒸馏问答
+  /// 对数与门槛。UI 用问答对数判断按钮可用性，与后端执行条件是同一口径。
   Future<void> _loadCorpus() async {
     try {
       final BackendClient backend = context.read<BackendClient>();
@@ -251,11 +254,22 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
       final dynamic data = payload is Map ? payload['data'] : null;
       final dynamic harness = data is Map ? data['harness'] : null;
       final dynamic turns = harness is Map ? harness['dialog_turns'] : null;
+      final dynamic pairs = harness is Map ? harness['distill_pairs'] : null;
+      final dynamic min = harness is Map ? harness['distill_min_pairs'] : null;
       if (mounted) {
-        setState(() => _dialogTurns = turns is num ? turns.toInt() : 0);
+        setState(() {
+          _dialogTurns = turns is num ? turns.toInt() : 0;
+          _distillPairs = pairs is num ? pairs.toInt() : 0;
+          _distillMinPairs = min is num ? min.toInt() : 3;
+        });
       }
     } on Object {
-      if (mounted) setState(() => _dialogTurns = 0);
+      if (mounted) {
+        setState(() {
+          _dialogTurns = 0;
+          _distillPairs = 0;
+        });
+      }
     }
   }
 
@@ -807,12 +821,13 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
               const SizedBox(width: 12),
               Text('知识蒸馏', style: Tga.h2),
               const Spacer(),
-              TgaTag('对话语料 $_dialogTurns 轮', color: Tga.purple),
+              TgaTag('可蒸馏 $_distillPairs 对', color: Tga.purple),
             ],
           ),
           const SizedBox(height: 10),
           Text(
-            '对话语料 $_dialogTurns 轮 · 工作轨迹 $_traceCount 条。'
+            '对话消息 $_dialogTurns 条 · 可蒸馏问答 $_distillPairs 对 · '
+            '工作轨迹 $_traceCount 条，满 $_distillMinPairs 对即可蒸馏。'
             '从你的真实对话里统计蒸馏出知识包：话题簇、高频问答对、偏好摘要。'
             '产物是知识蒸馏包（JSON 知识条目），不是神经网络权重。',
             style: Tga.sub,

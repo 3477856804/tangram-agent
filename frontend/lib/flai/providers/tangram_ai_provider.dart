@@ -13,8 +13,9 @@ import 'ai_provider.dart';
 class TangramAiProvider implements AiProvider {
   TangramAiProvider({
     required this.client,
-    // 需大于 BackendClient.requestTimeout(45s)，避免云端推理被上层提前掐断。
-    this.timeout = const Duration(seconds: 60),
+    // 对话走真流式，需大于 BackendClient 的 chat 预算，避免长回复被提前掐断；
+    // 短控制域仍由 BackendClient.requestTimeout(45s) 兜底。
+    this.timeout = const Duration(minutes: 10),
   });
 
   final BackendClient client;

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:tangram/app_version.dart';
 
 import '../../../../design/dsh_tokens.dart';
 import '../../../../design/dsh_widgets.dart';
@@ -166,7 +167,7 @@ class _RootSettingsPage extends StatelessWidget {
         rows: <SettingsRow>[
           const InfoRow(label: '产品', value: 'tangram-agent'),
           const InfoRow(label: '内核', value: 'agent = model + harness'),
-          InfoRow(label: '版本', value: config.appVersion ?? '0.0.1'),
+          InfoRow(label: '版本', value: config.appVersion ?? kAppVersion),
           const InfoRow(label: '能力', value: '工作蒸馏 · 产出私人模型'),
         ],
       ),

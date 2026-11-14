@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:tangram/app_version.dart';
 
 import '../design/dsh_tokens.dart';
 import 'app_config.dart';
@@ -62,7 +63,7 @@ AppScaffoldConfig buildTangramConfig({
   storageProvider: storageProvider,
   theme: TangramTheme.flaiTheme(),
   // 应用显示名：产品名 tangram-agent 的简称，短到 Android 启动器不会截断。
-  // 产品全称仍为 tangram-agent（见「关于」区），版本 0.0.1 冻结不变。
+  // 产品全称仍为 tangram-agent（见「关于」区），版本取单一真源 kAppVersion。
   appTitle: 'TGA',
   showSplash: false,
   onboardingConfig: null,
@@ -78,7 +79,7 @@ AppScaffoldConfig buildTangramConfig({
   ),
   settingsConfig: const SettingsConfig(
     drawerHeightRatio: 0.62,
-    appVersion: '0.0.1',
+    appVersion: kAppVersion,
     sections: <SettingsSection>[
       SettingsSection(
         title: '外观',
@@ -92,7 +93,7 @@ AppScaffoldConfig buildTangramConfig({
         rows: <SettingsRow>[
           InfoRow(label: '产品', value: 'tangram-agent'),
           InfoRow(label: '内核', value: 'agent = model + harness'),
-          InfoRow(label: '版本', value: '0.0.1'),
+          InfoRow(label: '版本', value: kAppVersion),
           InfoRow(label: '能力', value: '工作蒸馏 · 产出私人模型'),
         ],
       ),

@@ -589,19 +589,15 @@ class _InlineWaveform extends StatefulWidget {
   State<_InlineWaveform> createState() => _InlineWaveformState();
 }
 
-class _InlineWaveformState extends State<_InlineWaveform>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _animController;
+class _InlineWaveformState extends State<_InlineWaveform> {
   late final Timer _timerTick;
   int _elapsedSeconds = 0;
 
   @override
   void initState() {
     super.initState();
-    _animController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat();
+    // 波形是固定基线、振幅未接入，此前 AnimationController.repeat() 每帧
+    // 驱动 AnimatedBuilder 纯空转；改为只有秒表每秒刷新一次。
     _timerTick = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() => _elapsedSeconds++);
@@ -610,7 +606,6 @@ class _InlineWaveformState extends State<_InlineWaveform>
 
   @override
   void dispose() {
-    _animController.dispose();
     _timerTick.cancel();
     super.dispose();
   }
@@ -628,13 +623,8 @@ class _InlineWaveformState extends State<_InlineWaveform>
         Expanded(
           child: SizedBox(
             height: 20,
-            child: AnimatedBuilder(
-              animation: _animController,
-              builder: (BuildContext context, Widget? _) {
-                return CustomPaint(
-                  painter: _WaveformPainter(color: widget.dim),
-                );
-              },
+            child: CustomPaint(
+              painter: _WaveformPainter(color: widget.dim),
             ),
           ),
         ),

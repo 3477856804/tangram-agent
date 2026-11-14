@@ -555,11 +555,56 @@ class _MessageContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!isStreaming) {
+      // 所有文本样式都显式沿用气泡前景色：MarkdownStyleSheet 未设置的
+      // 元素会回退到 Theme 默认前景色，深色模式下标题/加粗/引用/表格
+      // 会与 AI 气泡背景近同色而不可见（问题 #1）。
+      final TextStyle heading =
+          style.copyWith(fontWeight: FontWeight.w700, height: 1.3);
+      final TextStyle bold = style.copyWith(fontWeight: FontWeight.w700);
       return MarkdownBody(
         data: content,
         styleSheet: MarkdownStyleSheet(
           p: style,
+          pPadding: EdgeInsets.zero,
+          h1: heading,
+          h2: heading.copyWith(fontSize: (style.fontSize ?? 14) + 4),
+          h3: heading.copyWith(fontSize: (style.fontSize ?? 14) + 2),
+          h4: heading,
+          h5: heading,
+          h6: heading,
+          h1Padding: EdgeInsets.zero,
+          h2Padding: EdgeInsets.zero,
+          h3Padding: EdgeInsets.zero,
+          h4Padding: EdgeInsets.zero,
+          h5Padding: EdgeInsets.zero,
+          h6Padding: EdgeInsets.zero,
+          em: style.copyWith(fontStyle: FontStyle.italic),
+          strong: bold,
+          del: style.copyWith(decoration: TextDecoration.lineThrough),
+          blockquote: style.copyWith(color: style.color?.withValues(alpha: 0.85)),
+          blockquotePadding: const EdgeInsets.only(left: 10),
+          blockquoteDecoration: BoxDecoration(
+            border: Border(
+              left: BorderSide(
+                color: style.color?.withValues(alpha: 0.35) ?? Colors.grey,
+                width: 3,
+              ),
+            ),
+          ),
           listBullet: style,
+          listBulletPadding: const EdgeInsets.only(left: 18, top: 2),
+          listIndent: 18,
+          tableHead: bold,
+          tableBody: style,
+          tableHeadAlign: TextAlign.center,
+          tableBorder: TableBorder.all(
+            color: style.color?.withValues(alpha: 0.25) ?? Colors.grey,
+            width: 1,
+          ),
+          a: style.copyWith(
+            color: cursorColor,
+            decoration: TextDecoration.underline,
+          ),
           code: style.copyWith(
             fontFamily: 'monospace',
             backgroundColor: Colors.transparent,
@@ -569,6 +614,13 @@ class _MessageContent extends StatelessWidget {
             borderRadius: BorderRadius.circular(8),
           ),
           codeblockPadding: const EdgeInsets.fromLTRB(12, 32, 12, 12),
+          horizontalRuleDecoration: BoxDecoration(
+            border: Border(
+              top: BorderSide(
+                color: style.color?.withValues(alpha: 0.25) ?? Colors.grey,
+              ),
+            ),
+          ),
         ),
         builders: {'code': _CodeBlockBuilder(codeColor: style.color)},
         selectable: true,

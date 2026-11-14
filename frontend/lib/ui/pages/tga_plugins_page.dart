@@ -59,6 +59,8 @@ class _TgaPluginsPageState extends State<TgaPluginsPage> {
   List<Map<String, dynamic>> _discover = <Map<String, dynamic>>[];
   bool _discoverBusy = false;
   String _discoverError = '';
+  /// 正在安装的仓库：点击即置入，给「安装中…」并防重复点击。
+  final Set<String> _installingRepos = <String>{};
   /// 已应用到远端的搜索关键词（空 = 浏览 topic 热门）。
   String _appliedQuery = '';
 
@@ -223,6 +225,9 @@ class _TgaPluginsPageState extends State<TgaPluginsPage> {
       _toast('该条目没有可下载的 GitHub 仓库，无法安装');
       return;
     }
+    if (_installingRepos.contains(repo)) return; // 防止连点重复请求
+    // 点击即给可见状态：置入集合 + setState，按钮立刻变「安装中…」并禁用。
+    setState(() => _installingRepos.add(repo));
     final BackendClient backend = context.read<BackendClient>();
     try {
       final env = await backend.sendControl('plugin_community',
@@ -244,6 +249,8 @@ class _TgaPluginsPageState extends State<TgaPluginsPage> {
       }
     } on Object catch (e) {
       _toast('安装请求失败：$e');
+    } finally {
+      if (mounted) setState(() => _installingRepos.remove(repo));
     }
     await _refreshAll();
   }
@@ -777,6 +784,8 @@ class _TgaPluginsPageState extends State<TgaPluginsPage> {
     final int stars = item['stars'] is num ? (item['stars'] as num).toInt() : 0;
     final String updated = _fmtDate((item['updated'] ?? '').toString());
     final String source = (item['source'] ?? '').toString();
+    final String repo = (item['repo'] ?? '').toString();
+    final bool installing = _installingRepos.contains(repo);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
       child: Row(
@@ -829,11 +838,13 @@ class _TgaPluginsPageState extends State<TgaPluginsPage> {
           const SizedBox(width: 8),
           installed
               ? TgaTag('已安装', color: Tga.green)
-              : TgaButton(
-                  label: '安装',
-                  filled: false,
-                  onTap: () => unawaited(_installRepo(item)),
-                ),
+              : installing
+                  ? TgaTag('安装中…', color: Tga.textSub)
+                  : TgaButton(
+                      label: '安装',
+                      filled: false,
+                      onTap: () => unawaited(_installRepo(item)),
+                    ),
         ],
       ),
     );

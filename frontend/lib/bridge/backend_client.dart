@@ -70,6 +70,11 @@ class BackendClient {
   /// 纯 Dart 内嵌后端实例（inProcess 模式）。
   EmbeddedBackend? _embedded;
 
+  /// inProcess 模式下把后端 hot-path 事件实时转发到客户端流。
+  /// 此前只在 control 返回后批量投递，流式 token 要等整段生成完才可见，
+  /// 首字延迟等同全量推理；实时桥接后 SSE 增量即时到达 UI。
+  StreamSubscription<Map<String, dynamic>>? _embeddedHotSub;
+
   bool get ready => _ready;
 
   /// 内置 Python 运行时的真实初始化信息（版本、已注册 handler 数、数据目录等）。
@@ -95,6 +100,11 @@ class BackendClient {
         // 纯 Dart 内嵌后端：随 APK 内置，无 Python / 无 MethodChannel / 无子进程。
         // 初始化失败时如实抛错，绝不退回假数据或谎报「已连接」。
         _embedded = await EmbeddedBackend.instance();
+        _embeddedHotSub = _embedded!.onHotPath.listen((Map<String, dynamic> e) {
+          final String t = (e['topic'] ?? '').toString();
+          if (t.isEmpty || _hotStream.isClosed) return;
+          _hotStream.add(BridgeEnvelope.hot(t, e, '', _nextMsgId()));
+        });
         _embeddedInfo = <String, dynamic>{
           'ok': true,
           'backend': 'pure-dart-in-process',
@@ -160,15 +170,14 @@ class BackendClient {
     if (mode == BridgeMode.inProcess) {
       final backend = _embedded;
       if (backend == null) throw const BackendNotConnected();
-      final reply = await backend.dispatch(topic, payload).timeout(requestTimeout);
-      // 轨迹 / 下载进度 / 沙箱结果等事件如实投递到 hot-path。
-      // stream_token 不在此投递：完整回复已在 control payload 的 reply 中，
-      // 由 TangramAiProvider 一次性 emit，避免异步事件与订阅取消竞态导致空白。
-      for (final e in reply.events) {
-        final t = (e['topic'] ?? '').toString();
-        if (t.isEmpty || t == 'stream_token') continue;
-        _hotStream.add(BridgeEnvelope.hot(t, e, '', _nextMsgId()));
-      }
+      // 对话走 SSE 流式，长回复可能超过普通控制域的 45s 上限；单独放宽，
+      // 让流式逐字到达，而不是被整体超时掐断后回退成一次性长等待。
+      final Duration budget = (topic == 'agent_command' || topic == 'chat')
+          ? const Duration(minutes: 10)
+          : requestTimeout;
+      final reply = await backend.dispatch(topic, payload).timeout(budget);
+      // 轨迹 / 下载进度 / 流式 token 等事件已在 connect 里经 onHotPath
+      // 实时投递，不再二次批量投递，避免重复。
       return BridgeEnvelope(BridgeChannel.control, topic, reply.payload, '', id);
     }
     if (mode == BridgeMode.embedded) {
@@ -302,6 +311,8 @@ class BackendClient {
 
   void dispose() {
     disconnect();
+    _embeddedHotSub?.cancel();
+    _embeddedHotSub = null;
     _hotStream.close();
     if (!_connController.isClosed) _connController.close();
   }

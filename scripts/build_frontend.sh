@@ -3,7 +3,7 @@
 # 檀阁瑞木 Tangram —— 前端构建脚本
 #
 # 封装: cd frontend && flutter pub get && flutter build <platform>
-#   platform: linux / windows / macos / android（参数指定）
+#   platform: linux / windows / macos / android / ios（参数指定）
 #
 # 说明：桌面端（linux / windows / macos）为优先支持目标；移动端 android 次之；
 #       iOS 受 App Store 发版约束；
@@ -20,11 +20,43 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FRONTEND_DIR="${REPO_ROOT}/frontend"
 
+# 版本真源统一：CI 的 TGA_VER > 产物仓库最新 Release 自动进位 > 本地 VERSION 兜底。
+# 所有平台都注入 dart-define 并同步 pubspec version，桌面端 PackageInfo 才能
+# 返回真实版本（此前只有 android 注入，linux/windows/macos/ios 恒为 0.0.1）。
+TGA_VERSION="${TGA_VER:-}"
+if [[ -z "${TGA_VERSION}" ]]; then
+  TGA_VERSION="$(python3 -c "
+import json, sys, urllib.request
+try:
+    t = json.load(urllib.request.urlopen(
+        'https://api.github.com/repos/3477856804/tangram-agent-releases/releases/latest',
+        timeout=8))['tag_name'].lstrip('v')
+    a, b, c = (int(x) for x in t.split('.'))
+    c += 1
+    if c > 99:
+        b += 1; c = 0
+        if b > 99:
+            a += 1; b = 0
+    print(f'{a}.{b}.{c}')
+except Exception:
+    print(open(sys.argv[1], encoding='utf-8').read().strip() or '0.0.1')
+" "${REPO_ROOT}/VERSION" 2>/dev/null || true)"
+fi
+[[ -n "${TGA_VERSION}" ]] || TGA_VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION" 2>/dev/null || echo 0.0.4)"
+python3 -c "
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+s2 = re.sub(r'(?m)^version:\s*\S+', 'version: ' + sys.argv[2] + '+1', s, count=1)
+open(p, 'w', encoding='utf-8').write(s2)
+" "${FRONTEND_DIR}/pubspec.yaml" "${TGA_VERSION}"
+echo "==> OTA 版本真源: TANGRAM_VERSION=${TGA_VERSION}（全平台 + pubspec 同步）"
+
 EXTRA_ARGS=()
 
 # 桌面端优先：未指定平台时提示
 if [[ $# -lt 1 ]]; then
-  echo "用法: $0 <platform>  (linux|windows|macos|android)" >&2
+  echo "用法: $0 <platform>  (linux|windows|macos|android|ios)" >&2
   echo "说明: 桌面端(linux/windows/macos)为优先支持目标。" >&2
   exit 1
 fi
@@ -32,10 +64,10 @@ fi
 PLATFORM="$1"; shift
 
 case "${PLATFORM}" in
-  linux|windows|macos|android) ;;
+  linux|windows|macos|android|ios) ;;
   *)
     echo "错误: 不支持的平台 '${PLATFORM}'" >&2
-    echo "支持: linux windows macos android" >&2
+    echo "支持: linux windows macos android ios" >&2
     exit 1
     ;;
 esac
@@ -116,10 +148,7 @@ export FLUTTER_STORAGE_BASE_URL="${FLUTTER_STORAGE_BASE_URL:-https://storage.flu
 if [[ "${PLATFORM}" == "android" ]]; then
   if [[ ${#EXTRA_ARGS[@]} -eq 0 ]]; then EXTRA_ARGS=(--debug); fi
   ( cd "${FRONTEND_DIR}" && flutter pub get ) || { echo "错误: flutter pub get 失败" >&2; exit 1; }
-  # OTA 版本自检真源：把 VERSION 注入 App（UpdateService.currentVersion）。
-  TGA_VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION" 2>/dev/null || echo 0.0.1)"
   EXTRA_ARGS+=(--dart-define=TANGRAM_VERSION="${TGA_VERSION}")
-  echo "==> OTA 版本注入: TANGRAM_VERSION=${TGA_VERSION}"
   set +e
   ( cd "${FRONTEND_DIR}" && flutter build apk "${EXTRA_ARGS[@]}" )
   BUILD_RC=$?
@@ -139,6 +168,7 @@ if [[ "${PLATFORM}" == "android" ]]; then
   echo "==> APK 已产出: ${REPO_ROOT}/tangram-agent.apk"
   echo "    源产物: ${APK}"
 else
+  EXTRA_ARGS+=(--dart-define=TANGRAM_VERSION="${TGA_VERSION}")
   ( cd "${FRONTEND_DIR}" && flutter pub get && flutter build "${PLATFORM}" "${EXTRA_ARGS[@]}" )
 fi
 echo "前端构建完成: ${PLATFORM}"

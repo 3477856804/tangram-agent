@@ -36,6 +36,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'package:tangram/agent/sandbox/sandboxed_shell.dart';
+import 'package:tangram/app_version.dart';
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/downloader.dart';
 import 'package:tangram/harness/im_service.dart';
@@ -98,7 +99,8 @@ class EmbeddedBackend {
   static EmbeddedBackend forTest(HarnessStore store) =>
       EmbeddedBackend._(store, DownloadManager(store));
 
-  static const String version = '0.0.1';
+  /// 版本真源：全平台共用 app_version.dart 的 kAppVersion。
+  static const String version = kAppVersion;
 
   static const List<String> controlDomains = <String>[
     'capability_negotiation', 'rpc', 'chat', 'agent_command', 'code_task',
@@ -236,7 +238,7 @@ class EmbeddedBackend {
       case 'selftest':
         return _selfTestAsync();
       case 'hardware':
-        return _hardware();
+        return await _hardware();
       case 'active':
         return _activeModel();
       default:
@@ -410,17 +412,50 @@ class EmbeddedBackend {
         threw;
   }
 
-  Map<String, dynamic> _hardware() => <String, dynamic>{
-        'ok': true,
-        'platform': Platform.operatingSystem,
-        'platform_version': Platform.operatingSystemVersion,
-        'dart_version': Platform.version,
-        'processors': Platform.numberOfProcessors,
-        'locale': Platform.localeName,
-        'models_dir': store.sub('models').path,
-        'model_bytes_on_disk': store.totalModelBytes,
-        'note': '纯 Dart 运行时，无外部解释器；磁盘统计来自真实文件系统。',
-      };
+  Future<Map<String, dynamic>> _hardware() async {
+    final double? memGb = await _physicalMemoryGb();
+    return <String, dynamic>{
+      'ok': true,
+      'platform': Platform.operatingSystem,
+      'platform_version': Platform.operatingSystemVersion,
+      'dart_version': Platform.version,
+      'processors': Platform.numberOfProcessors,
+      'locale': Platform.localeName,
+      'models_dir': store.sub('models').path,
+      'model_bytes_on_disk': store.totalModelBytes,
+      if (memGb != null) 'memory_gb': memGb,
+      'note': '纯 Dart 运行时，无外部解释器；磁盘统计来自真实文件系统。',
+    };
+  }
+
+  /// 真实物理内存（GB）：Linux/Android 读 /proc/meminfo，macOS 用 sysctl，
+  /// Windows 用 CIM；探测不到返回 null，调用方须如实显示「未知」而不是猜。
+  Future<double?> _physicalMemoryGb() async {
+    try {
+      if (Platform.isAndroid || Platform.isLinux) {
+        final String info = await File('/proc/meminfo').readAsString();
+        final RegExpMatch? m =
+            RegExp(r'MemTotal:\s*(\d+)\s*kB').firstMatch(info);
+        final int kb = m != null ? int.tryParse(m.group(1)!) ?? 0 : 0;
+        if (kb > 0) return kb / 1024 / 1024;
+      } else if (Platform.isMacOS) {
+        final r = await Process.run('sysctl', <String>['-n', 'hw.memsize']);
+        final int bytes = int.tryParse('${r.stdout}'.trim()) ?? 0;
+        if (r.exitCode == 0 && bytes > 0) return bytes / 1024 / 1024 / 1024;
+      } else if (Platform.isWindows) {
+        final r = await Process.run('powershell', <String>[
+          '-NoProfile',
+          '-Command',
+          '(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory',
+        ]);
+        final int bytes = int.tryParse('${r.stdout}'.trim()) ?? 0;
+        if (r.exitCode == 0 && bytes > 0) return bytes / 1024 / 1024 / 1024;
+      }
+    } on Object {
+      // iOS 禁用 Process.run；命令缺失/无权限同样如实返回未知。
+    }
+    return null;
+  }
 
   Future<Map<String, dynamic>> _activeModel() async {
     final active = await store.readJson('active.json');
@@ -445,8 +480,19 @@ class EmbeddedBackend {
 
   Future<Map<String, dynamic>> _chat(Map<String, dynamic> p) async {
     final text = (p['text'] ?? p['message'] ?? p['prompt'] ?? '').toString().trim();
-    final session = (p['session_id'] ?? 'default').toString();
+    // 会话边界：前端把当前会话 id 放进 metadata.conversationId，用于按会话
+    // 隔离历史；未提供时退回 session_id，避免跨会话上下文串味。
+    final dynamic meta = p['metadata'];
+    final String session = (p['session_id'] ??
+            (meta is Map ? meta['conversationId'] : null) ??
+            'default')
+        .toString();
     if (text.isEmpty) return _err('消息为空');
+    // 每轮重置：该计数只用于判断"本轮云端是否已逐片投递"，不重置会让
+    // 第二次对话的非流式路径误判为已投递而不再补分片。
+    _streamedRemoteTokens = 0;
+    // 完整多轮历史（前端已序列化为 [{role, content}]），按 token 预算裁剪。
+    final List<Map<String, dynamic>> history = _historyFrom(p);
 
     final turnId = await store.insert('turns', <String, dynamic>{
       'session_id': session, 'role': 'user', 'text': text, 'ts': _now(),
@@ -507,6 +553,13 @@ class EmbeddedBackend {
           '当用户问"工作区里有什么/能不能看见文件"时，依据此列表如实回答；'
           '可用 read_file 工具读取其中文件。';
     }
+    // 让模型知道自己有一台 Linux：能力说明随当前沙箱模式如实给出。
+    // tools 由 ChatRequest 携带，shell 工具经 tool_call 回环真实执行。
+    effectiveSystem += await _linuxCapabilityBlock();
+    // 跨会话持久记忆：turns 表真实落盘，按最近性 + 词项相关度注入，
+    // 新会话也能召回长期事实；按会话边界与当轮历史去重。
+    effectiveSystem += await _persistentMemoryBlock(text, session, history);
+
     String reply;
     String engine;
     if (apiBase.isNotEmpty && model.isNotEmpty &&
@@ -515,6 +568,7 @@ class EmbeddedBackend {
       String query = text;
       if (wantThinking) {
         // 两遍真实推理：先让模型产出分步推理要点，再基于要点作答。
+        // 规划阶段同样带历史，避免"要点"脱离上文。
         final plan = await _remoteChat(
           apiBase: apiBase,
           apiKey: apiKey,
@@ -525,6 +579,7 @@ class EmbeddedBackend {
           temperature: 0.3,
           maxTokens: maxTokens,
           topP: topP,
+          history: history,
         );
         if (plan.ok) {
           query = '参考以下推理要点，深入分析后作答：\n${plan.content}\n\n'
@@ -543,18 +598,32 @@ class EmbeddedBackend {
         apiKey: apiKey,
         model: model,
         text: query,
-        system: effectiveSystem.isEmpty && !wantThinking
-            ? system
-            : (wantThinking && effectiveSystem.isEmpty
-                ? '请先在思考中拆解问题、检验假设、验证结论，再给出最终答案。'
-                    '$effectiveSystem'
-                : effectiveSystem),
+        system: wantThinking
+            ? '请先在思考中拆解问题、检验假设、验证结论，再给出最终答案。'
+                '$effectiveSystem'
+            : effectiveSystem,
         temperature: temperature,
         maxTokens: maxTokens,
         topP: topP,
+        history: history,
+        onDelta: (String d) =>
+            _emit('stream_token', <String, dynamic>{'token': d}),
       );
       if (remote.ok) {
-        reply = remote.content;
+        // 工具回环：模型若输出 tga-shell 代码块，真实执行并把输出回灌，
+        // 让模型据此继续推理（shell 与终端 UI 走同一执行通道）。
+        reply = await _resolveShellLoops(
+          first: remote.content,
+          text: query,
+          apiBase: apiBase,
+          apiKey: apiKey,
+          model: model,
+          system: effectiveSystem,
+          temperature: temperature,
+          maxTokens: maxTokens,
+          topP: topP,
+          history: history,
+        );
         engine = 'openai-compatible:$model$modeSuffix';
       } else {
         reply = '外部推理调用失败：${remote.error}\n\n'
@@ -567,6 +636,15 @@ class EmbeddedBackend {
           effectiveSystem.isEmpty ? '你是 TGA，一个简洁、诚实、有用的中文助手。' : effectiveSystem;
       if (wantThinking) {
         localSystem = '请先分步拆解问题、检验假设、验证结论，再给出最终答案。$localSystem';
+      }
+      // 端侧 llama.cpp 只接收单条 prompt：把真实历史按角色折进 system，
+      // 与云端走同一份上下文，不引入新依赖、不改推理引擎签名。
+      if (history.isNotEmpty) {
+        final StringBuffer past = StringBuffer('\n\n【此前对话（按时间顺序）】\n');
+        for (final Map<String, dynamic> m in history) {
+          past.writeln('${m['role'] == 'user' ? '用户' : '助手'}：${m['content']}');
+        }
+        localSystem += past.toString();
       }
       final local = await LocalInference.instance.generate(
           localPath, wantThinking ? '请深入思考后回答：$text' : text,
@@ -593,9 +671,12 @@ class EmbeddedBackend {
       'kind': 'chat', 'text': text, 'reply': reply, 'engine': engine, 'ts': _now(),
     });
 
-    // 流式 token 事件：按可见字符分片真实投递（打字机效果）。
-    for (final chunk in _chunks(reply, 24)) {
-      _emit('stream_token', <String, dynamic>{'token': chunk});
+    // 流式 token 事件：云端真流式已在 onDelta 中逐片投递，不再重复整段；
+    // 非流式路径（端侧 / 内置）仍按可见字符分片真实投递。
+    if (_streamedRemoteTokens < 1) {
+      for (final chunk in _chunks(reply, 24)) {
+        _emit('stream_token', <String, dynamic>{'token': chunk});
+      }
     }
     return <String, dynamic>{
       'ok': true,
@@ -676,6 +757,177 @@ class EmbeddedBackend {
     }
   }
 
+  /// 本轮云端流式已投递的 token 片数：>0 表示无需再补整段打字机。
+  int _streamedRemoteTokens = 0;
+
+  /// 把前端传来的完整 messages 转成标准 OpenAI messages，按 token 预算
+  /// （以字符数近似）保留最近轮次，末尾重复的当前 user 轮去掉。
+  List<Map<String, dynamic>> _historyFrom(Map<String, dynamic> p) {
+    _streamedRemoteTokens = 0;
+    final dynamic raw = p['messages'];
+    if (raw is! List) return <Map<String, dynamic>>[];
+    final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
+    for (final dynamic m in raw) {
+      if (m is! Map) continue;
+      final String role = (m['role'] ?? '').toString();
+      if (role != 'user' && role != 'assistant') continue;
+      final String content = (m['content'] ?? '').toString().trim();
+      if (content.isEmpty) continue;
+      out.add(<String, dynamic>{'role': role, 'content': content});
+    }
+    final String text = (p['text'] ?? p['message'] ?? p['prompt'] ?? '')
+        .toString()
+        .trim();
+    if (out.isNotEmpty &&
+        out.last['role'] == 'user' &&
+        out.last['content'] == text) {
+      out.removeLast();
+    }
+    const int budget = 12000;
+    int used = 0;
+    int start = out.length;
+    for (int i = out.length - 1; i >= 0; i--) {
+      used += (out[i]['content'] as String).length;
+      if (used > budget) break;
+      start = i;
+    }
+    return out.sublist(start);
+  }
+
+  /// 跨会话长期记忆：turns 表真实落盘，取与本轮词项相关 / 最近的记录，
+  /// 与当轮历史去重后注入 system，实现「新会话仍能召回长期事实」。
+  Future<String> _persistentMemoryBlock(String text, String session,
+      List<Map<String, dynamic>> history) async {
+    try {
+      final turns = await store.readRecords('turns');
+      if (turns.isEmpty) return '';
+      final Set<String> inHistory = history
+          .map((Map<String, dynamic> m) => m['content'].toString())
+          .toSet();
+      final List<String> terms = <String>{
+        ...text.toLowerCase().split(RegExp(r'[\s,，。？?！!、]+'))
+            .where((String s) => s.length >= 2),
+      }.toList();
+      int score(Map<String, dynamic> t) {
+        final String body = (t['text'] ?? '').toString().toLowerCase();
+        int s = 0;
+        for (final String term in terms) {
+          if (body.contains(term)) s += 2;
+        }
+        return s;
+      }
+      final List<Map<String, dynamic>> pool = turns.reversed.take(120).toList();
+      pool.sort((Map<String, dynamic> a, Map<String, dynamic> b) =>
+          score(b).compareTo(score(a)));
+      final List<String> lines = <String>[];
+      for (final Map<String, dynamic> t in pool) {
+        if (lines.length >= 8) break;
+        final String role = (t['role'] ?? '').toString();
+        if (role != 'user' && role != 'assistant') continue;
+        final String body = (t['text'] ?? '').toString().trim();
+        if (body.isEmpty || body == text || inHistory.contains(body)) continue;
+        if (body.length > 240) continue;
+        lines.add('- [$role] $body');
+      }
+      if (lines.isEmpty) return '';
+      return '\n\n【长期记忆（本机真实对话记录，跨会话召回）】\n'
+          '${lines.join('\n')}\n'
+          '以上是既往事实，回答时可直接引用；当前会话以本轮 messages 为准。';
+    } on Object {
+      return '';
+    }
+  }
+
+  /// 让模型知道自己拥有一台 Linux：能力与当前沙箱模式如实标注，
+  /// 命令经 shell 工具执行，终端与模型共用同一套 shell / cwd / 已装依赖。
+  Future<String> _linuxCapabilityBlock() async {
+    final String env = await _sandboxEnvironment();
+    return '\n\n【你的 Linux 电脑】你在设备沙箱内拥有一台真实 Linux，'
+        '可以安装依赖（apt / pip）、编译运行代码、读写文件、调用命令行工具。'
+        '需要执行命令时，在回答中输出一个 tga-shell 代码块，格式严格为：\n'
+        '```tga-shell\n要执行的命令\n```\n'
+        '系统会在沙箱里真实执行并把 stdout/stderr 与退出码回传给你，'
+        '你再据此继续推理并给出最终答案；不要声称无法执行、不要编造命令输出。'
+        '只有确实需要执行时才输出该代码块，普通代码示例请用常规语言标记。'
+        '当前沙箱模式：$env。'
+        '若系统提示降级为内置解释器，可用命令范围会如实给出，不要假装完整 Linux。';
+  }
+
+  /// 模型发起 shell 工具调用的显式协议块。用专有标记而非通用 ```bash，
+  /// 避免把回答里的普通代码示例误当成命令执行。
+  static final RegExp _shellCallBlock = RegExp(
+      r'```tga-shell\s*\n([\s\S]*?)```',
+      caseSensitive: false);
+
+  /// 工具回环：真实执行模型给出的 shell 块，把输出回灌后让模型继续推理。
+  /// 对不支持 function calling 的网关也生效；最多 3 轮防止死循环。
+  Future<String> _resolveShellLoops({
+    required String first,
+    required String text,
+    required String apiBase,
+    required String apiKey,
+    required String model,
+    required String system,
+    required double temperature,
+    required int maxTokens,
+    required double topP,
+    required List<Map<String, dynamic>> history,
+  }) async {
+    final StringBuffer transcript = StringBuffer(first);
+    final List<Map<String, dynamic>> loopHistory =
+        <Map<String, dynamic>>[...history];
+    String pending = first;
+    for (int round = 0; round < 3; round++) {
+      final List<RegExpMatch> calls =
+          _shellCallBlock.allMatches(pending).toList();
+      if (calls.isEmpty) break;
+      final StringBuffer observations = StringBuffer();
+      for (final RegExpMatch m in calls) {
+        final String cmd = (m.group(1) ?? '').trim();
+        if (cmd.isEmpty) continue;
+        _emit('chat_status', <String, dynamic>{
+          'phase': 'shell',
+          'command': cmd.length > 200 ? cmd.substring(0, 200) : cmd,
+        });
+        final ToolResult r =
+            await tools.run('shell', <String, dynamic>{'command': cmd});
+        final String out = r.ok ? r.content : '执行失败：${r.error}';
+        observations.writeln('命令 `$cmd` 的真实输出：\n$out');
+      }
+      if (observations.isEmpty) break;
+      final String observationText =
+          '\n\n【沙箱执行结果（真实）】\n$observations\n';
+      transcript.write(observationText);
+      _emit('stream_token', <String, dynamic>{'token': observationText});
+
+      loopHistory.add(<String, dynamic>{'role': 'assistant', 'content': pending});
+      const String toolMsg = '以上是你刚才在沙箱里执行命令的真实输出。'
+          '请据此继续完成任务并给出最终回答；如无必要，不要重复执行相同命令，'
+          '也不要再输出 tga-shell 代码块。';
+      final follow = await _remoteChat(
+        apiBase: apiBase,
+        apiKey: apiKey,
+        model: model,
+        text: toolMsg,
+        system: system,
+        temperature: temperature,
+        maxTokens: maxTokens,
+        topP: topP,
+        history: List<Map<String, dynamic>>.of(loopHistory),
+        onDelta: (String d) =>
+            _emit('stream_token', <String, dynamic>{'token': d}),
+      );
+      loopHistory.add(<String, dynamic>{'role': 'user', 'content': toolMsg});
+      final String answer = follow.ok
+          ? follow.content
+          : '（工具结果回灌后推理失败：${follow.error}）';
+      transcript.write(answer);
+      pending = answer;
+      if (!follow.ok) break;
+    }
+    return transcript.toString();
+  }
+
   Iterable<String> _chunks(String s, int size) sync* {
     for (var i = 0; i < s.length; i += size) {
       final end = i + size > s.length ? s.length : i + size;
@@ -695,6 +947,9 @@ class EmbeddedBackend {
     return fallback;
   }
 
+  /// 云端 OpenAI 兼容推理：默认走 SSE 真流式，首字延迟从「整段生成完」
+  /// 降到「第一个 token」；历史轮次按标准 messages 一并转发。
+  /// 网关不支持流式时自动回退一次性请求，不丢回答、不编造内容。
   Future<({bool ok, String content, String error})> _remoteChat({
     required String apiBase,
     required String apiKey,
@@ -704,42 +959,96 @@ class EmbeddedBackend {
     required double temperature,
     required int maxTokens,
     required double topP,
+    List<Map<String, dynamic>> history = const <Map<String, dynamic>>[],
+    void Function(String delta)? onDelta,
   }) async {
+    final uri = Uri.parse(
+        '${apiBase.replaceAll(RegExp(r'/+$'), '')}/chat/completions');
+    final Map<String, String> headers = <String, String>{
+      'Content-Type': 'application/json',
+      // 免费端点（Kilo :free）实测不带 Authorization 头即可 200；
+      // 空 Key 时省略该头，避免部分网关对 "Bearer " 直接 401。
+      if (apiKey.isNotEmpty) 'Authorization': 'Bearer $apiKey',
+    };
+    final Map<String, dynamic> body = <String, dynamic>{
+      'model': model,
+      'messages': <Map<String, dynamic>>[
+        if (system.isNotEmpty)
+          <String, dynamic>{'role': 'system', 'content': system},
+        ...history,
+        <String, dynamic>{'role': 'user', 'content': text},
+      ],
+      'temperature': temperature,
+      'max_tokens': maxTokens,
+      'top_p': topP,
+      'stream': true,
+    };
     try {
-      final uri = Uri.parse('${apiBase.replaceAll(RegExp(r'/+$'), '')}/chat/completions');
-      final resp = await http
-          .post(
-            uri,
-            headers: <String, String>{
-              'Content-Type': 'application/json',
-              // 免费端点（Kilo :free）实测不带 Authorization 头即可 200；
-              // 空 Key 时省略该头，避免部分网关对 "Bearer " 直接 401。
-              if (apiKey.isNotEmpty) 'Authorization': 'Bearer $apiKey',
-            },
-            body: jsonEncode(<String, dynamic>{
-              'model': model,
-              'messages': <Map<String, dynamic>>[
-                if (system.isNotEmpty)
-                  <String, dynamic>{'role': 'system', 'content': system},
-                <String, dynamic>{'role': 'user', 'content': text},
-              ],
-              'temperature': temperature,
-              'max_tokens': maxTokens,
-              'top_p': topP,
-            }),
-          )
-          .timeout(const Duration(seconds: 30));
-      if (resp.statusCode != 200) {
-        return (ok: false, content: '', error: 'HTTP ${resp.statusCode}');
+      // 流式请求用底层 Client.send 拿增量字节，按 SSE 行解析 delta，
+      // 边收边上报，避免 http.post 必须等整段生成完导致的数十秒白屏。
+      final http.Client client = http.Client();
+      try {
+        final http.Request req = http.Request('POST', uri)
+          ..headers.addAll(headers)
+          ..body = jsonEncode(body);
+        final http.StreamedResponse resp = await client
+            .send(req)
+            .timeout(const Duration(seconds: 90));
+        if (resp.statusCode != 200) {
+          final String raw = await utf8.decoder.bind(resp.stream).join();
+          return (ok: false, content: '',
+              error: 'HTTP ${resp.statusCode}：${_brief(raw)}');
+        }
+        final StringBuffer buf = StringBuffer();
+        String carry = '';
+        await for (final String chunk
+            in utf8.decoder.bind(resp.stream).timeout(const Duration(seconds: 90))) {
+          carry += chunk;
+          int nl;
+          while ((nl = carry.indexOf('\n')) >= 0) {
+            final String line = carry.substring(0, nl).trim();
+            carry = carry.substring(nl + 1);
+            if (line.isEmpty || !line.startsWith('data:')) continue;
+            final String data = line.substring(5).trim();
+            if (data == '[DONE]') break;
+            final dynamic decoded = jsonDecode(data);
+            if (decoded is! Map) continue;
+            final dynamic choices = decoded['choices'];
+            if (choices is! List || choices.isEmpty) continue;
+            final dynamic first = choices.first;
+            if (first is! Map) continue;
+            final dynamic delta = first['delta'];
+            if (delta is! Map) continue;
+            final String piece = (delta['content'] ?? '').toString();
+            if (piece.isEmpty) continue;
+            buf.write(piece);
+            _streamedRemoteTokens++;
+            onDelta?.call(piece);
+          }
+        }
+        final String content = buf.toString();
+        if (content.isNotEmpty) return (ok: true, content: content, error: '');
+        // 网关返回 200 但没给增量（不支持 stream）：回退一次性请求。
+      } finally {
+        client.close();
       }
-      final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
+      final http.Response plain = await http
+          .post(uri, headers: headers,
+              body: jsonEncode(<String, dynamic>{...body, 'stream': false}))
+          .timeout(const Duration(seconds: 90));
+      if (plain.statusCode != 200) {
+        return (ok: false, content: '', error: 'HTTP ${plain.statusCode}');
+      }
+      final dynamic decoded = jsonDecode(utf8.decode(plain.bodyBytes));
       if (decoded is Map) {
-        final choices = decoded['choices'];
+        final dynamic choices = decoded['choices'];
         if (choices is List && choices.isNotEmpty) {
-          final msg = (choices.first as Map)['message'];
+          final dynamic msg = (choices.first as Map)['message'];
           if (msg is Map) {
-            final content = (msg['content'] ?? '').toString();
-            if (content.isNotEmpty) return (ok: true, content: content, error: '');
+            final String content = (msg['content'] ?? '').toString();
+            if (content.isNotEmpty) {
+              return (ok: true, content: content, error: '');
+            }
           }
         }
       }
@@ -748,6 +1057,9 @@ class EmbeddedBackend {
       return (ok: false, content: '', error: '$e');
     }
   }
+
+  static String _brief(String raw) =>
+      raw.length > 120 ? raw.substring(0, 120) : raw;
 
   /// 内置 AgentLoop：先做意图路由，命中就调用真实工具，把工具观测结果
   /// 组织成回答；未命中时基于真实记忆做检索式回应。全程不编造事实。
@@ -1255,6 +1567,46 @@ class EmbeddedBackend {
           return r.ok
               ? ToolResult.ok(r.stdout.trim().isEmpty ? '测试通过' : r.stdout.trim())
               : ToolResult.error(r.error ?? '沙箱执行失败');
+        },
+      ),
+      AgentTool(
+        name: 'shell',
+        description: '在真实 Linux 沙箱中执行命令（安装依赖、编译、读写文件、'
+            '运行脚本），返回 stdout/stderr 与退出码；与终端页同一执行通道',
+        tier: ApprovalTier.exec,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'command': <String, dynamic>{
+              'type': 'string',
+              'description': '要执行的 shell 命令',
+            },
+            'cwd': <String, dynamic>{
+              'type': 'string',
+              'description': '工作目录，相对 sandbox 根',
+            },
+          },
+          'required': <String>['command'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await _shellExec(<String, dynamic>{
+            'command': args['command'],
+            'cwd': args['cwd'] ?? '.',
+          });
+          final String out = (r['stdout'] ?? '').toString();
+          if (r['ok'] != true && out.isEmpty) {
+            return ToolResult.error((r['error'] ?? 'shell 执行失败').toString());
+          }
+          final String mode = r['real'] == true ? '真实 shell' : '内置解释器';
+          final String rc =
+              r['exit_code'] == null ? '' : '（exit ${r['exit_code']}）';
+          final String clipped = out.length > 6000
+              ? '${out.substring(0, 6000)}\n…（输出已截断）'
+              : out;
+          return ToolResult.ok(
+            '[$mode$rc]\n${clipped.isEmpty ? '(无输出)' : clipped}',
+            data: <String, dynamic>{'cwd': r['cwd'], 'real': r['real']},
+          );
         },
       ),
     ]);
@@ -1928,7 +2280,7 @@ class EmbeddedBackend {
     final action = _action(p);
     switch (action) {
       case 'hardware':
-        return _hardware();
+        return await _hardware();
       case 'search' || 'catalog' || 'list':
         final q = (p['query'] ?? '').toString().trim().toLowerCase();
         final local = store.scanFiles('downloads',
@@ -2137,6 +2489,7 @@ class EmbeddedBackend {
       case 'describe':
         final traces = await store.readRecords('work_traces');
         final turns = await store.readRecords('turns');
+        final pairs = _qaPairsFrom(turns);
         return <String, dynamic>{
           'ok': true, 'action': action,
           'data': <String, dynamic>{
@@ -2145,6 +2498,9 @@ class EmbeddedBackend {
             'harness': <String, dynamic>{
               'work_traces': traces.length,
               'dialog_turns': turns.length,
+              // 真实可蒸馏问答对数与门槛，供 UI 显示按钮可用状态。
+              'distill_pairs': pairs.length,
+              'distill_min_pairs': _minDistillPairs,
               'tools': tools.names,
               'backend': 'pure-dart-in-process',
             },
@@ -2240,12 +2596,16 @@ class EmbeddedBackend {
   ///  4) 用户偏好摘要 + 语料统计（轮数 / token 估算），全部来自真实计数；
   ///  5) 写入 models/ 目录（_ownModels 扫描目录），命名 tga-distill-日期.json。
   /// 产物是统计抽取的知识包，不是神经网络权重，文件内如实标注。
-  Future<Map<String, dynamic>> _distillRun() async {
-    final turns = await store.readRecords('turns');
+  /// 蒸馏门槛按「一问一答的配对数」计：几轮真实对话即可产出知识包，
+  /// 不必凑满十条消息（旧门槛与 UI 显示的消息条数语义不一致）。
+  static const int _minDistillPairs = 3;
 
-    // ---- 1) 按 session 配对 Q→A ----
+  /// 把 turns 按 session 配成 user→assistant 问答对。
+  /// describe 与 run 共用，UI 显示的可蒸馏轮数与实际执行条件才一致。
+  static List<Map<String, dynamic>> _qaPairsFrom(
+      List<Map<String, dynamic>> turns) {
     final pending = <String, Map<String, dynamic>>{};
-    final allPairs = <Map<String, dynamic>>[];
+    final pairs = <Map<String, dynamic>>[];
     for (final t in turns) {
       final session = (t['session_id'] ?? 'default').toString();
       final role = (t['role'] ?? '').toString();
@@ -2256,7 +2616,7 @@ class EmbeddedBackend {
       } else if (role == 'assistant') {
         final q = pending.remove(session);
         if (q != null) {
-          allPairs.add(<String, dynamic>{
+          pairs.add(<String, dynamic>{
             'question': q['text'].toString(),
             'answer': text,
             'session_id': session,
@@ -2265,11 +2625,21 @@ class EmbeddedBackend {
         }
       }
     }
-    if (allPairs.length < 10) {
+    return pairs;
+  }
+
+  Future<Map<String, dynamic>> _distillRun() async {
+    final turns = await store.readRecords('turns');
+    final allPairs = _qaPairsFrom(turns);
+    if (allPairs.length < _minDistillPairs) {
       return <String, dynamic>{
         'ok': false, 'action': 'run',
-        'error': '对话语料不足(需≥10 轮),先去聊天吧',
-        'data': <String, dynamic>{'pairs': allPairs.length},
+        'error': '可蒸馏问答对不足（当前 ${allPairs.length} 对，'
+            '至少需 $_minDistillPairs 对一问一答）',
+        'data': <String, dynamic>{
+          'pairs': allPairs.length,
+          'required': _minDistillPairs,
+        },
       };
     }
     final corpus = allPairs.length > 400
@@ -3188,63 +3558,153 @@ class EmbeddedBackend {
     }
   }
 
-  /// 真实安装：按仓库自身 default_branch 从 raw.githubusercontent.com
-  /// 依次下载根目录 plugin.json / SKILL.md / README.md（curl 实测：文件
-  /// 存在 200 即落盘，404 如实报未找到），写入现有插件池目录
-  /// plugins/<name>.json——与 plugin_lifecycle 同一落点，「已安装」可见、可卸载。
+  /// 真实安装：先用 git/trees 递归列出仓库里真实存在的技能/插件文件
+  /// （含 skills/*/SKILL.md 子目录），再并发下载落盘。
+  /// 技能写 skills/*.md（skills_list 与启用链路可识别），插件清单写
+  /// plugins/<safe>.json（与 plugin_lifecycle 同一落点，「已安装」可见可卸载）。
+  /// 网络不可达与仓库确无文件分开如实上报，不再把超时误报成 404。
   Future<Map<String, dynamic>> _installRepoPlugin(Map<String, dynamic> p) async {
-    final repo = (p['repo'] ?? '').toString().trim();
+    final String repo = (p['repo'] ?? '').toString().trim();
     if (!RegExp(r'^[\w.\-]+/[\w.\-]+$').hasMatch(repo)) {
       return _err('非法仓库名：$repo');
     }
-    final branchRaw = (p['branch'] ?? '').toString().trim();
-    final branch = RegExp(r'^[\w.\-]+$').hasMatch(branchRaw) ? branchRaw : 'main';
-    final name = (p['name'] ?? repo).toString().trim();
+    final String branchRaw = (p['branch'] ?? '').toString().trim();
+    final String branch =
+        RegExp(r'^[\w.\-]+$').hasMatch(branchRaw) ? branchRaw : 'main';
+    final String name = (p['name'] ?? repo).toString().trim();
     if (name.isEmpty) return _err('插件名称为空');
-    for (final fname in <String>['plugin.json', 'SKILL.md', 'README.md']) {
-      final url = 'https://raw.githubusercontent.com/$repo/$branch/$fname';
-      String content;
-      try {
-        final resp = await http.get(Uri.parse(url), headers: <String, String>{
-          if (UpdateService.githubToken.isNotEmpty)
-            'Authorization': 'Bearer ${UpdateService.githubToken}',
-        }).timeout(const Duration(seconds: 15));
-        if (resp.statusCode != 200) continue;
-        content = utf8.decode(resp.bodyBytes, allowMalformed: true);
-      } on Object {
-        continue;
-      }
-      var entry = <String, dynamic>{'content': content};
-      if (fname.endsWith('.json')) {
-        try {
-          final j = jsonDecode(content);
-          if (j is Map) {
-            entry = j.map((dynamic k, dynamic v) => MapEntry(k.toString(), v));
+    final String safe = name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    final Map<String, String> auth = <String, String>{
+      if (UpdateService.githubToken.isNotEmpty)
+        'Authorization': 'Bearer ${UpdateService.githubToken}',
+    };
+
+    // 一次列目录即可覆盖子目录技能；列不动时退回根目录常见文件。
+    List<String> paths = <String>[];
+    try {
+      final http.Response tree = await http
+          .get(
+            Uri.parse(
+                'https://api.github.com/repos/$repo/git/trees/$branch?recursive=1'),
+            headers: <String, String>{
+              'Accept': 'application/vnd.github+json',
+              'User-Agent': 'tangram-agent',
+              ...auth,
+            },
+          )
+          .timeout(const Duration(seconds: 8));
+      if (tree.statusCode == 200) {
+        final dynamic decoded = jsonDecode(utf8.decode(tree.bodyBytes));
+        final dynamic items = decoded is Map ? decoded['tree'] : null;
+        if (items is List) {
+          for (final dynamic e in items) {
+            if (e is! Map || e['type'] != 'blob') continue;
+            final String path = (e['path'] ?? '').toString();
+            final String lower = path.toLowerCase();
+            if (lower.endsWith('skill.md') ||
+                lower.endsWith('plugin.json') ||
+                lower == 'readme.md') {
+              paths.add(path);
+            }
           }
-        } on Object {
-          entry = <String, dynamic>{'content': content};
         }
       }
-      final safe = name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
-      final target = store.file('plugins/$safe.json');
-      await target.writeAsString(jsonEncode(<String, dynamic>{
-        ...entry,
-        'name': name,
-        'version': (entry['version'] ?? '').toString(),
-        'source': 'GitHub:$repo/$branch/$fname',
-        'repo': repo,
-        'installed_at': DateTime.now().toIso8601String(),
-      }), flush: true);
-      return _ok(<String, dynamic>{
-        'name': name,
-        'repo': repo,
-        'file': fname,
-        'path': target.path,
-        'installed': true,
-      });
+    } on Object {
+      // 目录 API 超时/限流：退回根目录候选，不阻塞安装。
     }
-    return _err('仓库 $repo 根目录未找到 plugin.json / SKILL.md / README.md'
-        '（raw.githubusercontent.com 均 404），未安装');
+    if (paths.isEmpty) {
+      paths = <String>['plugin.json', 'SKILL.md', 'skill.md', 'README.md'];
+    }
+    if (paths.length > 24) paths = paths.sublist(0, 24);
+
+    Future<Map<String, dynamic>> fetch(String path) async {
+      try {
+        final http.Response r = await http
+            .get(Uri.parse('https://raw.githubusercontent.com/$repo/$branch/$path'),
+                headers: auth)
+            .timeout(const Duration(seconds: 8));
+        return <String, dynamic>{
+          'path': path,
+          'status': r.statusCode,
+          'body': r.statusCode == 200
+              ? utf8.decode(r.bodyBytes, allowMalformed: true)
+              : '',
+        };
+      } on Object {
+        return <String, dynamic>{'path': path, 'status': -1, 'body': ''};
+      }
+    }
+
+    final List<Map<String, dynamic>> fetched =
+        await Future.wait(paths.map(fetch));
+    final Map<String, String> contents = <String, String>{};
+    int netErrors = 0;
+    int notFound = 0;
+    for (final Map<String, dynamic> f in fetched) {
+      final int status = f['status'] as int;
+      if (status == 200) {
+        contents[f['path'] as String] = f['body'] as String;
+      } else if (status == 404) {
+        notFound++;
+      } else {
+        netErrors++;
+      }
+    }
+    if (contents.isEmpty) {
+      return _err(netErrors > 0 && notFound == 0
+          ? '无法连接 raw.githubusercontent.com（$netErrors 个文件超时或网络错误），未安装'
+          : '仓库 $repo 未找到 SKILL.md / plugin.json / README.md'
+              '（$notFound 个 404），未安装');
+    }
+
+    int skills = 0;
+    String firstFile = '';
+    Map<String, dynamic> manifest = <String, dynamic>{};
+    for (final MapEntry<String, String> e in contents.entries) {
+      final String path = e.key;
+      final String body = e.value;
+      firstFile = firstFile.isEmpty ? path : firstFile;
+      if (path.toLowerCase().endsWith('plugin.json')) {
+        try {
+          final dynamic j = jsonDecode(body);
+          if (j is Map) {
+            manifest = j.map(
+                (dynamic k, dynamic v) => MapEntry(k.toString(), v));
+          }
+        } on Object {
+          manifest = <String, dynamic>{};
+        }
+        continue;
+      }
+      // 技能 .md 原样落盘（保留 frontmatter），文件名展平子目录避免重名。
+      final String flat =
+          path.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+      final File target = store.file('skills/${safe}_$flat.md');
+      if (!await target.parent.exists()) {
+        await target.parent.create(recursive: true);
+      }
+      await target.writeAsString(body, flush: true);
+      skills++;
+    }
+
+    final File record = store.file('plugins/$safe.json');
+    await record.writeAsString(jsonEncode(<String, dynamic>{
+      ...manifest,
+      'name': name,
+      'version': (manifest['version'] ?? '').toString(),
+      'source': 'GitHub:$repo/$branch',
+      'repo': repo,
+      'skills': skills,
+      'installed_at': DateTime.now().toIso8601String(),
+    }), flush: true);
+    return _ok(<String, dynamic>{
+      'name': name,
+      'repo': repo,
+      'file': skills > 0 ? '$skills 个技能文件' : firstFile,
+      'path': record.path,
+      'skills': skills,
+      'installed': true,
+    });
   }
 
   // ---- 技能 frontmatter 解析 / 启用状态（问题 #25）----

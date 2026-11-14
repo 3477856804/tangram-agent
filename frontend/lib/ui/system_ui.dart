@@ -16,5 +16,9 @@ void applyTgaSystemUi(Brightness brightness) {
     statusBarIconBrightness: dark ? Brightness.light : Brightness.dark,
     statusBarBrightness: dark ? Brightness.dark : Brightness.light,
     systemNavigationBarIconBrightness: dark ? Brightness.light : Brightness.dark,
+    // Android 10+ 默认给透明系统栏再叠一层对比度遮罩，正是上下黑带来源；
+    // 显式关闭后页面背景色才能真正铺满到状态栏 / 手势区底下。
+    systemStatusBarContrastEnforced: false,
+    systemNavigationBarContrastEnforced: false,
   ));
 }

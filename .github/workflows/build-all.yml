@@ -84,9 +84,9 @@ jobs:
                       major += 1; minor = 0
           else:
               major, minor, patch = 0, 0, 1
-          name = (f"{major}.{minor}.0" if patch == 0
-                  else f"{major}.0.{patch}" if minor == 0
-                  else f"{major}.{minor}.{patch:02d}")
+          # 与 scripts/build_frontend.sh 的进位格式一致，避免桌面/iOS
+          # 版本与 Release 标签在 x.y.z 上出现 0x 补零差异。
+          name = f"{major}.{minor}.{patch}"
           code = major * 10_000_000 + minor * 100_000 + patch * 1_000
           open("version.properties", "w").write(
               f"major={major}\nminor={minor}\npatch={patch}\nbuild=0\n")
@@ -98,7 +98,7 @@ jobs:
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       - name: Build APK (release)
-        run: bash scripts/build_frontend.sh android --extra "--release" --extra "--target-platform" --extra "android-arm64" --extra "--dart-define=TANGRAM_VERSION=$TGA_VER"
+        run: bash scripts/build_frontend.sh android --extra "--release" --extra "--target-platform" --extra "android-arm64"
         env:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
@@ -362,13 +362,10 @@ jobs:
       - name: 移除 hooks（iOS 不打包 Android 预编译库）
         run: |
           python3 -c "p='frontend/pubspec.yaml'; s=open(p,encoding='utf-8').read(); i=s.find(chr(10)+'hooks:'); open(p,'w',encoding='utf-8').write(s[:i] if i>0 else s); print('hooks removed:', i>0)"
-      - name: Build iOS (release, 未签名)
-        run: |
-          set -euo pipefail
-          cd frontend
-          [ -d ios ] || flutter create --platforms=ios --project-name tangram .
-          flutter pub get
-          flutter build ios --release --no-codesign
+      # 统一走 build_frontend.sh：与其余平台共用版本真源（同步 pubspec +
+      # 注入 TANGRAM_VERSION），避免 iOS PackageInfo 落后于 Release 标签。
+      - name: Build iOS (release, 未签名；统一版本真源)
+        run: bash scripts/build_frontend.sh ios --extra "--release" --extra "--no-codesign"
       - name: Package ipa
         run: |
           set -euo pipefail
@@ -411,36 +408,8 @@ jobs:
           token: ${{ secrets.RELEASE_PAT }}
           tag_name: v${{ env.TGA_VER }}
           name: TGA tangram-agent v${{ env.TGA_VER }}（CI 全平台）
-          body: |
-            由 GitHub Actions 自动构建（commit ${{ github.sha }}）。
-            最终产物恰好五个安装包：
-            - Windows：tangram-windows-x64.exe（单文件便携版，双击即运行免安装，已用安卓发布同一把 RSA 私钥 Authenticode 自签名）
-            - macOS：tangram-macos-arm64.dmg（ad-hoc 签名，首跑需右键打开放行）
-            - Linux：tangram-linux-x64.AppImage（单文件，chmod +x 后双击即运行）
-            - Android：tangram-android-arm64.apk（keystore 正式签名，OTA 覆盖安装）
-            - iOS：tangram-ios-arm64-unsigned.ipa（CI 无苹果开发者证书，需自行签名安装）
-            全部安装包完整性由下方 SHA256 清单 + 安卓发布同一把 RSA 私钥的签名保证（App 内 OTA 自动校验）。本仓库仅含安装包，不含源码。
+          # 更新公告只保留一句：commit、产物清单、SHA256、私钥签名与证书指纹
+          # 都是构建细节，不写进用户可见的公开 Release 正文。
+          body: 已修复已知问题
           files: dist/**/*
           fail_on_unmatched_files: false
-      - name: 用安卓发布私钥签名产物校验清单,写入 Release 正文（产物保持恰好 5 个文件）
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
-        run: |
-          set -euo pipefail
-          [ -n "$ANDROID_KEYSTORE_BASE64" ] || { echo "无密钥,跳过"; exit 0; }
-          sudo apt-get update -qq && sudo apt-get install -y -qq openjdk-21-jre-headless >/dev/null
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > /tmp/t.jks
-          keytool -importkeystore -srckeystore /tmp/t.jks -srcstorepass "$STORE_PASSWORD" -srckeypass "$KEY_PASSWORD" -srcalias tangram -destkeystore /tmp/t.p12 -deststoretype PKCS12 -deststorepass "$STORE_PASSWORD" -noprompt
-          openssl pkcs12 -in /tmp/t.p12 -passin pass:"$STORE_PASSWORD" -nokeys -clcerts -out /tmp/cert.pem
-          openssl pkcs12 -in /tmp/t.p12 -passin pass:"$STORE_PASSWORD" -nocerts -nodes -out /tmp/key.pem
-          (cd dist && find . -type f -exec sha256sum {} \; | sed 's|\./||' | sort) > /tmp/sums.txt
-          SIG=$(openssl dgst -sha256 -sign /tmp/key.pem -out /dev/stdout /tmp/sums.txt | base64 -w0)
-          FP=$(openssl x509 -in /tmp/cert.pem -noout -fingerprint -sha256 | cut -d= -f2)
-          RID=$(curl -s -H "Authorization: Bearer $RELEASE_PAT" "https://api.github.com/repos/3477856804/tangram-agent-releases/releases/tags/v${TGA_VER}" | jq -r .id)
-          BODY=$(curl -s -H "Authorization: Bearer $RELEASE_PAT" "https://api.github.com/repos/3477856804/tangram-agent-releases/releases/$RID" | jq -r .body)
-          { echo "$BODY"; echo; echo '## 产物校验（SHA256 + 安卓发布私钥 RSA-SHA256 签名）'; echo; echo '```'; cat /tmp/sums.txt; echo '```'; echo; echo "签名(base64): $SIG"; echo "证书指纹(SHA256): $FP"; } > /tmp/newbody.json
-          jq -Rs '{body:.}' /tmp/newbody.json > /tmp/payload.json
-          curl -s -X PATCH -H "Authorization: Bearer $RELEASE_PAT" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/3477856804/tangram-agent-releases/releases/$RID" -d @/tmp/payload.json -o /dev/null -w "body 更新: %{http_code}\n"

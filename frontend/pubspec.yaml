@@ -1,7 +1,7 @@
 name: tangram
 description: 檀阁瑞木 Tangram —— 个人专属 AI Agent 全平台运行时 + 3D 数字人桌宠。
 publish_to: 'none'
-version: 0.0.1+1
+version: 0.0.4+4
 
 environment:
   # llamadart（端侧 GGUF 真推理）要求 Dart >=3.10.7；Flutter 3.41+ 满足。

@@ -20,6 +20,9 @@ import '../../design/tga_design.dart';
 ///   提示可在训练设置选用，失败如实显示 job.error。
 /// - 本地已下载区：沿用 `model_store list` 的 local_files 真实扫描，
 ///   下载完成静默刷新后即出现。
+/// - 推荐位：按 CanIRun.ai 语义，用真实探测到的本机内存筛出能跑的 GGUF
+///   规格（参数量 / 量化 / 预估占用），点击填入搜索框走真实 ms_search；
+///   内存探测不到时由用户手动选档位，绝不编造硬件或仓库。
 /// - 网络失败 / 无结果：如实显示错误与重试按钮，不放假数据。
 class TgaStorePage extends StatefulWidget {
   const TgaStorePage({super.key});
@@ -37,6 +40,24 @@ class _TgaStorePageState extends State<TgaStorePage> {
   /// 空关键词时的默认搜索词：限定端侧可直接下载的 GGUF 仓库，首屏即真实内容。
   static const String _defaultQuery = 'GGUF';
 
+  /// 硬件档位 → 可运行规格（参数量 / 量化 / 预估占用 GB / 真实搜索词）。
+  /// 数值是选型估算，最终以 ms_files 返回的 GGUF 文件真实大小为准。
+  static const List<_Tier> _tiers = <_Tier>[
+    _Tier('超轻量', '0.5B~1.5B', 'Q4_K_M', 1.5, 'Qwen2.5 1.5B GGUF'),
+    _Tier('轻量', '3B~4B', 'Q4_K_M', 3.0, 'Qwen2.5 3B GGUF'),
+    _Tier('均衡', '7B~8B', 'Q4_K_M', 5.5, 'Qwen2.5 7B GGUF'),
+    _Tier('进阶', '14B', 'Q4_K_M', 10.0, 'Qwen2.5 14B GGUF'),
+    _Tier('高配', '32B', 'Q4_K_M', 20.0, 'Qwen2.5 32B GGUF'),
+  ];
+
+  /// 内存探测不到时的手动档位（GB）。
+  static const List<_MemChoice> _memChoices = <_MemChoice>[
+    _MemChoice('≤4 GB', 4),
+    _MemChoice('8 GB', 8),
+    _MemChoice('16 GB', 16),
+    _MemChoice('24 GB+', 32),
+  ];
+
   String _cat = '全部';
   bool _loading = false;
   String _note = ''; // 在线搜索来源说明（如实展示，不静默吞掉）
@@ -46,6 +67,12 @@ class _TgaStorePageState extends State<TgaStorePage> {
   List<_ModelItem> _online = <_ModelItem>[];
   List<_ModelItem> _local = <_ModelItem>[];
   Timer? _debounce;
+
+  /// 真实探测到的物理内存（GB）；null = 未读到，如实显示而非猜测。
+  double? _memoryGb;
+
+  /// 内存未知时用户手动选的档位（GB）；null = 用自动探测值。
+  double? _manualGb;
 
   /// 每个在线仓库的 GGUF 探测结果：path → .gguf 文件数（真实 repo/files API）。
   final Map<String, int> _ggufCount = <String, int>{};
@@ -57,6 +84,7 @@ class _TgaStorePageState extends State<TgaStorePage> {
   void initState() {
     super.initState();
     _search();
+    _loadHardware();
   }
 
   @override
@@ -70,6 +98,41 @@ class _TgaStorePageState extends State<TgaStorePage> {
   void _onQueryChanged(String _) {
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 700), () => _search());
+  }
+
+  /// 真实读取本机物理内存（model_store hardware）；读不到保持 null，不猜测。
+  Future<void> _loadHardware() async {
+    try {
+      final env = await context.read<BackendClient>().sendControl(
+          'model_store', <String, dynamic>{'action': 'hardware'});
+      final dynamic p = env.payload;
+      if (!mounted) return;
+      final dynamic v = p is Map ? p['memory_gb'] : null;
+      setState(() => _memoryGb = v is num ? v.toDouble() : null);
+    } on Object {
+      // 后端未就绪：保持「未知」，由用户手动选档位，绝不编造硬件。
+    }
+  }
+
+  double? get _effectiveGb => _manualGb ?? _memoryGb;
+
+  /// 约 60% 物理内存可用于模型，其余留给系统；按可跑规格从大到小取前 3。
+  List<_Tier> get _recommendations {
+    final double? gb = _effectiveGb;
+    if (gb == null || gb <= 0) return <_Tier>[];
+    final double budget = gb * 0.6;
+    final List<_Tier> can =
+        _tiers.where((_Tier t) => t.gb <= budget).toList()
+          ..sort((_Tier a, _Tier b) => b.gb.compareTo(a.gb));
+    return can.take(3).toList();
+  }
+
+  /// 推荐项点击：填入真实搜索词并发起 ms_search，结果全部来自魔搭真实 API。
+  void _applyRecommend(_Tier t) {
+    _searchCtrl.text = t.query;
+    setState(() => _cat = '全部');
+    _debounce?.cancel();
+    _search();
   }
 
   /// 拉取模型列表：在线 ms_search（真实魔搭模型仓库）→ 并行 ms_files 探测
@@ -250,6 +313,101 @@ class _TgaStorePageState extends State<TgaStorePage> {
     return '其他';
   }
 
+  /// 推荐位：按 CanIRun.ai 语义用真实内存筛规格，点击走真实搜索；
+  /// 内存读不到时给手动档位，绝不编造硬件或仓库。
+  Widget _recommendSection() {
+    final double? gb = _effectiveGb;
+    final List<_Tier> recs = _recommendations;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Tga.pagePad, 12, Tga.pagePad, 0),
+      child: TgaCard(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Icon(Icons.tune_rounded, size: 16, color: Tga.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                    child: Text('为你推荐 · 按本机可运行规格', style: Tga.body)),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              gb == null
+                  ? '未能读取本机内存，请选设备内存档位；推荐仍走魔搭真实搜索。'
+                  : '检测到约 ${gb.toStringAsFixed(1)} GB 内存，按约 60% 可用于模型估算；'
+                      '以 GGUF 文件实际大小为准。',
+              style: Tga.caption,
+            ),
+            if (_memoryGb == null) ...<Widget>[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: <Widget>[
+                  for (final _MemChoice c in _memChoices)
+                    GestureDetector(
+                      onTap: () => setState(() => _manualGb = c.gb),
+                      child: TgaTag(c.label,
+                          color: _manualGb == c.gb ? Tga.primary : Tga.textSub,
+                          filled: _manualGb == c.gb),
+                    ),
+                ],
+              ),
+            ],
+            if (recs.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 10),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: <Widget>[
+                    for (final _Tier t in recs)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: SizedBox(
+                          width: 158,
+                          child: TgaCard(
+                            padding: const EdgeInsets.all(10),
+                            onTap: () => _applyRecommend(t),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: <Widget>[
+                                Text('${t.label} · ${t.params}', style: Tga.sub),
+                                const SizedBox(height: 4),
+                                Text(
+                                    '${t.quant} · 约 ${t.gb.toStringAsFixed(1)} GB',
+                                    style: Tga.caption),
+                                const SizedBox(height: 6),
+                                Row(
+                                  children: <Widget>[
+                                    TgaTag('搜索', color: Tga.primary),
+                                    const Spacer(),
+                                    Icon(Icons.chevron_right_rounded,
+                                        size: 16, color: Tga.textDim),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ] else if (gb != null) ...<Widget>[
+              const SizedBox(height: 8),
+              Text('该内存档位没有合适的端侧 GGUF 规格，可自行搜索。',
+                  style: Tga.caption),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   /// 点击在线条目 → 底部弹层列出该仓库真实 GGUF 文件并可逐个下载。
   void _openFilesSheet(_ModelItem item) {
     final BackendClient backend = context.read<BackendClient>();
@@ -306,6 +464,7 @@ class _TgaStorePageState extends State<TgaStorePage> {
               style: Tga.caption,
             ),
           ),
+          _recommendSection(),
           Padding(
             padding: const EdgeInsets.fromLTRB(Tga.pagePad, 12, 0, 10),
             child: Row(
@@ -396,6 +555,23 @@ class _TgaStorePageState extends State<TgaStorePage> {
         padding: const EdgeInsets.fromLTRB(0, 2, 0, 8),
         child: Text(t, style: Tga.sub),
       );
+}
+
+/// 推荐规格档位：gb 是 Q4 量化的粗略占用估算（选型用，非下载文件大小），
+/// query 是发给真实 ms_search 的关键词，不写死任何仓库路径。
+class _Tier {
+  const _Tier(this.label, this.params, this.quant, this.gb, this.query);
+
+  final String label, params, quant, query;
+  final double gb;
+}
+
+/// 内存探测不到时的手动档位。
+class _MemChoice {
+  const _MemChoice(this.label, this.gb);
+
+  final String label;
+  final double gb;
 }
 
 /// 在线 / 本地模型条目（字段全部来自后端真实返回，缺失显示「—」）。
@@ -593,7 +769,8 @@ class _MsFilesSheet extends StatefulWidget {
   State<_MsFilesSheet> createState() => _MsFilesSheetState();
 }
 
-class _MsFilesSheetState extends State<_MsFilesSheet> {
+class _MsFilesSheetState extends State<_MsFilesSheet>
+    with WidgetsBindingObserver {
   // 当前仓库：初始为点开的条目；若其无 GGUF，可一键切换到搜到的量化版仓库。
   late String _repoPath;
   late String _repoName;
@@ -611,6 +788,7 @@ class _MsFilesSheetState extends State<_MsFilesSheet> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _repoPath = widget.item.id;
     _repoName = widget.item.name;
     _repoDesc = widget.item.desc;
@@ -619,8 +797,22 @@ class _MsFilesSheetState extends State<_MsFilesSheet> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
     super.dispose();
+  }
+
+  // 退后台停进度轮询、回前台恢复，避免不可见时持续打后端接口耗电。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (_jobs.values.any((_FileJob j) => j.status == 'running')) {
+        _ensureTimer();
+      }
+    } else {
+      _timer?.cancel();
+      _timer = null;
+    }
   }
 
   void _toast(String msg) {

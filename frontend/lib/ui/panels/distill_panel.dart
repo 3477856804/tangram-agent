@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'package:tangram/app_version.dart';
 import 'package:tangram/bridge/backend_client.dart';
 import 'package:tangram/flai/core/theme/tangram_palette.dart';
 import 'package:tangram/flai/widgets/tangram_surfaces.dart';
@@ -44,7 +45,7 @@ class _DistillPanelState extends State<DistillPanel> with AsyncPanelMixin {
   List<Map<String, dynamic>> _traceRows = <Map<String, dynamic>>[];
   int _traces = 0;
   String _equation = 'agent = model + harness';
-  String _version = '0.0.1';
+  String _version = kAppVersion;
   String _lastResult = '';
 
   @override

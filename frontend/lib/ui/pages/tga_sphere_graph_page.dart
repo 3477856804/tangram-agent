@@ -39,7 +39,7 @@ class TgaSphereGraphPage extends StatefulWidget {
 }
 
 class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   // ---- 视角 / 惯性 ----
   double _rotY = 0.5;
   double _rotX = -0.35;
@@ -48,6 +48,7 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
   double _velY = 0.0; // 角速度（rad/帧），松手后惯性衰减
   double _velX = 0.0;
   bool _dragging = false;
+  bool _appResumed = true; // App 是否在前台；退后台立即停帧。
 
   // ---- 选中节点（白描边 + 放大动画 + 显示其标签）----
   int _selected = -1;
@@ -75,29 +76,63 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
   @override
   void initState() {
     super.initState();
-    _ticker = createTicker(_onTick)..start();
+    WidgetsBinding.instance.addObserver(this);
+    // 帧只在有惯性 / 选中动画时驱动，空闲不常驻自转（发热首因）。
+    _ticker = createTicker(_onTick);
     _load();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _ticker.dispose();
     super.dispose();
   }
 
-  /// 每帧：触摸时暂停；非拖拽时应用惯性 + 缓慢自转，并推进选中放大动画。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final bool resumed = state == AppLifecycleState.resumed;
+    if (resumed != _appResumed) {
+      _appResumed = resumed;
+      _syncTicker();
+    }
+  }
+
+  bool get _needsFrames =>
+      _appResumed &&
+      !_dragging &&
+      _names.isNotEmpty &&
+      (_velY.abs() >= 0.00012 ||
+          _velX.abs() >= 0.00012 ||
+          _selT < 1.0);
+
+  /// 按当前是否需要动画启停 Ticker：退后台 / 惯性耗尽 / 动画结束即停帧。
+  void _syncTicker() {
+    if (!mounted) return;
+    if (_needsFrames) {
+      if (!_ticker.isActive) _ticker.start();
+    } else if (_ticker.isActive) {
+      _ticker.stop();
+    }
+  }
+
+  /// 每帧：推进惯性与选中放大，动画结束后自行停帧，避免整画布 60fps 空转。
   void _onTick(Duration dt) {
-    if (_dragging || _names.isEmpty) return;
+    if (!_needsFrames) {
+      _ticker.stop();
+      return;
+    }
     setState(() {
       if (_selT < 1.0) _selT = math.min(1.0, _selT + 0.07);
-      if (_velY.abs() < 0.00012 && _velX.abs() < 0.00012) {
-        // 惯性耗尽后仅保持极慢自转。
-        _rotY += 0.0015;
-      } else {
+      if (_velY.abs() >= 0.00012 || _velX.abs() >= 0.00012) {
         _rotY += _velY;
         _rotX = (_rotX + _velX).clamp(-1.4, 1.4).toDouble();
         _velY *= 0.94;
         _velX *= 0.94;
+      } else {
+        // 惯性耗尽：把余量归零，下一次判定即停帧。
+        _velY = 0;
+        _velX = 0;
       }
     });
   }
@@ -223,6 +258,7 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
         _selected = bi;
         _selT = 0.0;
       });
+      _syncTicker(); // 启动选中放大动画
       _showDetails(bi);
     } else if (_selected >= 0) {
       setState(() => _selected = -1);
@@ -373,6 +409,7 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
               onScaleStart: (ScaleStartDetails _) {
                 _lastScale = 1.0;
                 _dragging = true;
+                _syncTicker(); // 拖拽期间停帧，改由手势直接 setState
               },
               onScaleUpdate: (ScaleUpdateDetails d) {
                 setState(() {
@@ -395,6 +432,7 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
               },
               onScaleEnd: (ScaleEndDetails _) {
                 _dragging = false;
+                _syncTicker(); // 松手后启动惯性动画
               },
               child: Listener(
                 onPointerSignal: (PointerSignalEvent e) {

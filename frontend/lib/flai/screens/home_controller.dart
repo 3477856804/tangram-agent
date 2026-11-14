@@ -45,8 +45,10 @@ class HomeController extends ChangeNotifier {
   bool _isStreaming = false;
   bool get isStreaming => _isStreaming;
 
-  String _streamingText = '';
-  String _streamingThinking = '';
+  // StringBuffer 累积流式文本：Dart 字符串不可变，逐 token 用 += 拼接在
+  // 长回复上是 O(n²) 复制；写入改为均摊 O(1)，读取时才一次性 toString。
+  final StringBuffer _streamingText = StringBuffer();
+  final StringBuffer _streamingThinking = StringBuffer();
   final Map<String, ToolCall> _pendingToolCalls = {};
   List<Citation> _pendingCitations = [];
 
@@ -123,8 +125,8 @@ class HomeController extends ChangeNotifier {
   void newChat() {
     _activeConversationId = null;
     _messages = [];
-    _streamingText = '';
-    _streamingThinking = '';
+    _streamingText.clear();
+    _streamingThinking.clear();
     _streamingStatus.clear();
     notifyListeners();
   }
@@ -223,8 +225,8 @@ class HomeController extends ChangeNotifier {
     await storage.saveMessage(_activeConversationId!, userMsg);
 
     _isStreaming = true;
-    _streamingText = '';
-    _streamingThinking = '';
+    _streamingText.clear();
+    _streamingThinking.clear();
     _pendingToolCalls.clear();
     _pendingCitations = [];
     _streamingStatus.clear();
@@ -261,12 +263,12 @@ class HomeController extends ChangeNotifier {
       await for (final event in ai!.streamChat(request)) {
         switch (event) {
           case TextDelta(:final text):
-            _streamingText += text;
+            _streamingText.write(text);
             _updateStreamingMessage(assistantId);
           case ThinkingStart():
             break;
           case ThinkingDelta(:final text):
-            _streamingThinking += text;
+            _streamingThinking.write(text);
             _updateStreamingMessage(assistantId);
           case ThinkingEnd():
             break;
@@ -340,9 +342,9 @@ class HomeController extends ChangeNotifier {
     _messages = [
       ..._messages.sublist(0, _messages.length - 1),
       last.copyWith(
-        content: _streamingText,
+        content: _streamingText.toString(),
         thinkingContent: _streamingThinking.isNotEmpty
-            ? _streamingThinking
+            ? _streamingThinking.toString()
             : null,
         toolCalls: _pendingToolCalls.isNotEmpty
             ? _pendingToolCalls.values.toList()
@@ -361,9 +363,9 @@ class HomeController extends ChangeNotifier {
     if (last.id != id) return;
 
     final msg = last.copyWith(
-      content: _streamingText,
+      content: _streamingText.toString(),
       thinkingContent: _streamingThinking.isNotEmpty
-          ? _streamingThinking
+          ? _streamingThinking.toString()
           : null,
       toolCalls: _pendingToolCalls.isNotEmpty
           ? _pendingToolCalls.values.toList()
@@ -387,7 +389,8 @@ class HomeController extends ChangeNotifier {
     final last = _messages.last;
     if (last.id != id) return;
 
-    final errorText = _streamingText.isNotEmpty ? _streamingText : error;
+    final errorText =
+        _streamingText.isNotEmpty ? _streamingText.toString() : error;
 
     _messages = [
       ..._messages.sublist(0, _messages.length - 1),

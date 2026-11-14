@@ -18,6 +18,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'package:tangram/app_version.dart';
+
 class McpToolInfo {
   const McpToolInfo({
     required this.name,
@@ -64,7 +66,7 @@ class McpClient {
       'capabilities': <String, dynamic>{},
       'clientInfo': <String, dynamic>{
         'name': 'tangram-agent',
-        'version': '0.0.1',
+        'version': kAppVersion,
       },
     });
     final result = resp['result'];

@@ -1,9 +1,8 @@
 /// 全平台真实 OTA 更新服务（2026-11-14）。
 ///
 /// 流程：GET GitHub Releases API `releases/latest` → 语义化版本比较 →
-/// 按当前平台挑选对应安装包（Android apk / Windows zip / Linux tar.gz /
-/// macOS tar.gz）→ 分片并行下载 + SHA256SUMS 真实校验（产物均由安卓发布
-/// 私钥签名,校验不过拒绝安装）→
+/// 按当前平台挑选对应安装包 → 分片并行下载 + SHA256 digest 真实校验
+/// （哈希取自 asset 的 digest 字段，不写进公开公告；校验不过拒绝安装）→
 /// Android: MethodChannel('tangram/update').installApk 调起系统安装器覆盖安装;
 /// Windows/Linux/macOS: 落盘更新脚本(杀进程→解包覆盖安装目录→自动重启),
 /// 应用退出后脚本接管完成覆盖更新。
@@ -21,6 +20,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:tangram/app_version.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -39,6 +39,7 @@ class UpdateInfo {
     this.error,
     this.assetName,
     this.sumsUrl,
+    this.sha256,
   });
 
   /// 是否有可安装的新版本（latest 语义化比较 > current 且带本平台安装包资产）。
@@ -56,8 +57,12 @@ class UpdateInfo {
   /// 安装包资产文件名（校验 SHA256SUMS 时按名匹配）。
   final String? assetName;
 
-  /// Release 里 SHA256SUMS.txt 资产地址（CI 用安卓发布私钥同源的校验清单）。
+  /// Release 里 SHA256SUMS.txt 资产地址（兼容历史发布的校验清单）。
   final String? sumsUrl;
+
+  /// 本平台资产的 SHA256（GitHub asset 的 digest 字段）。
+  /// 完整性校验的真源，不再依赖把哈希写进公开更新公告。
+  final String? sha256;
 
   /// APK 真实字节大小（GitHub asset.size）；未知时为 null。
   final int? size;
@@ -75,6 +80,7 @@ class UpdateInfo {
         'apk_url': apkUrl,
         'asset_name': assetName,
         'size': size,
+        'sha256': sha256,
         'notes': notes,
         'error': error,
       };
@@ -119,9 +125,13 @@ class UpdateService {
 
   // ---- 版本真源 ----
 
-  /// 构建注入版本（--dart-define=TANGRAM_VERSION），仅作兜底。
-  static const String fallbackVersion =
-      String.fromEnvironment('TANGRAM_VERSION', defaultValue: '0.0.1');
+  /// 用户可见的更新公告恒为这一句：公开 Release 正文不写 commit、产物清单、
+  /// SHA256、签名或证书指纹，App 侧也不透出远端正文。
+  static const String releaseNotes = '已修复已知问题';
+
+  /// 构建注入版本（--dart-define=TANGRAM_VERSION），仅作兜底；
+  /// 与 UI / 能力协商 / MCP 握手共用 app_version.dart 的单一真源。
+  static const String fallbackVersion = kAppVersion;
 
   /// 真实安装包版本真源：读系统包信息（Android versionName / 桌面 pubspec），
   /// OTA 覆盖安装后立即反映新版本，不再依赖写死常量（问题 #7）。
@@ -188,6 +198,7 @@ class UpdateService {
       String? apkUrl;
       String? assetName;
       String? sumsUrl;
+      String? sha256;
       int? size;
       final dynamic assets = decoded['assets'];
       if (assets is List) {
@@ -205,17 +216,24 @@ class UpdateService {
             apkUrl = url;
             final dynamic s = a['size'];
             size = s is num ? s.toInt() : null;
+            // GitHub asset API 自带 integrity digest；校验改用它，
+            // SHA256 不再写进用户可见的公开更新公告。
+            final dynamic dg = a['digest'];
+            if (dg is String && dg.startsWith('sha256:')) {
+              sha256 = dg.substring(7).toLowerCase();
+            }
           }
         }
       }
-      final String notes = (decoded['body'] ?? '').toString().trim();
+      // 公告统一为固定一句，不读取远端 body：Release 正文属于构建细节，
+      // 不进入任何用户可见界面。
       final bool newer = compareVersions(latest, current) > 0;
       if (newer && apkUrl == null) {
         return UpdateInfo(
           available: false,
           current: current,
           latest: latest,
-          notes: notes.isEmpty ? null : notes,
+          notes: releaseNotes,
           error: '发现新版本 v$latest，但该 Release 未附带本平台的安装包资产',
         );
       }
@@ -226,8 +244,9 @@ class UpdateService {
         apkUrl: apkUrl,
         assetName: assetName,
         sumsUrl: sumsUrl,
+        sha256: sha256,
         size: size,
-        notes: notes.isEmpty ? null : notes,
+        notes: releaseNotes,
       );
     } on TimeoutException {
       return UpdateInfo(
@@ -313,10 +332,10 @@ class UpdateService {
       } else {
         await _downloadResilient(url, file, expected, onProgress);
       }
-      // 完整性校验：优先 Release 正文的产物校验清单（六文件方案,清单由
-      // 安卓发布私钥签名）,兼容历史 SHA256SUMS.txt 资产。校验不过删包拒装。
+      // 完整性校验：优先 GitHub asset 自带 digest，兼容历史 Release 正文
+      // 清单与 SHA256SUMS.txt 资产。校验不过删包拒装。
       String? verifyError = await _verifyAgainstExpected(
-          _sha256FromNotes(info.notes, info.assetName), file);
+          info.sha256 ?? _sha256FromNotes(info.notes, info.assetName), file);
       if (verifyError == null &&
           info.sumsUrl != null &&
           info.sumsUrl!.isNotEmpty) {
@@ -548,18 +567,26 @@ class UpdateService {
   }
 
   Future<Directory> _otaDir() async {
-    final Directory? ext = await getExternalStorageDirectory();
+    // getExternalStorageDirectory 仅 Android 实现，桌面调用会抛
+    // UnimplementedError；按平台守卫并降级到应用文档目录。
+    Directory? ext;
+    if (Platform.isAndroid) {
+      try {
+        ext = await getExternalStorageDirectory();
+      } on Object {
+        ext = null;
+      }
+    }
     final Directory base = ext ?? await getApplicationDocumentsDirectory();
     final Directory dir = Directory('${base.path}/ota');
     if (!dir.existsSync()) await dir.create(recursive: true);
     return dir;
   }
 
-  /// 韧性强下载（问题 #3：下载慢/30s 超时报错）：
-  ///  1. GitHub 加速镜像依次回退（直连不通自动换 gh-proxy/ghfast 等）；
-  ///  2. Range 分片 4 路并行下载，各分片断点续传（.part 文件记进度）；
-  ///  3. 超时按"分片空闲"计——只要还在收字节就不超时，
-  ///     单分片 30s 无进展才重试该分片，不再整包 30s 一刀切；
+  /// 韧性强下载：
+  ///  1. 镜像并行竞速，取首字节最快的通道，不再串行等慢镜像超时；
+  ///  2. Range 分片 8 路并行下载，各分片断点续传（.part 文件记进度）；
+  ///  3. 超时按"分片空闲"计——只要还在收字节就不超时；
   ///  4. 服务器不支持 Range（返回 200）时自动回退单流边下边落盘。
   static const List<String> _mirrors = <String>[
     '', // 原 URL 直连优先
@@ -571,21 +598,69 @@ class UpdateService {
   static Uri? _mirrorUrl(String original, String prefix) =>
       prefix.isEmpty ? Uri.parse(original) : Uri.parse('$prefix$original');
 
+  /// 并行探测所有通道，谁先给出首字节谁胜出。
+  /// 串行试错时一个不可达镜像要等满超时才换下一个，是 OTA 慢的主因。
+  Future<Uri?> _raceMirror(String url) async {
+    final Completer<Uri?> winner = Completer<Uri?>();
+    int pending = _mirrors.length;
+    for (final String prefix in _mirrors) {
+      final Uri? u = _mirrorUrl(url, prefix);
+      if (u == null) {
+        pending--;
+        continue;
+      }
+      unawaited(_probeMirror(u).then((bool ok) {
+        if (ok && !winner.isCompleted) winner.complete(u);
+        pending--;
+        if (pending == 0 && !winner.isCompleted) winner.complete(null);
+      }));
+    }
+    if (pending == 0 && !winner.isCompleted) winner.complete(null);
+    return winner.future;
+  }
+
+  Future<bool> _probeMirror(Uri u) async {
+    final HttpClient c = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 6);
+    try {
+      final HttpClientRequest req = await c.openUrl('GET', u);
+      req.headers.set('Range', 'bytes=0-0');
+      if (githubToken.isNotEmpty) {
+        req.headers.set('Authorization', 'Bearer $githubToken');
+      }
+      final HttpClientResponse resp =
+          await req.close().timeout(const Duration(seconds: 8));
+      await resp.drain<void>();
+      return resp.statusCode == HttpStatus.partialContent ||
+          resp.statusCode == HttpStatus.ok;
+    } on Object {
+      return false;
+    } finally {
+      c.close(force: true);
+    }
+  }
+
   Future<void> _downloadResilient(
     String url,
     File file,
     int? expectedSize,
     void Function(int received, int total)? onProgress,
   ) async {
+    // 竞速胜出者排在最前，其余通道仍作为兜底；去重避免重复下载。
+    final Uri? fast = await _raceMirror(url);
+    final List<Uri?> candidates = <Uri?>[
+      fast,
+      for (final String prefix in _mirrors) _mirrorUrl(url, prefix),
+    ];
+    final Set<String> seen = <String>{};
     Object? lastError;
-    for (final String prefix in _mirrors) {
-      final Uri? u = _mirrorUrl(url, prefix);
-      if (u == null) continue;
+    for (final Uri? u in candidates) {
+      if (u == null || !seen.add(u.toString())) continue;
       try {
         await _downloadChunked(u, file, expectedSize, onProgress);
-        return; // 成功即返回
+        return;
       } on Object catch (e) {
-        lastError = e; // 换下一个镜像重试
+        lastError = e;
       }
     }
     throw StateError('所有下载通道均失败（直连+3 个加速镜像）：$lastError');
@@ -598,9 +673,9 @@ class UpdateService {
     void Function(int received, int total)? onProgress,
   ) async {
     final HttpClient client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 15);
+      ..connectionTimeout = const Duration(seconds: 8);
     try {
-      // 探测总大小与 Range 支持。
+      // 探测总大小与 Range 支持。竞速已选出可用通道，这里无需长超时。
       int total = expectedSize ?? 0;
       bool rangeOk = true;
       if (total <= 0) {
@@ -609,7 +684,7 @@ class UpdateService {
           head.headers.set('Authorization', 'Bearer $githubToken');
         }
         final HttpClientResponse headResp =
-            await head.close().timeout(const Duration(seconds: 20));
+            await head.close().timeout(const Duration(seconds: 8));
         await headResp.drain<void>();
         total = headResp.contentLength;
       }
@@ -619,7 +694,7 @@ class UpdateService {
         final HttpClientRequest probe = await client.openUrl('GET', url);
         probe.headers.set('Range', 'bytes=0-0');
         final HttpClientResponse probeResp =
-            await probe.close().timeout(const Duration(seconds: 20));
+            await probe.close().timeout(const Duration(seconds: 8));
         rangeOk = probeResp.statusCode == HttpStatus.partialContent;
         await probeResp.drain<void>();
       }
@@ -627,8 +702,8 @@ class UpdateService {
         await _downloadSingle(client, url, file, onProgress);
         return;
       }
-      // 4 路分片并行 + 断点续传。
-      const int kChunks = 4;
+      // 8 路分片并行 + 断点续传：提高弱网下大包吞吐。
+      const int kChunks = 8;
       final int chunkSize = (total / kChunks).ceil();
       final Directory dir = file.parent;
       final String base = file.uri.pathSegments.last;

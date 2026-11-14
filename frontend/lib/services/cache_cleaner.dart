@@ -46,8 +46,22 @@ class CacheCleaner {
     } on Object {
       // 平台不支持则跳过。
     }
-    final Directory? ext = await getExternalStorageDirectory();
-    final Directory docs = await getApplicationDocumentsDirectory();
+    // getExternalStorageDirectory 仅 Android 实现，桌面会抛
+    // UnimplementedError；按平台守卫 + 异常降级，避免「清理缓存」在桌面报错。
+    Directory? ext;
+    if (Platform.isAndroid) {
+      try {
+        ext = await getExternalStorageDirectory();
+      } on Object {
+        ext = null;
+      }
+    }
+    Directory docs;
+    try {
+      docs = await getApplicationDocumentsDirectory();
+    } on Object {
+      docs = await getTemporaryDirectory();
+    }
     for (final Directory? base in <Directory?>[ext, docs]) {
       if (base == null) continue;
       roots.add(Directory('${base.path}/ota'));

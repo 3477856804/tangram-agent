@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../design/tga_design.dart';
 import '../services/persona_store.dart';
 import '../ui/i18n/tga_strings.dart';
 import '../ui/system_ui.dart';
@@ -162,9 +163,14 @@ class _FlaiAppState extends State<FlaiApp> {
           locale: locale,
           localizationsDelegates: TgaL10n.delegates,
           supportedLocales: TgaL10n.supported,
+          // Tga.* 是全局静态色板，原先只在 TgaPage.build 同步；聊天页等
+          // 不经 TgaPage 的路由会停留在浅色文字令牌，深色模式下 AI 正文
+          // 与背景近同色而不可见。根层每帧按当前 Theme 亮度统一同步。
           // 启动 3 秒后静默检查一次更新，发现新版才弹窗（问题 #8）。
-          builder: (BuildContext ctx, Widget? child) =>
-              TgaUpdateGate(child: child ?? const SizedBox.shrink()),
+          builder: (BuildContext ctx, Widget? child) {
+            Tga.syncFrom(ctx);
+            return TgaUpdateGate(child: child ?? const SizedBox.shrink());
+          },
         ),
       ),
     );

@@ -1,6 +1,7 @@
 
 import 'dart:async';
 
+import 'package:tangram/app_version.dart';
 import 'package:tangram/bridge/backend_client.dart';
 import 'package:tangram/bridge/bridge_protocol.dart';
 
@@ -40,7 +41,7 @@ class BackendCapabilities {
 
     return BackendCapabilities(
       name: (json['name'] ?? 'unknown').toString(),
-      version: (json['version'] ?? '0.0.1').toString(),
+      version: (json['version'] ?? kAppVersion).toString(),
       transport: (json['transport'] ?? 'unknown').toString(),
       controlDomains: listOf('control_domains'),
       hotPathTopics: listOf('hot_path_topics'),
@@ -116,7 +117,7 @@ class BridgeBackendPort implements BackendPort {
   // 后端 capability_negotiation 响应。
   BackendCapabilities _capabilities = const BackendCapabilities(
     name: 'unknown',
-    version: '0.0.1',
+    version: kAppVersion,
     transport: 'unknown',
   );
 
