@@ -19,9 +19,11 @@ import '../../design/tga_design.dart';
 ///   节点/连线/标签统一降透明度（约 0.32），正面加亮，立体感更强；
 /// - 节点径向渐变填充（中心亮边缘深）+ 同色外发光，按词哈希分五色、
 ///   度数越大节点越大；选中节点白描边 + 放大动画；
-/// - 连线为沿球面微弯的贝塞尔曲线，线宽随共现权重、透明度随深度渐隐；
-/// - 球壳淡经纬网格（8 段椭圆弧，alpha 0.06）+ 顶部高光弧；配色全部取
-///   Tga.* 主题令牌，深浅主题皆适配；
+/// - 连线为沿球面微弯的贝塞尔曲线，颜色为两端节点色的线性渐变，
+///   线宽随共现权重、透明度随深度渐隐；
+/// - 球壳淡经纬网格（8 段椭圆弧，alpha 0.06）+ 顶部高光弧；视图背景叠
+///   一层主色径向渐变辉光（深色下呈"星团"氛围）；配色全部取 Tga.*
+///   主题令牌，深浅主题皆适配；
 /// - 拖拽旋转带惯性衰减，空闲时缓慢自转（0.0015 rad/帧），触摸暂停；
 ///   双指/滚轮缩放。
 /// - 标签：较近（z>0.25）或度数 Top8 常显，带半透明圆角底衬并贪心避让
@@ -299,42 +301,25 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
                     ? _emptyState()
                     : _sphereView(),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
-            child: _error.isNotEmpty
-                ? TgaCard(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                    child: Row(
-                      children: <Widget>[
-                        Icon(Icons.error_outline_rounded,
-                            size: 16, color: Tga.red),
-                        const SizedBox(width: 10),
-                        Expanded(
-                            child: Text('图谱数据获取失败：$_error',
-                                style: Tga.sub)),
-                        TgaButton(label: '重试', onTap: _load, filled: false),
-                      ],
-                    ),
-                  )
-                : TgaCard(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                    child: Row(
-                      children: <Widget>[
-                        Icon(Icons.info_outline_rounded,
-                            size: 16, color: Tga.textSub),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            '节点与连线来自真实对话记录的词共现统计（rpc graph_query）',
-                            style: Tga.sub,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-          ),
+          if (_error.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+              child: TgaCard(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                child: Row(
+                  children: <Widget>[
+                    Icon(Icons.error_outline_rounded,
+                        size: 16, color: Tga.red),
+                    const SizedBox(width: 10),
+                    Expanded(
+                        child: Text('图谱数据获取失败：$_error',
+                            style: Tga.sub)),
+                    TgaButton(label: '重试', onTap: _load, filled: false),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -365,8 +350,22 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
       builder: (BuildContext context, BoxConstraints constraints) {
         final double size =
             math.min(constraints.maxWidth, constraints.maxHeight) * 0.86;
-        return Center(
-          child: SizedBox(
+        return Container(
+          // 背景径向渐变：以球心为光源的一层主色辉光，深色下呈"星团"氛围。
+          decoration: BoxDecoration(
+            color: Tga.bg,
+            gradient: RadialGradient(
+              center: const Alignment(0, -0.06),
+              radius: 1.15,
+              colors: <Color>[
+                Tga.primary.withValues(alpha: 0.08),
+                Tga.primary.withValues(alpha: 0.02),
+                Tga.primary.withValues(alpha: 0.0),
+              ],
+            ),
+          ),
+          child: Center(
+            child: SizedBox(
             width: size,
             height: size,
             child: GestureDetector(
@@ -429,7 +428,8 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
               ),
             ),
           ),
-        );
+        ),
+      );
       },
     );
   }
@@ -530,8 +530,12 @@ class _SpherePainter extends CustomPainter {
     _drawLabels(canvas, size, nodeRs);
   }
 
-  /// 连线：沿球面微弯的贝塞尔曲线；线宽随共现权重，透明度随深度平方渐隐，
-  /// 背面（平均 z<0）统一降透明度，只有近端连线明显。
+  /// 节点取色：按词哈希在主题七彩语义色轮上稳定取一色。
+  static Color nodeColorFor(String name) =>
+      Tga.sphereNodes[name.hashCode.abs() % Tga.sphereNodes.length];
+
+  /// 连线：沿球面微弯的贝塞尔曲线；颜色为两端节点色的线性渐变，
+  /// 线宽随共现权重，透明度随深度平方渐隐，背面（平均 z<0）统一降透明度。
   void _drawEdges(Canvas canvas, Offset center, double radius, List<_V3> rot) {
     final List<_Edge> sortedEdges = List<_Edge>.from(edges)
       ..sort((_Edge a, _Edge b) {
@@ -540,7 +544,6 @@ class _SpherePainter extends CustomPainter {
         return za.compareTo(zb);
       });
     final double invMax = 1.0 / math.max(1, maxWeight);
-    final Color edgeColor = Color.lerp(Tga.primary, Tga.cyan, 0.45)!;
     for (final _Edge e in sortedEdges) {
       final double avgZ = (zs[e.a] + zs[e.b]) / 2;
       final double depth = (avgZ + 1) / 2; // 0 远 → 1 近
@@ -564,14 +567,34 @@ class _SpherePainter extends CustomPainter {
       final Path path = Path()
         ..moveTo(screen[e.a].dx, screen[e.a].dy)
         ..quadraticBezierTo(c.dx, c.dy, screen[e.b].dx, screen[e.b].dy);
-      canvas.drawPath(
-        path,
-        Paint()
-          ..color = edgeColor.withValues(alpha: alpha)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.45 + w * 1.7 + depth * 0.6
-          ..strokeCap = StrokeCap.round,
-      );
+
+      // 渐变轴对齐两端节点屏幕位置；两点几乎重合时退化为纯色。
+      final Offset pa = screen[e.a], pb = screen[e.b];
+      final Color ca = nodeColorFor(names[e.a]);
+      final Color cb = nodeColorFor(names[e.b]);
+      final double gx = (pa.dx - pb.dx).abs() < 1.0
+          ? 0.0
+          : (pa.dx <= pb.dx ? -1.0 : 1.0);
+      final double gy = (pa.dy - pb.dy).abs() < 1.0
+          ? 0.0
+          : (pa.dy <= pb.dy ? -1.0 : 1.0);
+      final Paint p = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.45 + w * 1.7 + depth * 0.6
+        ..strokeCap = StrokeCap.round;
+      if (gx == 0 && gy == 0) {
+        p.color = Color.lerp(ca, cb, 0.5)!.withValues(alpha: alpha);
+      } else {
+        p.shader = LinearGradient(
+          begin: Alignment(gx, gy),
+          end: Alignment(-gx, -gy),
+          colors: <Color>[
+            ca.withValues(alpha: alpha),
+            cb.withValues(alpha: alpha),
+          ],
+        ).createShader(Rect.fromPoints(pa, pb));
+      }
+      canvas.drawPath(path, p);
     }
   }
 
@@ -592,14 +615,13 @@ class _SpherePainter extends CustomPainter {
       if (isSel) nodeR *= 1 + 0.45 * _easeOutBack(selT);
       nodeRs[i] = nodeR;
 
-      final Color base =
-          Tga.sphereNodes[names[i].hashCode.abs() % Tga.sphereNodes.length];
+      final Color base = nodeColorFor(names[i]);
 
-      // 外发光：同色大圆（alpha 峰值 0.15），近端更强。
+      // 外发光：同色大圆（alpha 峰值 0.22），近端更强，呈"恒星"光晕。
       final double glowA =
-          (back ? 0.15 * 0.35 : 0.15 * (0.45 + depth * 0.55)) +
+          (back ? 0.22 * 0.35 : 0.22 * (0.45 + depth * 0.55)) +
               (isSel ? 0.10 : 0.0);
-      final double haloR = nodeR * 3.0;
+      final double haloR = nodeR * 3.2;
       canvas.drawCircle(
         screen[i],
         haloR,

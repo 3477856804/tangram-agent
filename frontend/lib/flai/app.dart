@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import '../services/persona_store.dart';
 import '../ui/i18n/tga_strings.dart';
+import '../ui/system_ui.dart';
 import '../ui/update_gate.dart';
 import 'core/secure_auth_storage.dart';
 import 'core/theme/flai_theme.dart';
@@ -115,6 +116,12 @@ class _FlaiAppState extends State<FlaiApp> {
     };
     final Brightness platform = MediaQuery.platformBrightnessOf(context);
     final theme = _resolveTheme(mode, platform);
+    // 主题监听集中处：系统栏图标亮度随深浅主题切换（问题 #10，
+    // edgeToEdge + 透明栏在 main.dart 启动时已设置）。
+    applyTgaSystemUi((mode == ThemeMode.dark ||
+            (mode == ThemeMode.system && platform == Brightness.dark))
+        ? Brightness.dark
+        : Brightness.light);
     // 语言真实生效：简体中文/繁體中文/English → MaterialApp locale，
     // 系统组件（时间/日期选择器等弹窗）与内置词典同步切换。
     final Locale locale = TgaL10n.localeOf(

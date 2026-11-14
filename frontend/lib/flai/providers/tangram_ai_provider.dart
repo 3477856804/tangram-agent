@@ -173,6 +173,32 @@ class TangramAiProvider implements AiProvider {
       // 当前内嵌后端把完整回复放在 control payload，下面用打字机分片呈现，
       // 内容 100% 来自后端真实计算，不做任何编造。
       subscription = client.onHotPath.listen((BridgeEnvelope env) {
+        if (env.topic == 'chat_status') {
+          final dynamic p = env.payload;
+          if (p is Map) {
+            final String phase = (p['phase'] ?? '').toString();
+            if (phase.isEmpty) return;
+            final List<Map<String, String>> results = <Map<String, String>>[];
+            final dynamic rawResults = p['results'];
+            if (rawResults is List) {
+              for (final dynamic r in rawResults) {
+                if (r is Map) {
+                  results.add(<String, String>{
+                    'title': (r['title'] ?? '').toString(),
+                    'url': (r['url'] ?? '').toString(),
+                  });
+                }
+              }
+            }
+            emit(SearchStatus(
+              phase: phase,
+              query: p['query']?.toString(),
+              results: results,
+              points: p['points']?.toString(),
+            ));
+          }
+          return;
+        }
         if (env.topic != 'stream_token') return;
         final String token = _textOf(env.payload);
         if (token.isEmpty) return;

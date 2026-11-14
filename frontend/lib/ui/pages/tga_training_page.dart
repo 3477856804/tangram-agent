@@ -11,6 +11,7 @@ import '../../bridge/bridge_protocol.dart';
 import '../../design/tga_design.dart';
 import '../../services/model_registry.dart';
 import '../../services/persona_store.dart';
+import 'tga_models_page.dart';
 import 'tga_traces_page.dart';
 
 /// 训练设置（真实化改造）：
@@ -20,6 +21,8 @@ import 'tga_traces_page.dart';
 /// - 隔离策略：进入页面拉真实 quota（CPU/内存/超时/超限动作），可编辑并
 ///   通过 rpc sandbox_policy_set 真实落盘，成功/失败 toast 如实显示。
 /// - 工作轨迹：真实条数（distill traces），点击进入 TgaTracesPage。
+/// - 知识蒸馏：distill run 对真实对话语料做统计蒸馏，产出知识蒸馏包
+///   （显示文件名与问答对/话题簇统计），可跳转蒸馏模型管理页查看。
 /// - 模型厂商：扩充预设列表，选择厂商自动填默认 Base URL 与示例教师模型；
 ///   「自定义」允许手填。
 /// - 测试 API 连通：用当前表单值向 {api_base}/chat/completions 发真实小请求；
@@ -143,12 +146,19 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
   int _traceCount = 0;
   bool _testing = false;
 
+  // ---- 知识蒸馏（真实对话语料 → 知识蒸馏包）----
+  int _dialogTurns = 0; // distill describe 的 harness.dialog_turns
+  bool _distillRunning = false;
+  Map<String, dynamic>? _distillResult; // run 成功后的 data（name/pairs/topics）
+  String? _distillError; // run 失败时的真实错误，如实展示
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadPolicy();
       _loadTraces();
+      _loadCorpus();
     });
   }
 
@@ -227,6 +237,79 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
     } on Object {
       if (mounted) setState(() => _traceCount = 0);
     }
+  }
+
+  /// 拉真实对话语料条数（distill describe → harness.dialog_turns）。
+  Future<void> _loadCorpus() async {
+    try {
+      final BackendClient backend = context.read<BackendClient>();
+      final BridgeEnvelope env = await backend.sendControl(
+        'distill',
+        <String, dynamic>{'action': 'describe'},
+      );
+      final dynamic payload = env.payload;
+      final dynamic data = payload is Map ? payload['data'] : null;
+      final dynamic harness = data is Map ? data['harness'] : null;
+      final dynamic turns = harness is Map ? harness['dialog_turns'] : null;
+      if (mounted) {
+        setState(() => _dialogTurns = turns is num ? turns.toInt() : 0);
+      }
+    } on Object {
+      if (mounted) setState(() => _dialogTurns = 0);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 知识蒸馏：distill run 对真实对话语料做统计蒸馏，产出知识蒸馏包
+  // ------------------------------------------------------------------
+
+  Future<void> _runDistill() async {
+    setState(() {
+      _distillRunning = true;
+      _distillError = null;
+    });
+    try {
+      final BackendClient backend = context.read<BackendClient>();
+      final BridgeEnvelope env = await backend.sendControl(
+        'distill',
+        <String, dynamic>{'action': 'run'},
+      );
+      final dynamic payload = env.payload;
+      if (!mounted) return;
+      if (payload is Map &&
+          payload['ok'] == true &&
+          payload['data'] is Map) {
+        final Map<dynamic, dynamic> d = payload['data'] as Map;
+        setState(() {
+          _distillResult = d.map(
+              (dynamic k, dynamic v) => MapEntry(k.toString(), v));
+          _distillError = null;
+          _distillRunning = false;
+        });
+      } else {
+        setState(() {
+          _distillResult = null;
+          _distillError = payload is Map
+              ? (payload['error'] ?? '后端返回了非预期结构').toString()
+              : '后端返回了非预期结构';
+          _distillRunning = false;
+        });
+      }
+    } on Object catch (e) {
+      if (mounted) {
+        setState(() {
+          _distillResult = null;
+          _distillError = '蒸馏失败：$e';
+          _distillRunning = false;
+        });
+      }
+    }
+  }
+
+  void _openModelsPage() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (BuildContext _) => const TgaModelsPage(),
+    ));
   }
 
   // ------------------------------------------------------------------
@@ -657,6 +740,9 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
               ),
             ),
           ),
+          const SizedBox(height: 10),
+          // ---------- 知识蒸馏（真实对话语料 → 知识蒸馏包）----------
+          _distillCard(),
 
           // ---------- 模型配置 ----------
           const _GroupTitle('模型配置'),
@@ -693,6 +779,107 @@ class _TgaTrainingPageState extends State<TgaTrainingPage> {
                       onDelete: () => _deleteCloud(e),
                     ),
                   )),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 知识蒸馏卡：真实语料计数 → distill run → 产出知识蒸馏包（可跳转管理页）。
+  Widget _distillCard() {
+    final Map<String, dynamic>? result = _distillResult;
+    return TgaCard(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                    color: Tga.iconPurpleBg,
+                    borderRadius: BorderRadius.circular(11)),
+                child: Icon(Icons.psychology_outlined,
+                    size: 20, color: Tga.iconPurple),
+              ),
+              const SizedBox(width: 12),
+              Text('知识蒸馏', style: Tga.h2),
+              const Spacer(),
+              TgaTag('对话语料 $_dialogTurns 轮', color: Tga.purple),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            '对话语料 $_dialogTurns 轮 · 工作轨迹 $_traceCount 条。'
+            '从你的真实对话里统计蒸馏出知识包：话题簇、高频问答对、偏好摘要。'
+            '产物是知识蒸馏包（JSON 知识条目），不是神经网络权重。',
+            style: Tga.sub,
+          ),
+          const SizedBox(height: 12),
+          _FormButton(
+            label: _distillRunning ? '蒸馏中…' : '开始蒸馏',
+            icon: Icons.science_outlined,
+            filled: true,
+            busy: _distillRunning,
+            onTap: _distillRunning ? null : _runDistill,
+          ),
+          if (result != null) ...<Widget>[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Tga.iconGreenBg,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                children: <Widget>[
+                  Icon(Icons.check_circle_rounded,
+                      size: 18, color: Tga.iconGreen),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Text('${result['name'] ?? '知识蒸馏包'}',
+                            style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: Tga.text),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis),
+                        const SizedBox(height: 2),
+                        Text(
+                          '问答对 ${result['pairs'] ?? 0} 条 · '
+                          '话题簇 ${result['topics'] ?? 0} 个 · '
+                          '蒸馏语料 ${result['corpus_turns'] ?? 0} 轮',
+                          style: Tga.caption,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TgaButton(
+                label: '去蒸馏模型管理查看',
+                icon: Icons.arrow_forward_rounded,
+                filled: false,
+                onTap: _openModelsPage,
+              ),
+            ),
+          ],
+          if (_distillError != null) ...<Widget>[
+            const SizedBox(height: 10),
+            Text(
+              _distillError!,
+              style: TextStyle(fontSize: 12.5, color: Tga.red, height: 1.5),
+            ),
           ],
         ],
       ),

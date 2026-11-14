@@ -20,19 +20,14 @@ import 'services/task_scheduler.dart';
 import 'ui/controllers/audio_stream.dart';
 import 'ui/controllers/chat_stream.dart';
 import 'ui/controllers/image_controller.dart';
+import 'ui/system_ui.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // 浅色外观：状态栏深色图标 + 蓝灰底导航栏（与页面底色一致）。
-  SystemChrome.setSystemUIOverlayStyle(
-    const SystemUiOverlayStyle(
-      statusBarColor: Color(0x00000000),
-      statusBarIconBrightness: Brightness.dark,
-      statusBarBrightness: Brightness.light,
-      systemNavigationBarColor: Color(0xFFF7F9F7),
-      systemNavigationBarIconBrightness: Brightness.dark,
-    ),
-  );
+  // 问题 #10：edgeToEdge 让页面铺到系统栏底下，消除上下黑带；
+  // 系统栏背景全透明，图标亮度随主题（后续在主题监听处同步切换）。
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  applyTgaSystemUi(Brightness.light);
   runApp(const TangramServices());
 }
 

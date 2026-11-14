@@ -50,6 +50,12 @@ class HomeController extends ChangeNotifier {
   final Map<String, ToolCall> _pendingToolCalls = {};
   List<Citation> _pendingCitations = [];
 
+  /// 后端 chat_status 真实过程事件（联网检索 / 深度推理），仅在本次流式
+  /// 回复期间展示于流式气泡上方；发送新消息或新会话时清空。
+  final List<SearchStatus> _streamingStatus = [];
+  List<SearchStatus> get streamingStatus =>
+      List<SearchStatus>.unmodifiable(_streamingStatus);
+
   String? _serverChatId;
 
   UserProfile? _cachedProfile;
@@ -119,6 +125,7 @@ class HomeController extends ChangeNotifier {
     _messages = [];
     _streamingText = '';
     _streamingThinking = '';
+    _streamingStatus.clear();
     notifyListeners();
   }
 
@@ -220,6 +227,7 @@ class HomeController extends ChangeNotifier {
     _streamingThinking = '';
     _pendingToolCalls.clear();
     _pendingCitations = [];
+    _streamingStatus.clear();
 
     final assistantId = '${DateTime.now().millisecondsSinceEpoch}-assistant';
     _messages = [
@@ -293,6 +301,11 @@ class HomeController extends ChangeNotifier {
           case CitationsReceived(:final citations):
             _pendingCitations.addAll(citations);
             _updateStreamingMessage(assistantId);
+          case SearchStatus(:final phase):
+            // 同一阶段只保留最新一条（searching → search_done 自然覆盖）。
+            _streamingStatus.removeWhere((SearchStatus s) => s.phase == phase);
+            _streamingStatus.add(event);
+            notifyListeners();
           default:
             break;
         }

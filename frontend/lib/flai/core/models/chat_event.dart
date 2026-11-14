@@ -71,3 +71,20 @@ class CitationsReceived extends ChatEvent {
   final List<Citation> citations;
   const CitationsReceived(this.citations);
 }
+
+/// 后端 chat_status 热点事件的真实过程状态（问题 #4b）：
+///   * phase=searching    → 联网检索开始，query 为检索词；
+///   * phase=search_done  → 检索完成，results 为真实抓取到的来源（≤5 条）；
+///   * phase=thinking_done→ 深度思考规划完成，points 为推理要点前 200 字。
+class SearchStatus extends ChatEvent {
+  final String phase;
+  final String? query;
+  final List<Map<String, String>> results;
+  final String? points;
+  const SearchStatus({
+    required this.phase,
+    this.query,
+    this.results = const <Map<String, String>>[],
+    this.points,
+  });
+}

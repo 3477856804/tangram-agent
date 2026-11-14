@@ -2,7 +2,8 @@
 ///
 /// 安卓本身只有 toybox（/system/bin/sh），没有 apt/pkg。本模块用真实链路
 /// 补上用户态 Linux：
-///   1. 用 DownloadManager（Range 分片 + 断点续传）真实下载：
+///   1. 用 http.Client().send 流式真实下载（逐 chunk 累计接收字节并回调
+///      上报实时进度，total 取响应 Content-Length，未知传 -1）：
 ///      - proot 静态 tracer（UserLAnd 官方 arm64 二进制，内嵌 loader，
 ///        DT_NEEDED 仅 libtalloc.so.2 + bionic libc/libdl）；
 ///      - libtalloc.so.2（配套动态库）；
@@ -31,6 +32,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:http/http.dart' as http;
 import 'package:tangram/harness/downloader.dart';
 import 'package:tangram/harness/store.dart';
 
@@ -48,8 +50,6 @@ class ProotSandbox {
   static const int kTallocBytes = 75648;
   static const int kRootfsBytes = 3947906;
 
-  static const String _prootName = 'tga-debian-proot';
-  static const String _tallocName = 'tga-debian-libtalloc.so.2';
   static const String _rootfsName = 'tga-debian-alpine-rootfs.tar.gz';
 
   final HarnessStore store;
@@ -66,41 +66,69 @@ class ProotSandbox {
       prootBin.existsSync() &&
       File('${rootfsDir.path}/bin/busybox').existsSync();
 
-  // ---- 安装状态机（真实字节进度，失败如实记录）----
+  // ---- 安装状态机（流式真实字节进度，失败如实记录）----
 
   String _step = 'idle'; // idle | downloading | extracting | ready | failed
   String? _error;
   bool _installing = false;
-  final List<String> _jobIds = <String>[];
+
+  // 流式下载的真实进度（全部来自收到的字节，不编造）。
+  int _received = 0; // 三个文件累计已接收字节
+  int _total = 0; // 累计总字节；-1 = 当前有文件 Content-Length 未知
+  int _doneBytes = 0; // 已完成文件累计字节
+  double _speed = 0; // 最近窗口的平均字节速率（bytes/s）
+  String _lastPhase = 'download'; // download | extract
+  int _lastReceived = 0;
+  int _lastTotal = 0;
+  double _lastSpeed = 0;
+  DateTime _winAt = DateTime.now();
+  int _winBytes = 0;
+  DateTime _emitAt = DateTime.now();
+  void Function(String phase, int received, int total, double bytesPerSec)?
+      _onProgress;
 
   Map<String, dynamic> status() {
-    int done = 0;
-    int total = kProotBytes + kTallocBytes + kRootfsBytes;
-    for (final id in _jobIds) {
-      final job = downloads.job(id);
-      if (job == null) continue;
-      final p = downloads.progress(job);
-      done += (p['downloaded'] as int?) ?? 0;
-    }
+    final int total =
+        _total > 0 ? _total : kProotBytes + kTallocBytes + kRootfsBytes;
     return <String, dynamic>{
       'ok': true,
       'installed': installed,
       'step': installed && _step == 'idle' ? 'ready' : _step,
       'installing': _installing,
-      'downloaded': done,
+      'downloaded': _received,
       'total': total,
-      'percent': total > 0 ? (done * 100 / total).clamp(0, 100).toDouble() : 0.0,
+      'percent': total > 0 ? (_received * 100 / total).clamp(0, 100).toDouble() : 0.0,
+      'speed': _speed,
       if (_error != null) 'error': _error,
       'rootfs': installed ? rootfsDir.path : '',
       'proot': prootBin.existsSync() ? prootBin.path : '',
       'note': 'Alpine 3.20 minirootfs + proot（UserLAnd arm64 官方二进制），'
-          '共约 4.2 MB；apk/python/pip 在用户态真实执行。',
+          '共约 4.2 MB；流式下载按真实接收字节上报进度，'
+          'apk/python/pip 在用户态真实执行。',
     };
   }
 
-  /// 启动真实安装：三个文件全部走 DownloadManager（断点续传），
-  /// 完成后解包 rootfs、恢复权限、写 resolv.conf 并落 READY 标记。
-  Future<Map<String, dynamic>> install() async {
+  /// 最近一次进度快照（proot_progress 事件载荷）；未在安装中返回 null。
+  /// 由 debian_status 分发时同步补发，保证 hot-path 事件必达 UI。
+  Map<String, dynamic>? progressSnapshot() {
+    if (!_installing) return null;
+    return <String, dynamic>{
+      'phase': _lastPhase,
+      'received': _lastReceived,
+      'total': _lastTotal,
+      'speed': _lastSpeed,
+    };
+  }
+
+  /// 启动真实安装：三个文件依次流式下载（http.Client().send 收
+  /// ByteStream，逐 chunk 累计 received 并经 onProgress 上报
+  /// phase/received/total/bytesPerSec，total 未知传 -1）；
+  /// 完成后解包 rootfs（phase='extract'）、恢复权限、写 resolv.conf
+  /// 并落 READY 标记。方法本身立即返回，不阻塞 control 请求。
+  Future<Map<String, dynamic>> install({
+    void Function(String phase, int received, int total, double bytesPerSec)?
+        onProgress,
+  }) async {
     if (installed) {
       return <String, dynamic>{'ok': true, 'note': 'Debian 用户态已就绪。'};
     }
@@ -110,70 +138,42 @@ class ProotSandbox {
     _installing = true;
     _error = null;
     _step = 'downloading';
-    _jobIds.clear();
-    try {
-      if (!extDir.existsSync()) extDir.createSync(recursive: true);
-      for (final entry in <List<String>>[
-        <String>[kProotUrl, _prootName],
-        <String>[kTallocUrl, _tallocName],
-        <String>[kRootfsUrl, _rootfsName],
-      ]) {
-        final job = await downloads.start(entry[0], filename: entry[1]);
-        _jobIds.add(job.id);
-      }
-    } on Object catch (e) {
-      _installing = false;
-      _step = 'failed';
-      _error = '启动下载失败：$e';
-      return <String, dynamic>{'ok': false, 'error': _error};
-    }
-    unawaited(_finishInstall());
+    _onProgress = onProgress;
+    _received = 0;
+    _doneBytes = 0;
+    _total = kProotBytes + kTallocBytes + kRootfsBytes;
+    _speed = 0;
+    _lastPhase = 'download';
+    _lastReceived = 0;
+    _lastTotal = _total;
+    _lastSpeed = 0;
+    _winAt = DateTime.now();
+    _winBytes = 0;
+    _emitAt = DateTime.now();
+    unawaited(_runInstall());
     return <String, dynamic>{
       'ok': true,
-      'job_ids': _jobIds,
-      'note': '真实下载中：进度按落盘字节统计（Range 分片 + 断点续传）。',
+      'note': '真实流式下载中：进度按接收字节实时上报（约 4.2 MB）。',
     };
   }
 
-  Future<void> _finishInstall() async {
+  Future<void> _runInstall() async {
+    final http.Client client = http.Client();
     try {
-      // 轮询三个真实 job 直至全部 done/failed（上限 30 分钟）。
-      final deadline = DateTime.now().add(const Duration(minutes: 30));
-      while (DateTime.now().isBefore(deadline)) {
-        var running = false;
-        for (final id in _jobIds) {
-          final job = downloads.job(id);
-          if (job == null) continue;
-          if (job.status == 'running') {
-            running = true;
-          } else if (job.status != 'done') {
-            throw StateError('下载 ${job.url.split('/').last} '
-                '失败（${job.status}）：${job.error ?? '未知原因'}');
-          }
-        }
-        if (!running) break;
-        await Future<void>.delayed(const Duration(milliseconds: 400));
-      }
-      _step = 'extracting';
-      final dir = store.sub('downloads');
-      final prootSrc = File('${dir.path}/$_prootName');
-      final tallocSrc = File('${dir.path}/$_tallocName');
-      final rootfsSrc = File('${dir.path}/$_rootfsName');
-      for (final f in <File>[prootSrc, tallocSrc, rootfsSrc]) {
-        if (!f.existsSync()) {
-          throw StateError('下载产物缺失：${f.path}');
-        }
-      }
-      if (prootBin.existsSync()) prootBin.deleteSync();
-      if (tallocLib.existsSync()) tallocLib.deleteSync();
-      await prootSrc.rename(prootBin.path);
-      await tallocSrc.rename(tallocLib.path);
+      if (!extDir.existsSync()) extDir.createSync(recursive: true);
+      final File rootfsTmp = File('${extDir.path}/$_rootfsName');
+      await _downloadStream(client, kProotUrl, prootBin, kTallocBytes + kRootfsBytes);
+      await _downloadStream(client, kTallocUrl, tallocLib, kRootfsBytes);
+      await _downloadStream(client, kRootfsUrl, rootfsTmp, 0);
 
-      final bytes = await rootfsSrc.readAsBytes();
+      _step = 'extracting';
+      _report('extract', _received, _total, 0);
+
+      final bytes = await rootfsTmp.readAsBytes();
       final Uint8List tar =
           Uint8List.fromList(GZipCodec().decode(bytes));
       _extractTar(tar, rootfsDir);
-      await rootfsSrc.delete();
+      await rootfsTmp.delete();
 
       // 目录里已备好 proot 需要的最小骨架。
       for (final d in <String>['tmp', 'root', 'proc', 'sys', 'dev']) {
@@ -203,8 +203,82 @@ class ProotSandbox {
       _step = 'failed';
       _error = '$e';
     } finally {
+      client.close();
       _installing = false;
     }
+  }
+
+  /// 单文件流式下载：resp.contentLength 为该文件 total（未知传 -1）；
+  /// 逐 chunk 累计 _received，按 ~250ms 节流上报 download 进度。
+  /// [remainingKnown] 为后续文件已核实的字节常量之和，用于推算全局 total。
+  Future<void> _downloadStream(
+    http.Client client,
+    String url,
+    File target,
+    int remainingKnown,
+  ) async {
+    final request = http.Request('GET', Uri.parse(url))
+      ..followRedirects = true;
+    final http.StreamedResponse resp;
+    try {
+      resp = await client
+          .send(request)
+          .timeout(const Duration(seconds: 30));
+    } on Object catch (e) {
+      throw StateError('下载 ${Uri.parse(url).pathSegments.last} '
+          '连接失败：$e');
+    }
+    if (resp.statusCode != 200) {
+      await resp.stream.drain<void>();
+      throw StateError('下载 ${Uri.parse(url).pathSegments.last} '
+          '失败：HTTP ${resp.statusCode}');
+    }
+    final int fileTotal = resp.contentLength > 0 ? resp.contentLength : -1;
+    if (target.existsSync()) target.deleteSync();
+    final IOSink sink = target.openWrite();
+    final int base = _received;
+    try {
+      // 30s 无字节即判停滞，如实失败（不谎报进度）。
+      await for (final List<int> chunk in
+          resp.stream.timeout(const Duration(seconds: 30))) {
+        sink.add(chunk);
+        _received += chunk.length;
+        _tickDownloadProgress(fileTotal, remainingKnown);
+      }
+    } finally {
+      await sink.close();
+    }
+    final int written = target.lengthSync();
+    _received = base + written; // 以真实落盘字节为准
+    _doneBytes += written;
+    if (fileTotal > 0 && written != fileTotal) {
+      throw StateError('${target.path} 不完整：$written / $fileTotal 字节');
+    }
+    _report('download', _received,
+        fileTotal > 0 ? _doneBytes + remainingKnown : -1, _speed);
+  }
+
+  void _tickDownloadProgress(int fileTotal, int remainingKnown) {
+    final DateTime now = DateTime.now();
+    if (now.difference(_emitAt).inMilliseconds < 250) return;
+    final double dt = now.difference(_winAt).inMicroseconds / 1e6;
+    if (dt > 0.05) {
+      _speed = (_received - _winBytes) / dt;
+      _winAt = now;
+      _winBytes = _received;
+    }
+    _emitAt = now;
+    _report('download', _received,
+        fileTotal > 0 ? _doneBytes + fileTotal + remainingKnown : -1, _speed);
+  }
+
+  void _report(String phase, int received, int total, double speed) {
+    _lastPhase = phase;
+    _lastReceived = received;
+    _lastTotal = total;
+    _lastSpeed = speed;
+    if (total > 0) _total = total;
+    _onProgress?.call(phase, received, total, speed);
   }
 
   Future<String?> _chmodAll() async {

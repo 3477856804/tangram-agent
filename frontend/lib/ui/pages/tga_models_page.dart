@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -13,16 +14,20 @@ import '../../design/tga_design.dart';
 import 'tga_training_page.dart';
 
 /// 蒸馏模型管理（真实化改造）：
-/// - 列表数据源为 distill {action:'models'} 的 own_models
-///   （真实蒸馏/本地 GGUF 权重，含 name/path/size），空态引导去训练设置。
+/// - 列表数据源为 distill {action:'models'} 的 own_models，含两类真实产物：
+///   * kind='gguf'：本地 GGUF 权重；
+///   * kind='knowledge'：训练设置页「开始蒸馏」(distill run) 产出的
+///     知识蒸馏包 JSON（统计抽取，非神经网络权重，卡片如实标注）。
+///   均含 name/path/size，空态引导去训练设置开始蒸馏。
 /// - 每张卡：名称/大小/路径；操作：
-///   * 详情：distill describe 的 harness 统计 + 文件大小/修改时间（真实 stat）
-///   * 重命名：distill rename_model 真实改文件名
-///   * 删除：distill delete_model 真实删权重文件
+///   * 详情：知识包读自身 JSON 展示真实统计（话题簇/问答对/语料/token）；
+///     GGUF 走 distill describe 的 harness 统计 + 文件大小/修改时间（真实 stat）
+///   * 重命名：distill rename_model 真实改文件名（知识包补 .json）
+///   * 删除：distill delete_model 真实删文件
 ///   * 切割：compute isolate 里按字节把权重切成 N 卷（默认 4），
-///     产出 xxx.gguf.part1..N；原文件保留，可另行删除
+///     产出 xxx.gguf.part1..N；原文件保留，可另行删除（仅权重）
 ///   * 跑分：内置 5 道中文评测题经 chat RPC 对该权重真实推理，
-///     按关键词命中率计分；推理失败如实显示失败，不编造分数。
+///     按关键词命中率计分；推理失败如实显示失败，不编造分数（仅权重）。
 class TgaModelsPage extends StatefulWidget {
   const TgaModelsPage({super.key});
 
@@ -120,10 +125,111 @@ class _TgaModelsPageState extends State<TgaModelsPage> {
   }
 
   // ------------------------------------------------------------------
-  // 详情：distill describe（harness 真实统计）+ 文件大小/修改时间
+  // 详情：知识包读自身 JSON 真实统计；GGUF 走 distill describe + 磁盘 stat
   // ------------------------------------------------------------------
 
+  static String _sizeTextAuto(int bytes) {
+    if (bytes <= 0) return '大小未知';
+    if (bytes >= 1073741824) {
+      return '${(bytes / 1073741824).toStringAsFixed(2)} GB';
+    }
+    if (bytes >= 1048576) {
+      return '${(bytes / 1048576).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  }
+
+  /// 知识蒸馏包详情：解析包内真实统计（话题数/问答对数/语料统计/偏好摘要）。
+  Future<void> _showKnowledgeDetail(Map<String, dynamic> m) async {
+    final String path = _pathOf(m);
+    String packText = '知识包文件不存在或不可解析：$path';
+    final File f = File(path);
+    if (f.existsSync()) {
+      try {
+        final dynamic decoded = jsonDecode(f.readAsStringSync());
+        if (decoded is Map) {
+          final List<String> lines = <String>[];
+          final dynamic stats = decoded['corpus_stats'];
+          final dynamic topics = decoded['topics'];
+          final dynamic prefs = decoded['preferences'];
+          lines.add('类型：知识蒸馏包（统计抽取，非神经网络权重）');
+          lines.add('生成时间：${decoded['generated_at'] ?? '未知'}');
+          lines.add('话题簇：${topics is List ? topics.length : 0} 个');
+          if (topics is List && topics.isNotEmpty) {
+            final String top = topics
+                .take(5)
+                .map((dynamic t) {
+                  final Map<String, dynamic> tm = t is Map
+                      ? t.map((dynamic k, dynamic v) =>
+                          MapEntry(k.toString(), v))
+                      : <String, dynamic>{};
+                  return '${tm['keyword'] ?? '?'}(${tm['count'] ?? 0})';
+                })
+                .join(' · ');
+            lines.add('高频话题：$top');
+          }
+          lines.add(
+              '问答对：${stats is Map ? stats['qa_pairs_extracted'] ?? 0 : 0} 条');
+          if (stats is Map) {
+            lines.add('蒸馏语料：${stats['paired_turns'] ?? 0} 轮 '
+                '（对话记录 ${stats['turn_records'] ?? 0} 条）');
+            lines.add('token 估算：${stats['estimated_tokens'] ?? 0}');
+            final dynamic range = stats['time_range'];
+            if (range is Map &&
+                (range['from'] ?? '').toString().isNotEmpty) {
+              lines.add('语料时间：${range['from']} ~ ${range['to']}');
+            }
+          }
+          if (prefs is Map && (prefs['summary'] ?? '').toString().isNotEmpty) {
+            lines.add('偏好摘要：${prefs['summary']}');
+          }
+          packText = lines.join('\n');
+        }
+      } on Object catch (e) {
+        packText = '知识包解析失败：$e';
+      }
+    }
+    String fileText = '文件不存在：$path';
+    if (f.existsSync()) {
+      final FileStat stat = f.statSync();
+      fileText = '路径：$path\n'
+          '大小：${_sizeTextAuto(stat.size)}（${stat.size} 字节）\n'
+          '修改时间：${stat.modified.toString()}';
+    }
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        title: Text(_nameOf(m)),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text('知识蒸馏包统计', style: Tga.h2),
+              const SizedBox(height: 6),
+              Text(packText, style: Tga.sub),
+              const SizedBox(height: 14),
+              Text('文件', style: Tga.h2),
+              const SizedBox(height: 6),
+              Text(fileText, style: Tga.sub),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _showDetail(Map<String, dynamic> m) async {
+    if ((m['kind'] ?? '').toString() == 'knowledge') {
+      await _showKnowledgeDetail(m);
+      return;
+    }
     final String path = _pathOf(m);
     String harnessText = 'harness 统计读取失败';
     try {
@@ -198,16 +304,18 @@ class _TgaModelsPageState extends State<TgaModelsPage> {
 
   Future<void> _renameModel(Map<String, dynamic> m) async {
     final String oldName = _nameOf(m);
-    final TextEditingController ctrl =
-        TextEditingController(text: oldName.replaceAll(RegExp(r'\.gguf$'), ''));
+    final bool isKnowledge = (m['kind'] ?? '').toString() == 'knowledge';
+    final String ext = isKnowledge ? '.json' : '.gguf';
+    final TextEditingController ctrl = TextEditingController(
+        text: oldName.replaceAll(RegExp(r'\.(gguf|json)$'), ''));
     final String? input = await showDialog<String>(
       context: context,
       builder: (BuildContext ctx) => AlertDialog(
-        title: const Text('重命名模型'),
+        title: Text(isKnowledge ? '重命名知识蒸馏包' : '重命名模型'),
         content: TextField(
           controller: ctrl,
           autofocus: true,
-          decoration: const InputDecoration(labelText: '新名称（自动补 .gguf）'),
+          decoration: InputDecoration(labelText: '新名称（自动补 $ext）'),
         ),
         actions: <Widget>[
           TextButton(
@@ -225,7 +333,8 @@ class _TgaModelsPageState extends State<TgaModelsPage> {
     final String? next = input;
     ctrl.dispose();
     if (next == null || !mounted) return;
-    final String newName = next.toLowerCase().endsWith('.gguf') ? next : '$next.gguf';
+    final String newName =
+        next.toLowerCase().endsWith(ext) ? next : '$next$ext';
     try {
       final BackendClient backend = context.read<BackendClient>();
       final BridgeEnvelope env = await backend.sendControl(
@@ -255,11 +364,14 @@ class _TgaModelsPageState extends State<TgaModelsPage> {
 
   Future<void> _deleteModel(Map<String, dynamic> m) async {
     final String name = _nameOf(m);
+    final bool isKnowledge = (m['kind'] ?? '').toString() == 'knowledge';
     final bool? yes = await showDialog<bool>(
       context: context,
       builder: (BuildContext ctx) => AlertDialog(
-        title: const Text('删除蒸馏模型'),
-        content: Text('确认删除「$name」？权重文件将从磁盘真实移除。'),
+        title: Text(isKnowledge ? '删除知识蒸馏包' : '删除蒸馏模型'),
+        content: Text(isKnowledge
+            ? '确认删除「$name」？知识蒸馏包文件将从磁盘真实移除。'
+            : '确认删除「$name」？权重文件将从磁盘真实移除。'),
         actions: <Widget>[
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(false),
@@ -527,9 +639,10 @@ class _TgaModelsPageState extends State<TgaModelsPage> {
                                   size: 34, color: Tga.textDim),
                               const SizedBox(height: 10),
                               Text(
-                                '还没有蒸馏/本地模型。\n'
-                                '去「训练设置」下载基底 GGUF 权重或配置 API 教师，'
-                                '蒸馏产出后会出现在这里。',
+                                '还没有蒸馏产物。\n'
+                                '去「训练设置」点「开始蒸馏」，从你的真实对话里'
+                                '蒸馏出知识包；也可下载基底 GGUF 权重。\n'
+                                '产出后会出现在这里。',
                                 style: Tga.sub,
                                 textAlign: TextAlign.center,
                               ),
@@ -556,7 +669,9 @@ class _TgaModelsPageState extends State<TgaModelsPage> {
                         Padding(
                           padding: const EdgeInsets.only(left: 4, bottom: 10),
                           child: Text(
-                            '${_ownModels.length} 个蒸馏/本地权重 · '
+                            '${_ownModels.length} 个蒸馏/本地模型'
+                            '（知识蒸馏包 ${_ownModels.where((Map<String, dynamic> m) => (m['kind'] ?? '').toString() == 'knowledge').length} 个 · '
+                            '权重 ${_ownModels.where((Map<String, dynamic> m) => (m['kind'] ?? '').toString() != 'knowledge').length} 个） · '
                             '共 ${_sizeText(_ownModels.fold<int>(
                                 0, (int s, Map<String, dynamic> m) => s + _sizeOf(m)))}',
                             style: Tga.sub,
@@ -635,6 +750,7 @@ class _DistillModelCard extends StatelessWidget {
     final String name = (model['name'] ?? '').toString();
     final String path = (model['path'] ?? '').toString();
     final int size = model['size'] is num ? (model['size'] as num).toInt() : 0;
+    final bool isKnowledge = (model['kind'] ?? '').toString() == 'knowledge';
     return TgaCard(
       padding: const EdgeInsets.all(14),
       child: Column(
@@ -646,10 +762,14 @@ class _DistillModelCard extends StatelessWidget {
                 width: 40,
                 height: 40,
                 decoration: BoxDecoration(
-                    color: Tga.iconPurpleBg,
+                    color: isKnowledge ? Tga.iconGoldBg : Tga.iconPurpleBg,
                     borderRadius: BorderRadius.circular(11)),
-                child: Icon(Icons.psychology_outlined,
-                    size: 20, color: Tga.iconPurple),
+                child: Icon(
+                    isKnowledge
+                        ? Icons.auto_stories_outlined
+                        : Icons.psychology_outlined,
+                    size: 20,
+                    color: isKnowledge ? Tga.iconGold : Tga.iconPurple),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -657,10 +777,20 @@ class _DistillModelCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
-                    Text(name,
-                        style: Tga.body,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
+                    Row(
+                      children: <Widget>[
+                        Flexible(
+                          child: Text(name,
+                              style: Tga.body,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis),
+                        ),
+                        if (isKnowledge) ...<Widget>[
+                          const SizedBox(width: 8),
+                          TgaTag('知识蒸馏包', color: Tga.purple),
+                        ],
+                      ],
+                    ),
                     const SizedBox(height: 3),
                     Text(path,
                         style: Tga.caption,
@@ -670,11 +800,8 @@ class _DistillModelCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              TgaTag(size > 0
-                  ? (size >= 1073741824
-                      ? '${(size / 1073741824).toStringAsFixed(2)} GB'
-                      : '${(size / 1048576).toStringAsFixed(1)} MB')
-                  : '大小未知', color: Tga.textSub),
+              TgaTag(_TgaModelsPageState._sizeTextAuto(size),
+                  color: Tga.textSub),
             ],
           ),
           const SizedBox(height: 12),
@@ -686,14 +813,17 @@ class _DistillModelCard extends StatelessWidget {
                   icon: Icons.info_outline_rounded),
               TgaButton(label: '重命名', filled: false, onTap: onRename,
                   icon: Icons.drive_file_rename_outline_rounded),
-              TgaButton(label: '切割', filled: false, onTap: onSplit,
-                  icon: Icons.content_cut_rounded),
-              TgaButton(
-                label: benching ? '跑分中…' : '跑分',
-                filled: false,
-                onTap: benching ? () {} : onBench,
-                icon: Icons.speed_outlined,
-              ),
+              // 知识蒸馏包是 JSON 知识条目，不是权重：切割/跑分不适用。
+              if (!isKnowledge) ...<Widget>[
+                TgaButton(label: '切割', filled: false, onTap: onSplit,
+                    icon: Icons.content_cut_rounded),
+                TgaButton(
+                  label: benching ? '跑分中…' : '跑分',
+                  filled: false,
+                  onTap: benching ? () {} : onBench,
+                  icon: Icons.speed_outlined,
+                ),
+              ],
               TgaButton(label: '删除', color: Tga.red, onTap: onDelete,
                   icon: Icons.delete_outline_rounded),
             ],

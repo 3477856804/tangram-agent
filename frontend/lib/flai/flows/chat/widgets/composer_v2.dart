@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../../design/dsh_tokens.dart';
 import '../../../../design/dsh_widgets.dart';
@@ -71,12 +72,51 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   // 设计稿 2026-11-12 主页底部功能开关：深度思考 / 智能搜索。
   // 模型切换的唯一入口是底部「TGA 引擎」下拉（_openModelSelector），
   // 旧输入行里的模型 chip 是重复入口，已删除。
+  // 开关状态经 SharedPreferences 真实落盘（问题 #4a）：initState 恢复、
+  // 切换即保存；发送 / 新会话 / 重启都不会重置。
   bool _deepThink = false;
   bool _smartSearch = false;
+
+  static const String _kPrefDeepThink = 'tga.deepThink';
+  static const String _kPrefSmartSearch = 'tga.smartSearch';
+
+  Future<void> _restoreToggles() async {
+    try {
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      setState(() {
+        _deepThink = prefs.getBool(_kPrefDeepThink) ?? _deepThink;
+        _smartSearch = prefs.getBool(_kPrefSmartSearch) ?? _smartSearch;
+      });
+    } on Object {
+      // 持久化不可用（如无平台实现）时降级为内存态，不阻塞输入区。
+    }
+  }
+
+  Future<void> _persistToggles() async {
+    try {
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kPrefDeepThink, _deepThink);
+      await prefs.setBool(_kPrefSmartSearch, _smartSearch);
+    } on Object {
+      // 保存失败静默：开关仍在本会话内生效，绝不弹假错误。
+    }
+  }
+
+  void _toggleDeepThink() {
+    setState(() => _deepThink = !_deepThink);
+    _persistToggles();
+  }
+
+  void _toggleSmartSearch() {
+    setState(() => _smartSearch = !_smartSearch);
+    _persistToggles();
+  }
 
   @override
   void initState() {
     super.initState();
+    _restoreToggles();
     _textController.addListener(() {
       final bool has = _textController.text.trim().isNotEmpty;
       if (has != _hasText) {
@@ -222,6 +262,8 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
     // 真实落盘选中项（重启可恢复），并同步旧的 PersonaStore 字段。
     await registry.setSelected(model.id);
     if (!mounted) return;
+    // 底部模型按钮文案立即联动新选中项（问题 #2a）。
+    setState(() {});
     persona.setSelectedModelId(model.id);
     widget.onModelChanged?.call(model);
   }
@@ -430,14 +472,14 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
           label: context.t('home.deepThink', zh: '深度思考'),
           icon: Icons.psychology_outlined,
           active: _deepThink,
-          onTap: () => setState(() => _deepThink = !_deepThink),
+          onTap: _toggleDeepThink,
         ),
         const SizedBox(width: DshSpace.x8),
         pill(
           label: context.t('home.smartSearch', zh: '智能搜索'),
           icon: Icons.travel_explore_outlined,
           active: _smartSearch,
-          onTap: () => setState(() => _smartSearch = !_smartSearch),
+          onTap: _toggleSmartSearch,
         ),
         const Spacer(),
         _buildModelEntry(c),
@@ -445,9 +487,22 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
     );
   }
 
+  /// 底部模型按钮的标签（问题 #2a）：不再硬编码「TGA 引擎」，
+  /// 联动 ModelRegistry 当前 selected 的真实名称；超过 8 个字符截断加省略号。
+  /// 仅选中内置兜底引擎（builtin 且本地）时才显示「TGA 引擎」；
+  /// 内置免费云端模型（如文心 ERNIE 5.5 Flash）显示其真实名称。
+  String _modelEntryLabel(ModelEntry selected) {
+    if (selected.builtin && selected.kind == ModelKind.local) {
+      return context.t('home.engine', zh: 'TGA 引擎');
+    }
+    final String name = selected.name;
+    return name.length > 8 ? '${name.substring(0, 8)}…' : name;
+  }
+
   /// 模型切换的唯一入口：「TGA 引擎」下拉，点击打开真实模型选择器。
   /// 旧输入行里的模型 chip 已删除，避免两处入口互相打架。
   Widget _buildModelEntry(DshPalette c) {
+    final ModelEntry selected = context.watch<ModelRegistry>().selected;
     return Semantics(
       button: true,
       label: context.t('home.switchModelSemantics',
@@ -466,7 +521,7 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
                 Text(
-                  context.t('home.engine', zh: 'TGA 引擎'),
+                  _modelEntryLabel(selected),
                   style: DshType.xs13m.copyWith(color: c.labelPrimary),
                 ),
                 const SizedBox(width: DshSpace.x2),

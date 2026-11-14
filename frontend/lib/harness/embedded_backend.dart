@@ -473,6 +473,11 @@ class EmbeddedBackend {
     String effectiveSystem = system;
     String modeSuffix = '';
     if (wantSearch) {
+      // 问题 #4b：检索过程经 chat_status 热点事件真实上报，前端在
+      // 流式气泡上方渲染状态条；results 解析自真实抓取摘要，绝不编造。
+      _emit('chat_status', <String, dynamic>{
+        'phase': 'searching', 'query': text,
+      });
       final results = await _webSearch(text);
       if (results.isEmpty) {
         effectiveSystem += '\n\n【联网检索】本次检索失败或无结果，'
@@ -480,6 +485,10 @@ class EmbeddedBackend {
       } else {
         effectiveSystem += '\n\n【联网检索结果（真实抓取，需在回答中注明来源）】\n$results';
       }
+      _emit('chat_status', <String, dynamic>{
+        'phase': 'search_done',
+        'results': _searchResultPairs(results),
+      });
       modeSuffix += '+web-search';
     }
     if (wantThinking) modeSuffix += '+deep-think';
@@ -488,6 +497,15 @@ class EmbeddedBackend {
     final skillPool = await _enabledSkillPool();
     if (skillPool.isNotEmpty) {
       effectiveSystem += '\n\n【本地技能池（已启用，可在回答中运用）】\n$skillPool';
+    }
+    // 问题 #8：工作区真实可见——枚举 sandbox/ 根目录（与 device_file 同源）
+    // 的真实文件树注入 system，让模型如实回答「工作区里有什么/能不能看见
+    // 文件」。枚举失败静默跳过，不报错也不编造。
+    final workspaceTree = _workspaceTreeBlock();
+    if (workspaceTree.isNotEmpty) {
+      effectiveSystem += '\n\n【用户工作区文件（真实枚举）】\n$workspaceTree\n'
+          '当用户问"工作区里有什么/能不能看见文件"时，依据此列表如实回答；'
+          '可用 read_file 工具读取其中文件。';
     }
     String reply;
     String engine;
@@ -511,6 +529,13 @@ class EmbeddedBackend {
         if (plan.ok) {
           query = '参考以下推理要点，深入分析后作答：\n${plan.content}\n\n'
               '问题：$text';
+          // 问题 #4b：两遍推理的规划阶段真实完成，上报要点前 200 字。
+          _emit('chat_status', <String, dynamic>{
+            'phase': 'thinking_done',
+            'points': plan.content.length > 200
+                ? plan.content.substring(0, 200)
+                : plan.content,
+          });
         }
       }
       final remote = await _remoteChat(
@@ -581,6 +606,74 @@ class EmbeddedBackend {
       'turn_id': turnId,
       'session_id': session,
     };
+  }
+
+  /// 把 _webSearch 返回的文本摘要解析成真实 [{title,url}] 对（最多 5 条），
+  /// 供 chat_status 的 search_done 事件可视化检索过程。解析自已抓到的
+  /// 真实内容；解析不到 URL 的条目直接舍弃，绝不凭空补一条来源。
+  List<Map<String, String>> _searchResultPairs(String digest) {
+    final out = <Map<String, String>>[];
+    String pendingTitle = '';
+    final titleRe = RegExp(r'^\d+\.\s+(.+)$');
+    final urlRe = RegExp(r'^来源[：:]\s*(https?://\S+)$');
+    for (final raw in digest.split('\n')) {
+      final line = raw.trim();
+      final tm = titleRe.firstMatch(line);
+      if (tm != null) {
+        pendingTitle = tm.group(1)!.trim();
+        continue;
+      }
+      final um = urlRe.firstMatch(line);
+      if (um != null && pendingTitle.isNotEmpty) {
+        out.add(<String, String>{'title': pendingTitle, 'url': um.group(1)!});
+        pendingTitle = '';
+        if (out.length >= 5) break;
+      }
+    }
+    return out;
+  }
+
+  /// 问题 #8：深度受限（≤2 层）真实枚举工作区（sandbox/ 根目录，与
+  /// device_file 沙箱同源）。总条数 ≤80，跳过隐藏目录/文件与 .db/.sqlite；
+  /// 文件行为「相对路径 (大小)」，目录行为「相对路径/」。任何异常返回
+  /// 空串，由调用方静默跳过，不报错也不编造。
+  String _workspaceTreeBlock() {
+    try {
+      final root = store.sub('sandbox');
+      if (!root.existsSync()) return '';
+      final lines = <String>[];
+      String baseName(FileSystemEntity e) =>
+          e.uri.pathSegments.where((s) => s.isNotEmpty).last;
+      String size(int bytes) {
+        if (bytes < 1024) return '$bytes B';
+        if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+        return '${(bytes / 1048576).toStringAsFixed(1)} MB';
+      }
+      void walk(Directory dir, String prefix, int depth) {
+        if (depth > 2 || lines.length >= 80) return;
+        final entries = dir.listSync(followLinks: false)
+          ..sort((FileSystemEntity a, FileSystemEntity b) =>
+              baseName(a).compareTo(baseName(b)));
+        for (final e in entries) {
+          if (lines.length >= 80) return;
+          final name = baseName(e);
+          if (name.startsWith('.')) continue;
+          final rel = prefix.isEmpty ? name : '$prefix/$name';
+          if (e is Directory) {
+            lines.add('$rel/');
+            walk(e, rel, depth + 1);
+          } else if (e is File) {
+            final lower = name.toLowerCase();
+            if (lower.endsWith('.db') || lower.endsWith('.sqlite')) continue;
+            lines.add('$rel (${size(e.statSync().size)})');
+          }
+        }
+      }
+      walk(root, '', 1);
+      return lines.join('\n');
+    } on Object {
+      return '';
+    }
   }
 
   Iterable<String> _chunks(String s, int size) sync* {
@@ -1206,8 +1299,23 @@ class EmbeddedBackend {
             ? 'run_test'
             : null;
     if (action == 'shell') return _shellExec(p);
-    if (action == 'debian_status') return proot.status();
-    if (action == 'debian_install') return await proot.install();
+    if (action == 'debian_status') {
+      // 安装中：把最新流式进度作为 proot_progress hot-path 事件随本次
+      // 分发带出（dispatch 期间 _emit 的事件会经 reply.events 送达 UI）。
+      final ev = proot.progressSnapshot();
+      if (ev != null) _emit('proot_progress', ev);
+      return proot.status();
+    }
+    if (action == 'debian_install') {
+      return await proot.install(
+          onProgress: (phase, received, total, bytesPerSec) =>
+              _emit('proot_progress', <String, dynamic>{
+                'phase': phase,
+                'received': received,
+                'total': total,
+                'speed': bytesPerSec,
+              }));
+    }
     if (cube == null) return _err('未知 code_task 动作：$action');
     final r = await SandboxedShell.instance.exec(
       cube,
@@ -2077,6 +2185,9 @@ class EmbeddedBackend {
             'completion': task, 'traces': traces.length, 'id': id,
           },
         };
+      case 'run':
+        // 知识蒸馏：对 turns 表的真实对话语料做统计抽取，产出知识蒸馏包。
+        return await _distillRun();
       case 'distill':
         // 真实蒸馏需要模型权重与教师输出；不具备时明确拒绝，不产出假模型。
         final traces = await store.readRecords('work_traces');
@@ -2109,17 +2220,254 @@ class EmbeddedBackend {
     }
   }
 
-  List<Map<String, dynamic>> _ownModels() {
-    return store
-        .scanFiles('models', extensions: <String>{'.gguf'})
-        .map((f) => <String, dynamic>{
-              'name': f['name'],
-              'path': f['path'],
-              'size': f['size'],
-              'version': version,
-              'source': 'local',
+  // ---- 知识蒸馏（run）：真实统计抽取对话语料，产出知识蒸馏包 ----
+
+  /// 中文常见双字停用词（统计话题簇时剔除，避免「什么/怎么」霸榜）。
+  static const Set<String> _cjkStopwords = <String>{
+    '什么', '怎么', '如何', '可以', '这个', '那个', '一个', '一下',
+    '请问', '帮我', '给我', '觉得', '知道', '希望', '需要', '想要',
+    '问题', '东西', '时候', '现在', '然后', '已经', '还是', '或者',
+    '因为', '所以', '如果', '但是', '就是', '不是', '有什', '为什',
+    '哪些', '多少', '是否', '应该', '可能', '一样', '一直', '有点',
+    '好的', '谢谢', '你帮', '我帮', '我们', '你们', '他们', '这样',
+    '那样', '有没', '没什', '能不', '是不', '对什', '关于', '使用',
+  };
+
+  /// 对 turns 表的真实对话语料做统计蒸馏：
+  ///  1) 按 session 把 user→assistant 配成 Q→A 对（取近 400 对）；
+  ///  2) 话题簇：用户提问分词（ASCII 词 + 中文连续串双字组），词频 top 20；
+  ///  3) 高频问答对：最多 60 条真实抽取（截断存储）；
+  ///  4) 用户偏好摘要 + 语料统计（轮数 / token 估算），全部来自真实计数；
+  ///  5) 写入 models/ 目录（_ownModels 扫描目录），命名 tga-distill-日期.json。
+  /// 产物是统计抽取的知识包，不是神经网络权重，文件内如实标注。
+  Future<Map<String, dynamic>> _distillRun() async {
+    final turns = await store.readRecords('turns');
+
+    // ---- 1) 按 session 配对 Q→A ----
+    final pending = <String, Map<String, dynamic>>{};
+    final allPairs = <Map<String, dynamic>>[];
+    for (final t in turns) {
+      final session = (t['session_id'] ?? 'default').toString();
+      final role = (t['role'] ?? '').toString();
+      final text = (t['text'] ?? '').toString().trim();
+      if (text.isEmpty) continue;
+      if (role == 'user') {
+        pending[session] = t;
+      } else if (role == 'assistant') {
+        final q = pending.remove(session);
+        if (q != null) {
+          allPairs.add(<String, dynamic>{
+            'question': q['text'].toString(),
+            'answer': text,
+            'session_id': session,
+            'ts': t['ts'] is num ? t['ts'] : q['ts'],
+          });
+        }
+      }
+    }
+    if (allPairs.length < 10) {
+      return <String, dynamic>{
+        'ok': false, 'action': 'run',
+        'error': '对话语料不足(需≥10 轮),先去聊天吧',
+        'data': <String, dynamic>{'pairs': allPairs.length},
+      };
+    }
+    final corpus = allPairs.length > 400
+        ? allPairs.sublist(allPairs.length - 400)
+        : allPairs;
+
+    // ---- 2) 话题簇：对用户提问分词统计 ----
+    final freq = <String, int>{};
+    final asciiRe = RegExp(r'[A-Za-z0-9_+#.\-]{2,}');
+    final cjkRe = RegExp(r'[\u4e00-\u9fff]+');
+    for (final pair in corpus) {
+      final q = pair['question'].toString();
+      for (final m in asciiRe.allMatches(q.toLowerCase())) {
+        final w = m.group(0)!;
+        freq[w] = (freq[w] ?? 0) + 1;
+      }
+      for (final m in cjkRe.allMatches(q)) {
+        final run = m.group(0)!;
+        for (var i = 0; i + 2 <= run.length; i++) {
+          final bg = run.substring(i, i + 2);
+          if (_cjkStopwords.contains(bg)) continue;
+          freq[bg] = (freq[bg] ?? 0) + 1;
+        }
+      }
+    }
+    final ranked = freq.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final topKeywords = ranked
+        .where((e) => e.value >= 2)
+        .take(20)
+        .map((e) => e.key)
+        .toList();
+    final topics = <Map<String, dynamic>>[];
+    for (final kw in topKeywords) {
+      final matched = corpus
+          .where((pair) => pair['question'].toString().contains(kw))
+          .toList();
+      topics.add(<String, dynamic>{
+        'keyword': kw,
+        'count': matched.length,
+        'examples': matched
+            .take(3)
+            .map((p) {
+              final q = p['question'].toString().replaceAll('\n', ' ');
+              return q.length <= 60 ? q : '${q.substring(0, 60)}…';
+            })
+            .toList(),
+      });
+    }
+
+    // ---- 3) 高频问答对：真实抽取，截断存储 ----
+    final qaPairs = corpus.reversed.take(60).toList().reversed
+        .map((p) => <String, dynamic>{
+              'question': _clipText(p['question'].toString(), 300),
+              'answer': _clipText(p['answer'].toString(), 300),
+              'ts': p['ts'],
             })
         .toList();
+
+    // ---- 4) 用户偏好摘要 + 语料统计（全部真实计数）----
+    var qChars = 0, aChars = 0, shortQ = 0, cjkChars = 0, asciiWords = 0;
+    final sessions = <String>{};
+    final days = <String>{};
+    double minTs = 0, maxTs = 0;
+    for (final p in corpus) {
+      final q = p['question'].toString();
+      final a = p['answer'].toString();
+      qChars += q.length;
+      aChars += a.length;
+      if (q.length < 15) shortQ += 1;
+      sessions.add(p['session_id'].toString());
+      cjkChars += RegExp(r'[\u4e00-\u9fff]').allMatches(q).length +
+          RegExp(r'[\u4e00-\u9fff]').allMatches(a).length;
+      asciiWords += RegExp(r'[A-Za-z0-9_]+').allMatches(q).length +
+          RegExp(r'[A-Za-z0-9_]+').allMatches(a).length;
+      final ts = p['ts'];
+      if (ts is num) {
+        if (minTs == 0 || ts.toDouble() < minTs) minTs = ts.toDouble();
+        if (ts.toDouble() > maxTs) maxTs = ts.toDouble();
+      }
+    }
+    for (final p in corpus) {
+      final ts = p['ts'];
+      if (ts is num) days.add(_dayOfTs(ts.toDouble()));
+    }
+    final estimatedTokens = cjkChars + (asciiWords * 1.3).round();
+    final avgQ = (qChars / corpus.length).round();
+    final avgA = (aChars / corpus.length).round();
+    final topInterests = topKeywords.take(5).toList();
+    final preferences = <String, dynamic>{
+      'avg_question_chars': avgQ,
+      'avg_answer_chars': avgA,
+      'short_question_ratio':
+          double.parse((shortQ / corpus.length).toStringAsFixed(2)),
+      'sessions': sessions.length,
+      'active_days': days.length,
+      'top_interests': topInterests,
+      'summary': '你平均每次提问 $avgQ 字、助手平均回复 $avgA 字；'
+          '话题集中在 ${topInterests.join('、')}',
+    };
+
+    // ---- 5) 写入 _ownModels 扫描目录（models/），命名带日期 ----
+    final now = DateTime.now();
+    String two(int n) => n.toString().padLeft(2, '0');
+    final day = '${now.year}-${two(now.month)}-${two(now.day)}';
+    var name = 'tga-distill-$day.json';
+    if (File('${store.sub('models').path}/$name').existsSync()) {
+      name = 'tga-distill-$day-${two(now.hour)}${two(now.minute)}'
+          '${two(now.second)}.json';
+    }
+    final pack = <String, dynamic>{
+      'type': 'tga-knowledge-pack',
+      'title': '知识蒸馏包（统计抽取，非神经网络权重）',
+      'disclaimer': '本文件由 TGA harness 对真实对话语料做统计蒸馏产出，'
+          '内容是话题簇/问答对/偏好摘要等知识条目，不是模型权重。',
+      'generated_at': now.toIso8601String(),
+      'harness_version': version,
+      'corpus_stats': <String, dynamic>{
+        'turn_records': turns.length,
+        'paired_turns': corpus.length,
+        'qa_pairs_extracted': qaPairs.length,
+        'estimated_tokens': estimatedTokens,
+        'time_range': <String, dynamic>{
+          'from': minTs > 0 ? _dayOfTs(minTs) : '',
+          'to': maxTs > 0 ? _dayOfTs(maxTs) : '',
+        },
+      },
+      'topics': topics,
+      'qa_pairs': qaPairs,
+      'preferences': preferences,
+    };
+    await store.writeJson('models/$name', pack);
+
+    return <String, dynamic>{
+      'ok': true, 'action': 'run',
+      'data': <String, dynamic>{
+        'file': '${store.sub('models').path}/$name',
+        'name': name,
+        'pairs': qaPairs.length,
+        'topics': topics.length,
+        'corpus_turns': corpus.length,
+      },
+    };
+  }
+
+  static String _clipText(String s, int max) {
+    final one = s.trim();
+    return one.length <= max ? one : '${one.substring(0, max)}…';
+  }
+
+  static String _dayOfTs(double tsSeconds) =>
+      DateTime.fromMillisecondsSinceEpoch((tsSeconds * 1000).round())
+          .toLocal()
+          .toIso8601String()
+          .substring(0, 10);
+
+  /// 判断 models/ 下的 JSON 是否是知识蒸馏包（按文件内 type 标记识别，
+  /// 重命名后依然能被识别；解析失败一律不算，不虚构条目）。
+  bool _isKnowledgePack(String path) {
+    try {
+      final f = File(path);
+      if (!f.existsSync() || f.lengthSync() > 8 * 1024 * 1024) return false;
+      final decoded = jsonDecode(f.readAsStringSync());
+      return decoded is Map && decoded['type'] == 'tga-knowledge-pack';
+    } on Object {
+      return false;
+    }
+  }
+
+  List<Map<String, dynamic>> _ownModels() {
+    final out = <Map<String, dynamic>>[
+      ...store
+          .scanFiles('models', extensions: <String>{'.gguf'})
+          .map((f) => <String, dynamic>{
+                'name': f['name'],
+                'path': f['path'],
+                'size': f['size'],
+                'modified': f['modified'],
+                'version': version,
+                'source': 'local',
+                'kind': 'gguf',
+              }),
+      // 知识蒸馏包：models/ 下带 tga-knowledge-pack 标记的真实 JSON 文件。
+      ...store
+          .scanFiles('models', extensions: <String>{'.json'})
+          .where((f) => _isKnowledgePack(f['path'].toString()))
+          .map((f) => <String, dynamic>{
+                'name': f['name'],
+                'path': f['path'],
+                'size': f['size'],
+                'modified': f['modified'],
+                'version': version,
+                'source': 'distill',
+                'kind': 'knowledge',
+                'label': '知识蒸馏包',
+              }),
+    ];
+    return out;
   }
 
   Map<String, dynamic> _deleteModel(String name) {

@@ -329,7 +329,9 @@ Future<void> _pickLanguage(BuildContext context, PersonaStore store) async {
   }
 }
 
-/// 品牌版本卡片：鹿标 logo + 名称 + 四项详细数据。
+/// 品牌版本卡片（问题 #7 重做）：主题色卡片 + 头部品牌渐变条
+/// （鹿标加主色描边圆底）+ 四项信息小卡（左图标 / 灰色键 / 主题色值右对齐）
+/// + filled 关闭按钮。深浅两套主题全部取 Tga 令牌，无硬编码色。
 class _AboutBrandCard extends StatelessWidget {
   const _AboutBrandCard();
 
@@ -338,58 +340,174 @@ class _AboutBrandCard extends StatelessWidget {
     Tga.syncFrom(context);
     return Dialog(
       backgroundColor: Colors.transparent,
+      elevation: 0,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 32, vertical: 48),
       child: Container(
-        padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+        clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           color: Tga.card,
           borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Tga.divider),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Image.asset('assets/logo/tangram_deer.png',
-                width: 84, height: 84, fit: BoxFit.contain),
-            const SizedBox(height: 12),
-            Text('TGA · Tangram Agent', style: Tga.h1),
-            Text('檀阁瑞木 · 让每个人拥有自己的模型', style: Tga.sub),
-            const SizedBox(height: 18),
-            FutureBuilder<String>(
-              future: UpdateService.installedVersion(),
-              builder: (BuildContext _, AsyncSnapshot<String> s) => _kvGrid(
-                context,
-                <(String, String)>[
-                  ('产品', 'tangram-agent（TGA）'),
-                  ('内核', 'agent = model + harness'),
-                  ('版本', 'v${s.data ?? UpdateService.currentVersion}'),
-                  ('能力', '工作蒸馏 · 产出私人模型'),
+            // ---------- 头部品牌渐变条 ----------
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(20, 24, 20, 18),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: <Color>[
+                    Tga.primary.withValues(alpha: 0.22),
+                    Tga.purple.withValues(alpha: 0.12),
+                    Tga.cyan.withValues(alpha: 0.10),
+                  ],
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Container(
+                    width: 88,
+                    height: 88,
+                    decoration: BoxDecoration(
+                      // 黑色鹿标在深主题下也需浅底衬托（与赞助码白底同理）。
+                      color: Colors.white,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Tga.primary, width: 2),
+                      boxShadow: <BoxShadow>[Tga.softShadow],
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(13),
+                      child: Image.asset('assets/logo/tangram_deer.png',
+                          fit: BoxFit.contain),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text('TGA · Tangram Agent', style: Tga.h1),
+                  const SizedBox(height: 4),
+                  Text('檀阁瑞木 · 让每个人拥有自己的模型', style: Tga.sub),
                 ],
               ),
             ),
-            const SizedBox(height: 12),
-            TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: Text(context.t('common.close'))),
+            // ---------- 四项信息小卡 + 关闭按钮 ----------
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  FutureBuilder<String>(
+                    future: UpdateService.installedVersion(),
+                    builder: (BuildContext _, AsyncSnapshot<String> s) =>
+                        Column(
+                      children: <Widget>[
+                        _infoRow(
+                          icon: Icons.widgets_rounded,
+                          iconBg: Tga.iconBlueBg,
+                          iconFg: Tga.iconBlue,
+                          keyLabel: '产品',
+                          value: 'tangram-agent（TGA）',
+                        ),
+                        _infoRow(
+                          icon: Icons.memory_rounded,
+                          iconBg: Tga.iconPurpleBg,
+                          iconFg: Tga.iconPurple,
+                          keyLabel: '内核',
+                          value: 'agent = model + harness',
+                        ),
+                        _infoRow(
+                          icon: Icons.tag_rounded,
+                          iconBg: Tga.iconCyanBg,
+                          iconFg: Tga.iconCyan,
+                          keyLabel: '版本',
+                          value: 'v${s.data ?? UpdateService.currentVersion}',
+                        ),
+                        _infoRow(
+                          icon: Icons.auto_awesome_rounded,
+                          iconBg: Tga.iconGoldBg,
+                          iconFg: Tga.iconGold,
+                          keyLabel: '能力',
+                          value: '工作蒸馏 · 产出私人模型',
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Tga.primary,
+                      foregroundColor: Tga.onPrimary,
+                      minimumSize: const Size.fromHeight(44),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: Text(
+                        context.t('common.close', zh: '关闭'),
+                        style: const TextStyle(
+                            fontSize: 14, fontWeight: FontWeight.w600)),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _kvGrid(BuildContext context, List<(String, String)> rows) {
-    return Column(
-      children: <Widget>[
-        for (final (String k, String v) in rows)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 5),
-            child: Row(
-              children: <Widget>[
-                SizedBox(
-                    width: 56, child: Text(k, style: Tga.caption)),
-                Expanded(child: Text(v, style: Tga.body)),
-              ],
+  /// 单行信息小卡：左语义色图标 + 浅分隔竖线 + 灰色键小字 + 主题色值右对齐。
+  Widget _infoRow({
+    required IconData icon,
+    required Color iconBg,
+    required Color iconFg,
+    required String keyLabel,
+    required String value,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Tga.bgSoft,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Tga.divider.withValues(alpha: 0.55)),
+      ),
+      child: Row(
+        children: <Widget>[
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+                color: iconBg, borderRadius: BorderRadius.circular(9)),
+            child: Icon(icon, size: 16, color: iconFg),
+          ),
+          const SizedBox(width: 10),
+          Container(
+              width: 1,
+              height: 18,
+              color: Tga.divider.withValues(alpha: 0.7)),
+          const SizedBox(width: 10),
+          Text(keyLabel,
+              style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w500, color: Tga.textDim)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w600,
+                  color: Tga.primary),
             ),
           ),
-      ],
+        ],
+      ),
     );
   }
 }

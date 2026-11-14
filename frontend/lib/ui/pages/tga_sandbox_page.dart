@@ -178,29 +178,6 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
     }
   }
 
-  Future<void> _installDebian() async {
-    try {
-      final BackendClient backend = context.read<BackendClient>();
-      final BridgeEnvelope env = await backend.sendControl(
-          'code_task', <String, dynamic>{'action': 'debian_install'});
-      if (!mounted) return;
-      final p = env.payload;
-      if (p is Map && p['ok'] == true) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('开始真实下载（约 4.2 MB，进度见面板）')));
-        await _refreshDebianStatus();
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('启动失败：${(p is Map ? p['error'] : '未知错误')}')));
-      }
-    } on Object catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('启动失败：$e')));
-      }
-    }
-  }
-
   void _showDebianSheet() {
     _refreshDebianStatus();
     showModalBottomSheet<void>(
@@ -208,105 +185,14 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
       backgroundColor: const Color(0xFF1B2333),
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (BuildContext ctx) => StatefulBuilder(
-        builder: (BuildContext ctx, StateSetter outerSetState) => Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text('Debian 扩展包（proot 用户态）',
-                  style: const TextStyle(
-                      color: _termGreen,
-                      fontSize: 14,
-                      fontFamily: 'monospace')),
-              const SizedBox(height: 8),
-              Text(
-                  '下载 proot（UserLAnd arm64）+ Alpine 3.20 minirootfs，'
-                  '解包后 apk/python/pip 在本机用户态真实执行。',
-                  style: const TextStyle(color: _termDim, fontSize: 12, height: 1.4)),
-              const SizedBox(height: 12),
-              if (_debianReady)
-                Text('已就绪：${_debian['rootfs']}',
-                    style: const TextStyle(
-                        color: _termGreen, fontSize: 12, fontFamily: 'monospace'))
-              else ...<Widget>[
-                LinearProgressIndicator(
-                  value: (( _debian['percent'] as num?)?.toDouble() ?? 0) / 100,
-                  minHeight: 6,
-                  backgroundColor: const Color(0xFF2A3446),
-                  color: _termGreen,
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  '${_stepLabel()} · '
-                  '${_mb(_debian['downloaded'])} / ${_mb(_debian['total'])} 真实落盘字节',
-                  style: const TextStyle(color: _termDim, fontSize: 12)),
-                if ((_debian['error'] ?? '').toString().isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Text('失败：${_debian['error']}',
-                        style: const TextStyle(
-                            color: Color(0xFFE86A6A), fontSize: 12)),
-                  ),
-              ],
-              const SizedBox(height: 14),
-              Row(
-                children: <Widget>[
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: _debianReady || _debian['installing'] == true
-                          ? null
-                          : () async {
-                              await _installDebian();
-                              outerSetState(() {});
-                            },
-                      style: OutlinedButton.styleFrom(
-                          foregroundColor: _termGreen,
-                          side: const BorderSide(color: _termGreen)),
-                      child: Text(_debianReady
-                          ? '已安装'
-                          : _debian['installing'] == true
-                              ? '安装中…'
-                              : '下载并安装'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.of(ctx).pop(),
-                      style: OutlinedButton.styleFrom(
-                          foregroundColor: _termDim,
-                          side: const BorderSide(color: Color(0xFF2A3446))),
-                      child: const Text('关闭'),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '注：Android 10+ 若 ROM 强制禁止执行应用私有目录文件，首次执行会'
-                '如实报错；此时请用「远端沙箱（SSH）」跑 apt。',
-                style: const TextStyle(color: Color(0xFF5A6880), fontSize: 11)),
-            ],
-          ),
-        ),
+      builder: (BuildContext ctx) => _DebianSheetBody(
+        client: context.read<BackendClient>(),
+        onChanged: () {
+          // 安装状态变化同步回页面（图标 / 主机名 / 欢迎语）。
+          if (mounted) _refreshDebianStatus();
+        },
       ),
     );
-  }
-
-  String _stepLabel() => switch (_debian['step']?.toString() ?? 'idle') {
-        'downloading' => '下载中',
-        'extracting' => '解包 rootfs 中',
-        'ready' => '已就绪',
-        'failed' => '失败',
-        _ => '未安装',
-      };
-
-  static String _mb(dynamic bytes) {
-    final int b = bytes is num ? bytes.toInt() : 0;
-    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(0)} KB';
-    return '${(b / 1024 / 1024).toStringAsFixed(1)} MB';
   }
 
   // ---- 远端 SSH 配置 ----
@@ -346,7 +232,7 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
       return <String>[
         'remote linux via ssh · $target',
         'apt · pip · python 全部在远端真实执行；连接失败如实报错。',
-        '右上「⚙」改主机/凭据；输入 help 看说明。',
+        '右上「设置」改主机/凭据；输入 help 看说明。',
       ];
     }
     if (Platform.isAndroid) {
@@ -358,7 +244,7 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
       }
       return <String>[
         'toybox /system/bin/sh · 安卓本机无 apt/pip（如实 command not found）',
-        '跑 apt：右上「⬇」装 Debian 扩展包（proot），或「⚙」连远端 Linux(SSH)。',
+        '跑 apt：右上「下载」装 Debian 扩展包（proot），或「设置」连远端 Linux(SSH)。',
       ];
     }
     return <String>[
@@ -543,6 +429,239 @@ class _TgaSandboxPageState extends State<TgaSandboxPage> {
         height: 9,
         decoration: BoxDecoration(color: c, shape: BoxShape.circle),
       );
+}
+
+// ---------------------------------------------------------------------------
+// Debian 扩展包面板（问题 #5）：监听 proot_progress hot-path 事件，
+// 进度条按真实接收字节推进；解包显示「正在解包…」；失败如实显示
+// 错误并恢复按钮；已装显示「已安装」。debian_status 轮询作兜底。
+// ---------------------------------------------------------------------------
+class _DebianSheetBody extends StatefulWidget {
+  const _DebianSheetBody({required this.client, required this.onChanged});
+
+  final BackendClient client;
+  final VoidCallback onChanged;
+
+  @override
+  State<_DebianSheetBody> createState() => _DebianSheetBodyState();
+}
+
+class _DebianSheetBodyState extends State<_DebianSheetBody> {
+  StreamSubscription<BridgeEnvelope>? _hotSub;
+  Timer? _poll;
+
+  Map<String, dynamic> _status = const <String, dynamic>{};
+  bool _starting = false;
+
+  // proot_progress 事件上报的最新进度（received/total 为累计真实字节，
+  // total=-1 表示 Content-Length 未知；speed 为 bytes/s）。
+  String _phase = '';
+  int _received = 0;
+  int _total = -1;
+  double _speed = 0;
+
+  bool get _installed => _status['installed'] == true;
+  bool get _busy => _status['installing'] == true || _starting;
+
+  @override
+  void initState() {
+    super.initState();
+    _hotSub = widget.client.onHotPath.listen((BridgeEnvelope env) {
+      if (env.topic != 'proot_progress') return;
+      final dynamic p = env.payload;
+      if (p is! Map || !mounted) return;
+      setState(() {
+        _phase = (p['phase'] ?? '').toString();
+        _received = (p['received'] as num?)?.toInt() ?? _received;
+        _total = (p['total'] as num?)?.toInt() ?? _total;
+        _speed = (p['speed'] as num?)?.toDouble() ?? _speed;
+      });
+    });
+    _pollStatus();
+  }
+
+  @override
+  void dispose() {
+    _hotSub?.cancel();
+    _poll?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _pollStatus() async {
+    try {
+      final BridgeEnvelope env = await widget.client.sendControl(
+          'code_task', <String, dynamic>{'action': 'debian_status'});
+      if (!mounted) return;
+      final dynamic p = env.payload;
+      if (p is! Map) return;
+      setState(() {
+        _status = Map<String, dynamic>.from(p);
+        // 兜底：事件迟到时，进度条也按真实字节推进。
+        if (_status['installing'] == true) {
+          final int d = (_status['downloaded'] as num?)?.toInt() ?? 0;
+          if (d > _received) _received = d;
+          final int t = (_status['total'] as num?)?.toInt() ?? -1;
+          if (t > 0) _total = t;
+          final String step = (_status['step'] ?? '').toString();
+          if (step == 'extracting') {
+            _phase = 'extract';
+          } else if (step == 'downloading' && _phase != 'extract') {
+            _phase = 'download';
+          }
+        }
+      });
+      if (_status['installing'] == true) {
+        _poll ??= Timer.periodic(
+            const Duration(milliseconds: 800), (_) => _pollStatus());
+      } else {
+        _poll?.cancel();
+        _poll = null;
+        widget.onChanged();
+      }
+    } on Object {
+      // 后端未就绪：保持上次状态，不谎报。
+    }
+  }
+
+  Future<void> _install() async {
+    setState(() => _starting = true);
+    try {
+      final BridgeEnvelope env = await widget.client.sendControl(
+          'code_task', <String, dynamic>{'action': 'debian_install'});
+      if (!mounted) return;
+      final dynamic p = env.payload;
+      if (p is Map && p['ok'] == true) {
+        setState(() {
+          _starting = false;
+          _phase = 'download';
+          _received = 0;
+          _speed = 0;
+        });
+        _pollStatus();
+      } else {
+        setState(() {
+          _starting = false;
+          _status = <String, dynamic>{
+            ..._status,
+            'error': p is Map ? (p['error'] ?? '未知错误') : '未知错误',
+          };
+        });
+      }
+    } on Object catch (e) {
+      if (mounted) {
+        setState(() {
+          _starting = false;
+          _status = <String, dynamic>{..._status, 'error': '$e'};
+        });
+      }
+    }
+  }
+
+  static String _mb(num bytes) {
+    final int b = bytes.toInt();
+    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(0)} KB';
+    return '${(b / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+
+  String _progressLine() {
+    if (_installed) return 'Debian 用户态已就绪';
+    if (!_busy) return '未安装 · 共约 4.1 MB，进度按真实接收字节统计';
+    if (_phase == 'extract') return '正在解包…';
+    final String tot = _total > 0 ? ' / ${_mb(_total)}' : '';
+    final String sp = _speed > 1 ? ' · ${_mb(_speed)}/s' : '';
+    return '下载中 · ${_mb(_received)}$tot$sp';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final String error = (_status['error'] ?? '').toString();
+    final double? frac =
+        _total > 0 ? (_received / _total).clamp(0.0, 1.0) : null;
+    final double? barValue;
+    if (_installed) {
+      barValue = 1;
+    } else if (!_busy) {
+      barValue = frac != null && _received > 0 ? frac : 0.0;
+    } else if (_phase == 'extract') {
+      barValue = null; // 解包：不确定进度
+    } else {
+      barValue = frac; // total 未知时如实走不确定进度
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text('Debian 扩展包（proot 用户态）',
+              style: const TextStyle(
+                  color: _termGreen, fontSize: 14, fontFamily: 'monospace')),
+          const SizedBox(height: 8),
+          Text(
+              '下载 proot（UserLAnd arm64）+ Alpine 3.20 minirootfs，'
+              '解包后 apk/python/pip 在本机用户态真实执行。',
+              style: const TextStyle(
+                  color: _termDim, fontSize: 12, height: 1.4)),
+          const SizedBox(height: 12),
+          if (_installed)
+            Text('已安装：${_status['rootfs']}',
+                style: const TextStyle(
+                    color: _termGreen, fontSize: 12, fontFamily: 'monospace'))
+          else ...<Widget>[
+            LinearProgressIndicator(
+              value: barValue,
+              minHeight: 6,
+              backgroundColor: const Color(0xFF2A3446),
+              color: _termGreen,
+            ),
+            const SizedBox(height: 6),
+            Text(_progressLine(),
+                style: const TextStyle(color: _termDim, fontSize: 12)),
+            if (error.isNotEmpty && !_busy)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text('失败：$error',
+                    style: const TextStyle(
+                        color: Color(0xFFE86A6A), fontSize: 12)),
+              ),
+          ],
+          const SizedBox(height: 14),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: _installed || _busy ? null : _install,
+                  style: OutlinedButton.styleFrom(
+                      foregroundColor: _termGreen,
+                      side: const BorderSide(color: _termGreen)),
+                  child: Text(_installed
+                      ? '已安装'
+                      : _busy
+                          ? '安装中…'
+                          : '下载并安装'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  style: OutlinedButton.styleFrom(
+                      foregroundColor: _termDim,
+                      side: const BorderSide(color: Color(0xFF2A3446))),
+                  child: const Text('关闭'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '注：Android 10+ 若 ROM 强制禁止执行应用私有目录文件，首次执行会'
+            '如实报错；此时请用「远端沙箱（SSH）」跑 apt。',
+            style: const TextStyle(color: Color(0xFF5A6880), fontSize: 11)),
+        ],
+      ),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
