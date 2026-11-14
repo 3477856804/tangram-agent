@@ -212,7 +212,7 @@ jobs:
           )
           Set-Content -Path loader.cs -Value $cs -Encoding UTF8
           $csc = Get-ChildItem "$env:WINDIR\Microsoft.NET\Framework64\v4.0.*\csc.exe" | Select-Object -Last 1
-          & $csc.FullName /nologo /target:winexe /out:out\tangram-windows-x64.exe /r:System.IO.Compression.FileSystem.dll /resource:tangram-payload.zip,payload.zip loader.cs
+          & $csc.FullName /nologo /target:winexe /out:out\tangram-windows-x64.exe /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /resource:tangram-payload.zip,payload.zip loader.cs
           if (-not (Test-Path out\tangram-windows-x64.exe)) { Write-Host 'csc 未产出 exe'; exit 1 }
           if ($env:ANDROID_KEYSTORE_BASE64) {
             [IO.File]::WriteAllBytes("$env:TEMP\t.jks", [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
@@ -385,12 +385,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
-      - name: ohos Flutter SDK(SIG master 镜像,含 build hap;海外 runner 直连 gitee 会超时)
-        env:
-          GH_PAT: ${{ secrets.GH_CLASSIC_PAT }}
+      - name: ohos Flutter SDK(SIG master 镜像,含 build hap;公开仓库匿名下载)
         run: |
           set -euo pipefail
-          curl -fL --retry 3 -H "Authorization: Bearer $GH_PAT" -o /tmp/ohf.zip \
+          curl -fL --retry 3 -o /tmp/ohf.zip \
             "https://github.com/3477856804/ohos-flutter-mirror/releases/download/v1/flutter_flutter-master-ohos.zip"
           mkdir -p /tmp/ohf && unzip -q /tmp/ohf.zip -d /tmp/ohf
           sudo mkdir -p /opt/ohos-flutter && sudo chown "$USER" /opt/ohos-flutter
