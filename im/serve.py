@@ -50,11 +50,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 _ROOT = Path(__file__).resolve().parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+_BACKEND_DIR = _ROOT / "backend"
+for _p in (str(_ROOT), str(_BACKEND_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from im.gateway import Gateway, MultimodalMessage  # noqa: E402
 from im import brain  # noqa: E402
+from harness.version import PRODUCT_VERSION  # noqa: E402 - 版本唯一真源
 from im.agp_bridge import (  # noqa: E402
     AGP_HUB,
     issue_credentials,
@@ -150,7 +153,8 @@ def _scan_status(login_state: str, logged: bool) -> str:
 
 
 # --------------------------------------------------------------------------
-# Agent 运行时桥接：优先真实本地模型（TANGRAM_MODEL），否则检索式/占位降级
+# Agent 运行时桥接：真实云端 API / 真实本地 GGUF / 真实确定性能力；
+# 三者都不可用就明确报错，不存在「占位降级」。
 # --------------------------------------------------------------------------
 def _cloud_config() -> tuple[str, str, str] | None:
     """读取云端 API 配置：TANGRAM_API_BASE / _KEY / _MODEL 三者齐备才生效。"""
@@ -490,13 +494,23 @@ class AgentBridge:
         with self._lock:
             if self._svc is None:
                 data_dir = os.environ.get("TANGRAM_DATA") or str(Path.home() / ".tangram")
-                from app.runtime.agent_service import RuntimeService  # backend/ 在 path
+                # 真实后端包：backend/app/runtime/agent_service.py（仓库自带）。
+                # 兼容两种 sys.path 形态：仓库根 import backend.app...，
+                # 或 backend/ 在 path 时 import app.runtime...
+                try:
+                    from backend.app.runtime.agent_service import RuntimeService
+                except ImportError:
+                    from app.runtime.agent_service import RuntimeService  # type: ignore
 
                 self._svc = RuntimeService(data_dir=data_dir)
                 if _cloud_config() is not None:
                     self.mode = "cloud-agent"
+                elif os.environ.get("TANGRAM_MODEL"):
+                    self.mode = "native-llm"
                 else:
-                    self.mode = "native-llm" if os.environ.get("TANGRAM_MODEL") else "placeholder"
+                    # 无模型但确定性能力（算术/报时/提醒/天气/检索）仍然真实可用；
+                    # 其余问题由 RuntimeService 明确报「未配置模型」，绝不伪造。
+                    self.mode = "deterministic-only"
             return self._svc
 
     def answer(self, text: str, session_key: str) -> str:
@@ -512,7 +526,7 @@ class AgentBridge:
             return cloud
         with self._lock:
             try:
-                return "".join(svc.chat_stream(text)).strip() or "（空回复）"
+                return "".join(svc.chat_stream(text, session_id=session_key)).strip() or "（空回复）"
             except Exception as exc:  # 对话失败不吞消息：回可读错误
                 return f"[Tangram] 运行时暂不可用：{exc}"
 
@@ -833,13 +847,14 @@ class Handler(BaseHTTPRequestHandler):
             stats = self.gateway.stats()
             return self._json({
                 "product": "Tangram IM Gateway",
-                "version": "0.0.1",
+                "version": PRODUCT_VERSION,
                 "running": self.gateway.running,
                 "adapters": adp,
                 "inbound_count": stats["inbound"],
                 "outbound_count": stats["outbound"],
                 "blocked_count": stats["blocked"],
                 "circuit_open": stats["circuit_open"],
+                "runtime": stats["runtime"],
                 "agent_mode": AGENT.mode,
                 "onebot_base": self.server_base,
                 "time": time.strftime("%F %T"),
@@ -854,10 +869,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._whatsapp_status()
         if path == "/api/models/store":
             from urllib.parse import urlparse, parse_qs
+
             qs = parse_qs(urlparse(self.path).query)
-            from app.models.store import search_models
-            res = search_models((qs.get("q") or [""])[0])
-            return self._json({"source": "ModelScope 魔搭社区", "count": len(res), "models": res})
+            try:
+                from backend.app.models.store import ModelStoreError, search_models
+            except ImportError:
+                from app.models.store import ModelStoreError, search_models  # type: ignore
+            try:
+                res = search_models((qs.get("q") or [""])[0])
+            except ModelStoreError as exc:
+                # 上游失败如实回 502，绝不返回内置假榜单
+                return self._json({"ok": False, "error": str(exc)}, 502)
+            return self._json({"ok": True, "source": "ModelScope 魔搭社区",
+                               "count": len(res), "models": res})
         if path == "/api/login/wechat/qr":
             return self._wechat_login_qr()
         if path == "/api/login/wechat/status":
@@ -871,7 +895,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/discover":
             # 局域网发现的 HTTP 兜底（UDP 被防火墙拦时 APP 可直连探测）
             return self._json({"ok": True, "product": "Tangram IM Gateway",
-                               "version": "0.0.1"})
+                               "version": PRODUCT_VERSION})
         return self._json({"error": "not-found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -1286,6 +1310,28 @@ def build_gateway(onebot_base: str, napcat_token: str) -> Gateway:
     if adp is not None:
         adp.onebot_base = onebot_base
         adp.access_token = napcat_token or adp.access_token
+
+        # 正向 WS 事件也要真实走「入站 -> Agent -> 风控 -> 出站」，
+        # 否则 WS 收到了消息却没人处理，等于半个假通道。
+        def _route_onebot_ws(event: dict) -> None:
+            try:
+                msg = gw.handle_inbound(event, "qq_napcat")
+                text = extract_text(msg)
+                answer = (
+                    (_bridge_reply(text, f"qq:{msg.user_id}", msg.user_id, "qq")
+                     or _agent_reply(text, f"qq:{msg.user_id}"))
+                    if text else "（没听清/没识别到内容，换个说法试试）"
+                )
+                ok, reason = gw.send_outbound(MultimodalMessage(
+                    user_id=msg.user_id, platform="qq_napcat", modality="text",
+                    payload=answer, ts=time.time(),
+                ))
+                if not ok:
+                    print(f"[qq-napcat-ws] 回复发送失败：{reason}", flush=True)
+            except Exception as exc:
+                print(f"[qq-napcat-ws] 事件处理失败：{exc}", flush=True)
+
+        adp.set_event_handler(_route_onebot_ws)
     wa = WhatsAppBaileysAdapter(bridge_base=os.environ.get("WA_BRIDGE", "http://127.0.0.1:50433"))
     gw.register(wa)
     tg = TelegramBotAdapter()

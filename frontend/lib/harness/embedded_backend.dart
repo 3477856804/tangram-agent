@@ -28,6 +28,8 @@ import 'dart:io'
         File,
         FileSystemEntity,
         FileSystemEntityType,
+        InternetAddressType,
+        NetworkInterface,
         Platform,
         Process,
         ProcessSignal;
@@ -166,7 +168,7 @@ class EmbeddedBackend {
         'responsibility_trace' => await _responsibilityTrace(),
         'update_status' => await _updateStatus(),
         'dependency_event' => _dependencyEvent(),
-        'perception_event' => _perceptionEvent(),
+        'perception_event' => await _perceptionEvent(),
         'reload' => _reload(),
         'status' => _status(),
         'ping' || 'echo' => <String, dynamic>{'ok': true, 'echo': payload},
@@ -3918,9 +3920,98 @@ class EmbeddedBackend {
             '无 Python、无 CPython、无 Chaquopy。',
       };
 
-  Map<String, dynamic> _perceptionEvent() => _err(
-        '感知采集未接入：需要屏幕/传感器/无障碍等系统权限，'
-        '当前应用未申请这些权限，不会伪造感知数据。');
+  /// 感知采集：真实读取本机状态（时钟/时区/平台/CPU/内存/网卡/磁盘）。
+  ///
+  /// 旧实现无条件返回「未接入」错误，是 controlDomains 里一个永远不可用的假域。
+  /// 现在所有字段都来自 dart:io 的真实读数；屏幕内容、摄像头、传感器、位置、
+  /// 无障碍等确实需要系统权限，本应用未申请，如实列出边界，绝不编造数据。
+  Future<Map<String, dynamic>> _perceptionEvent() async {
+    final DateTime now = DateTime.now();
+    final Map<String, dynamic> data = <String, dynamic>{
+      'ok': true,
+      'source': 'device-local-real',
+      'captured_at': now.toIso8601String(),
+      'local_time': now.toString(),
+      'timezone': now.timeZoneName,
+      'utc_offset_minutes': now.timeZoneOffset.inMinutes,
+      'platform': Platform.operatingSystem,
+      'platform_version': Platform.version,
+      'hostname': Platform.localHostname,
+      'cpu_count': Platform.numberOfProcessors,
+      'locale': Platform.localeName,
+      'workspace': store.root.path,
+    };
+    data['memory_kb'] = await _readMemInfoKb();
+    data['workspace_free_kb'] = await _diskFreeKb();
+    try {
+      final List<NetworkInterface> ifaces = await NetworkInterface.list(
+        type: InternetAddressType.any,
+        loopback: false,
+      );
+      data['network_interfaces'] = ifaces
+          .map((NetworkInterface i) => <String, dynamic>{
+                'name': i.name,
+                'addresses': i.addresses
+                    .map((dynamic a) => a.address.toString())
+                    .toList(),
+              })
+          .toList();
+    } on Object {
+      data['network_interfaces'] = <dynamic>[];
+      data['network_error'] = '网卡枚举被平台拒绝或未授权，如实留空';
+    }
+    data['not_collected'] = <String>[
+      '屏幕内容', '摄像头', '麦克风波形', '传感器', '位置', '无障碍',
+    ];
+    data['note'] = '以上均为本机真实读数。屏幕/传感器/位置等需要系统权限，'
+        '本应用未申请，未采集的数据一律不编造；需要时请在系统设置授权后接入对应插件。';
+    return data;
+  }
+
+  /// Linux/Android 读 /proc/meminfo 得到真实物理内存与可用内存（KB）。
+  Future<Map<String, dynamic>?> _readMemInfoKb() async {
+    if (!Platform.isLinux && !Platform.isAndroid) return null;
+    try {
+      final List<String> lines = await File('/proc/meminfo').readAsLines();
+      int total = 0;
+      int available = 0;
+      for (final String line in lines) {
+        final List<String> parts = line.split(RegExp(r'\s+'));
+        if (parts.length < 2) continue;
+        final int? value = int.tryParse(parts[1]);
+        if (value == null) continue;
+        if (parts[0] == 'MemTotal:') total = value;
+        if (parts[0] == 'MemAvailable:') available = value;
+      }
+      if (total <= 0) return null;
+      return <String, dynamic>{
+        'total_kb': total,
+        'available_kb': available,
+        'source': '/proc/meminfo',
+      };
+    } on Object {
+      return null;
+    }
+  }
+
+  /// 用真实 `df -k` 读工作区所在磁盘剩余空间（KB）；不支持/失败返回 null。
+  Future<int?> _diskFreeKb() async {
+    if (!Platform.isLinux && !Platform.isAndroid && !Platform.isMacOS) return null;
+    try {
+      final ProcessResult r = await Process.run(
+        'df', <String>['-k', store.root.path],
+      ).timeout(const Duration(seconds: 5));
+      if (r.exitCode != 0) return null;
+      final List<String> lines = '${r.stdout}'.trim().split('\n');
+      if (lines.length < 2) return null;
+      final List<String> cols = lines.last.trim().split(RegExp(r'\s+'));
+      // Filesystem 1K-blocks Used Available Use% Mounted-on
+      if (cols.length < 4) return null;
+      return int.tryParse(cols[3]);
+    } on Object {
+      return null;
+    }
+  }
 
   Map<String, dynamic> _reload() => <String, dynamic>{
         'ok': true,

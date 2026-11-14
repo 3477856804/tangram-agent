@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0.0",
+  "product": "tangram-agent",
+  "note": "真实沙箱策略：只允许在专属工作区内执行白名单命令；该 JSON 是策略本身，不是产品版本号。",
+  "workspace": "~/.tangram/agent_ws",
+  "timeout_seconds": 60,
+  "max_output_bytes": 4000,
+  "allow": [
+    "pwd", "ls", "cat", "head", "tail", "wc", "date", "echo", "printf",
+    "mkdir", "touch", "cp", "mv", "rm", "find", "grep", "sed", "awk",
+    "python3", "pip", "git", "curl", "wget", "tar", "unzip", "sha256sum"
+  ],
+  "deny": [
+    "shutdown", "reboot", "mkfs", "dd", "chmod 777 /", "mount", "umount",
+    "useradd", "passwd", "systemctl", "iptables"
+  ],
+  "denied_paths": [
+    "~/.ssh", "~/.gnupg", "~/.aws", "/etc/shadow", "/root", "/proc/sys"
+  ],
+  "network": "egress-allowlist-only",
+  "writable_roots": ["workspace"]
+}

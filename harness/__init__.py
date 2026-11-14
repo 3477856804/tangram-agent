@@ -12,10 +12,11 @@
   2. from_api()         —— 调用 OpenAI 兼容 API → 远端教师 → 工作蒸馏 → 私人 model
 
 装配完成后 TangramAgent = Model + Harness，可继续工作、对话、再蒸馏。
-所有 I/O 与训练都是真实的：HTTP 下载 / HTTP 推理 / torch 梯度下降 / 文件落盘，
-不伪造模型输出，也不把占位文件冒充训练产物。
+所有 I/O 与训练都是真实的：HTTP 下载 / HTTP 推理 / 真实梯度下降（torch 或
+纯 Python）/ 文件落盘，不伪造模型输出，也不把占位文件冒充训练产物。
 
-版本策略：产品版本唯一真源是仓库根 VERSION，定版前恒为 0.0.1（见 version.py）。
+版本策略：产品版本唯一真源是仓库根 VERSION，所有声明点须与之严格一致
+（见 version.py 的 assert_version_frozen；不再写死旧版本号）。
 """
 
 from __future__ import annotations

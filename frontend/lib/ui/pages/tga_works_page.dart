@@ -13,7 +13,8 @@ import '../../services/works_registry.dart';
 /// 工作区目录（本地工作区 + 内置沙箱 sandbox/），把含产物的子目录识别为
 /// 网站 / App / 脚本。
 /// - 网站 → webview_flutter 加载真实 file:// HTML；平台不支持 WebView 时
-///   如实提示「请在移动端预览」，不伪造渲染。
+///   真实调用系统默认程序（xdg-open / open / start）打开该文件，
+///   不再只给「请在移动端预览」的死路提示，也绝不伪造渲染。
 /// - App / 脚本 → 目录内真实文件列表，可点开文本内容预览。
 class TgaWorksPage extends StatefulWidget {
   const TgaWorksPage({super.key});
@@ -195,8 +196,8 @@ class _WorkTile extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 /// 用 WebViewController（platform 接口，跨 Android/iOS）加载本地 HTML。
-/// 桌面等未注册 WebView 实现的平台创建控制器会抛异常，如实提示
-/// 「请在移动端预览」，绝不伪造渲染。
+/// 桌面等未注册 WebView 实现的平台创建控制器会抛异常，此时真实调用系统
+/// 默认程序打开本地 HTML（不是伪造渲染，也不是一句「请在移动端预览」）。
 class TgaWorkWebPage extends StatefulWidget {
   const TgaWorkWebPage({super.key, required this.work, required this.htmlPath});
   final TgaWork work;
@@ -228,11 +229,47 @@ class _TgaWorkWebPageState extends State<TgaWorkWebPage> {
         ));
       c.loadFile(widget.htmlPath).catchError((Object err) {
         if (!mounted) return;
-        setState(() => _hint = '当前平台不支持 WebView 预览，请在移动端预览。');
+        _hint = '内嵌 WebView 不可用：$err；正在改用系统默认程序打开。';
+        setState(() {});
+        Future<void>.microtask(_openWithSystem);
       });
       _controller = c;
-    } on Object {
-      _hint = '当前平台不支持 WebView 预览，请在移动端预览。';
+    } on Object catch (err) {
+      _hint = '内嵌 WebView 不可用：$err；正在改用系统默认程序打开。';
+      Future<void>.microtask(_openWithSystem);
+    }
+  }
+
+  /// 真实兜底：把本地 HTML 交给操作系统默认浏览器打开并回报真实结果。
+  /// 桌面端 WebView 插件缺失时，这比「请在移动端预览」是真正可用的动作。
+  Future<void> _openWithSystem() async {
+    if (!File(widget.htmlPath).existsSync()) {
+      if (!mounted) return;
+      setState(() => _hint = 'HTML 文件已不存在：${widget.htmlPath}');
+      return;
+    }
+    try {
+      late final ProcessResult result;
+      if (Platform.isLinux) {
+        result = await Process.run('xdg-open', <String>[widget.htmlPath]);
+      } else if (Platform.isMacOS) {
+        result = await Process.run('open', <String>[widget.htmlPath]);
+      } else if (Platform.isWindows) {
+        result = await Process.run('cmd', <String>['/c', 'start', '', widget.htmlPath]);
+      } else {
+        if (!mounted) return;
+        setState(() => _hint = '当前平台既无 WebView 也无系统打开命令，无法预览：${widget.htmlPath}');
+        return;
+      }
+      if (!mounted) return;
+      if (result.exitCode == 0) {
+        setState(() => _hint = '已用系统默认程序打开：${widget.htmlPath}');
+      } else {
+        setState(() => _hint = '系统打开失败（exit=${result.exitCode}）：${result.stderr}');
+      }
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() => _hint = '系统打开失败：$e；文件路径：${widget.htmlPath}');
     }
   }
 
@@ -246,6 +283,14 @@ class _TgaWorkWebPageState extends State<TgaWorkWebPage> {
               padding: const EdgeInsets.fromLTRB(Tga.pagePad, 60, Tga.pagePad, 32),
               children: <Widget>[
                 TgaCard(child: TgaEmpty(_hint, icon: Icons.desktop_mac_outlined)),
+                const SizedBox(height: 12),
+                Center(
+                  child: FilledButton.icon(
+                    onPressed: _openWithSystem,
+                    icon: const Icon(Icons.open_in_new, size: 16),
+                    label: const Text('用系统默认程序打开'),
+                  ),
+                ),
               ],
             )
           : Stack(

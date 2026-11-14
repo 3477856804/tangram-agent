@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/theme/flai_theme.dart';
+import '../../../providers/tangram_auth_provider.dart';
 import '../auth_controller.dart';
 import '../widgets/auth_text_field.dart';
 
@@ -70,7 +71,7 @@ class _FlaiVerificationCodeState extends State<FlaiVerificationCode> {
                   ],
 
                   Text(
-                    'Check your inbox',
+                    '本机离线验证码',
                     style: theme.typography.lg.copyWith(
                       color: theme.colors.foreground,
                       fontWeight: FontWeight.bold,
@@ -80,11 +81,41 @@ class _FlaiVerificationCodeState extends State<FlaiVerificationCode> {
                   SizedBox(height: theme.spacing.sm),
 
                   Text(
-                    'Enter the verification code we just sent to ${widget.controller.email}',
+                    '本应用没有邮件服务端，验证码只保存在这台设备，'
+                    '不会发送给任何第三方。${widget.controller.email}',
                     style: theme.typography.sm.copyWith(
                       color: theme.colors.mutedForeground,
                     ),
                     textAlign: TextAlign.center,
+                  ),
+
+                  // 真实呈现本机投递的验证码：来自 TangramLocalAuthProvider 的
+                  // 一次性码生成器 + App 私有目录离线投递文件，绝无假数据。
+                  ValueListenableBuilder<String?>(
+                    valueListenable: TangramLocalAuthProvider.localDelivery,
+                    builder: (BuildContext context, String? delivery, _) {
+                      if (delivery == null || delivery.isEmpty) {
+                        return const SizedBox.shrink();
+                      }
+                      return Padding(
+                        padding: EdgeInsets.only(top: theme.spacing.md),
+                        child: Container(
+                          width: double.infinity,
+                          padding: EdgeInsets.all(theme.spacing.md),
+                          decoration: BoxDecoration(
+                            color: theme.colors.muted,
+                            borderRadius:
+                                BorderRadius.circular(theme.radius.md),
+                          ),
+                          child: SelectableText(
+                            delivery,
+                            style: theme.typography.sm.copyWith(
+                              color: theme.colors.foreground,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
                   ),
 
                   SizedBox(height: theme.spacing.lg),
@@ -134,7 +165,7 @@ class _FlaiVerificationCodeState extends State<FlaiVerificationCode> {
                         ? null
                         : widget.controller.resendCode,
                     child: Text(
-                      'Resend email',
+                      '重新获取本机验证码',
                       style: theme.typography.base.copyWith(
                         color: theme.colors.foreground,
                       ),

@@ -108,11 +108,12 @@ class AuthController extends ChangeNotifier {
         SocialAuthType.apple => await _provider.signInWithApple(),
         SocialAuthType.google => await _provider.signInWithGoogle(),
         SocialAuthType.microsoft => await _provider.signInWithMicrosoft(),
-        // 本机离线身份没有手机号登录能力：与其他外部认证一致返回明确失败，
-        // 而不是抛未捕获异常让界面崩溃，也绝不伪造登录成功。
+        // 本机账号体系没有手机号 + 短信服务端：如实说明可用渠道，
+        // 不抛未捕获异常让界面崩溃，也绝不伪造登录成功。
         SocialAuthType.phone => const AuthFailure(
-          '未接入外部账号体系：本应用无账号、无服务端认证，身份仅保存在本机。',
-          code: 'auth_not_configured',
+          '本应用无短信服务端，不支持手机号登录；请使用邮箱与口令，'
+          '或 Google / Apple / Microsoft 登录。',
+          code: 'phone_not_supported',
         ),
       };
       _handleResult(result);

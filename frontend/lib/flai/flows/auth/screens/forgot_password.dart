@@ -68,7 +68,8 @@ class FlaiForgotPassword extends StatelessWidget {
                   SizedBox(height: theme.spacing.sm),
 
                   Text(
-                    'Click "Continue" to reset your password for ${controller.email}',
+                    '继续后为 ${controller.email} 生成本机离线验证码，'
+                    '用于重置保存在这台设备上的口令（本应用不发送邮件）',
                     style: theme.typography.sm.copyWith(
                       color: theme.colors.mutedForeground,
                     ),

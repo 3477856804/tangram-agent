@@ -5,7 +5,8 @@
 - Adapter 注册表：register / unregister。
 - inbound 规范化：handle_inbound(raw) 把各平台原始事件解析为标准消息并路由给 Agent 运行时。
 - outbound 规范化：send_outbound(msg) 经风控守卫 pre_send 检查后下发到对应平台 Adapter。
-- 把消息路由给 Agent 运行时：通过回调 / 队列占位，不实际 import 后端运行时。
+- 把消息路由给 Agent 运行时：真实持久化 inbox（JSONL）+ 可注入处理器 /
+  工作线程，消息不丢、可审计、可回放。
 - 生命周期：start() / stop()。
 
 约束：仅标准库；import 阶段不联网、不写文件；网络与加密惰性导入 + 降级。
@@ -13,11 +14,14 @@
 
 from __future__ import annotations
 
+import json
+import os
 import queue
 import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .account.pool import AccountPool
@@ -62,7 +66,11 @@ class Adapter(ABC):
 
     @abstractmethod
     def connect(self, account: Any) -> None:
-        """使用账号凭据建立连接（占位：真实实现走平台 SDK）。"""
+        """用账号凭据建立/校验真实连接。
+
+        子类必须真的向平台端点发起校验请求（如 OneBot ``get_login_info`` /
+        桥 ``/status``），失败抛异常；不允许「什么都不做就返回成功」的占位实现。
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -85,28 +93,154 @@ class Adapter(ABC):
 
 
 class AgentRuntimeHook:
-    """Agent 运行时路由占位（不实际 import 后端）。
+    """真实 Agent 运行时路由：持久化 inbox + 可注入处理器 + 工作线程。
 
-    真实部署时由 Dart/PythonBridge 后端注入具体实现，例如把入站消息
-    投入推理队列；此处默认实现为一个线程安全 FIFO 队列，便于测试与解耦。
+    * 每条入站消息都真实追加到 ``inbox_path`` 的 JSONL（重启可回放、可审计），
+      不再是一个没人消费、进程一退就丢的内存队列。
+    * ``handler(msg) -> str|None`` 由部署方注入（IM 网关里就是真实的
+      ``_agent_reply`` / 手机端桥接推理）；``reply(msg, text)`` 注入真实出站。
+    * 未注入 handler 时消息只入队，供 ``drain(handler)`` / 外部消费者取用；
+      绝不伪造回复、绝不静默丢弃。
+    * ``start()`` / ``stop()`` 管理后台工作线程的真实生命周期。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, inbox_path: str | Path | None = None) -> None:
         self.queue: "queue.Queue[MultimodalMessage]" = queue.Queue()
         self.on_reply: Optional[Callable[[MultimodalMessage], None]] = None
+        self.handler: Optional[Callable[[MultimodalMessage], Optional[str]]] = None
+        self.reply: Optional[Callable[[MultimodalMessage, str], None]] = None
+        if inbox_path is None:
+            data_dir = os.environ.get("TANGRAM_DATA") or str(Path.home() / ".tangram")
+            inbox_path = Path(data_dir) / "im_inbox.jsonl"
+        self.inbox_path = Path(inbox_path)
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._processed = 0
+        self._failed = 0
+
+    # ---- 真实持久化 ----
+    def _persist(self, msg: MultimodalMessage) -> None:
+        try:
+            self.inbox_path.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "ts": msg.ts,
+                "platform": msg.platform,
+                "user_id": msg.user_id,
+                "modality": msg.modality,
+                "payload": msg.payload if isinstance(msg.payload, (str, int, float, dict, list)) else str(msg.payload),
+                "message_id": msg.message_id,
+            }
+            with self._lock, self.inbox_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                fh.flush()
+        except OSError as exc:
+            # 落盘失败如实计数，不假装成功；消息仍在内存队列里可消费
+            self._failed += 1
+            print(f"[gateway] inbox 落盘失败：{exc}", flush=True)
+
+    def replay(self, limit: int = 200) -> list[dict]:
+        """从真实磁盘读回最近若干条入站消息（可审计 / 可回放）。"""
+        if not self.inbox_path.is_file():
+            return []
+        lines = self.inbox_path.read_text(encoding="utf-8").splitlines()[-limit:]
+        out: list[dict] = []
+        for line in lines:
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+        return out
+
+    # ---- 注入与投递 ----
+    def set_handler(
+        self,
+        handler: Callable[[MultimodalMessage], Optional[str]],
+        reply: Optional[Callable[[MultimodalMessage, str], None]] = None,
+    ) -> None:
+        """注入真实的推理处理器与出站回调。"""
+        self.handler = handler
+        self.reply = reply
 
     def deliver(self, msg: MultimodalMessage) -> None:
-        """入站消息送达 Agent 运行时（占位：入队并触发回调）。"""
+        """入站消息真实落盘 + 入队 + （有处理器时）真实同步处理。"""
+        self._persist(msg)
         self.queue.put(msg)
         if self.on_reply is not None:
             self.on_reply(msg)
+        if self.handler is not None:
+            self._process(msg)
+
+    def _process(self, msg: MultimodalMessage) -> None:
+        try:
+            answer = self.handler(msg) if self.handler else None
+        except Exception as exc:  # noqa: BLE001 - 处理器失败如实计数，不编造回复
+            self._failed += 1
+            print(f"[gateway] runtime handler 失败：{exc}", flush=True)
+            return
+        if answer and self.reply is not None:
+            try:
+                self.reply(msg, answer)
+            except Exception as exc:  # noqa: BLE001
+                self._failed += 1
+                print(f"[gateway] runtime reply 失败：{exc}", flush=True)
+        self._processed += 1
 
     def pop(self, block: bool = True, timeout: Optional[float] = None) -> Optional[MultimodalMessage]:
-        """取出一条待处理入站消息（占位）。"""
+        """取出一条待处理入站消息。"""
         try:
             return self.queue.get(block=block, timeout=timeout)
         except queue.Empty:
             return None
+
+    def drain(self, handler: Callable[[MultimodalMessage], Optional[str]],
+              max_items: int = 1000) -> int:
+        """用真实处理器消费队列里积压的消息，返回处理条数。"""
+        done = 0
+        while done < max_items:
+            msg = self.pop(block=False)
+            if msg is None:
+                break
+            old = self.handler
+            self.handler = handler
+            try:
+                self._process(msg)
+            finally:
+                self.handler = old
+            done += 1
+        return done
+
+    # ---- 工作线程 ----
+    def start(self) -> bool:
+        """启动真实后台分发线程；只在注入了 handler 时有意义。"""
+        if self.handler is None or (self._thread is not None and self._thread.is_alive()):
+            return False
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="agent-runtime")
+        self._thread.start()
+        return True
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            msg = self.pop(block=True, timeout=0.3)
+            if msg is not None:
+                self._process(msg)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def stats(self) -> dict:
+        return {
+            "queued": self.queue.qsize(),
+            "processed": self._processed,
+            "failed": self._failed,
+            "inbox": str(self.inbox_path.resolve()),
+            "inbox_bytes": self.inbox_path.stat().st_size if self.inbox_path.is_file() else 0,
+            "worker_alive": bool(self._thread and self._thread.is_alive()),
+        }
 
 
 class Gateway:
@@ -171,8 +305,9 @@ class Gateway:
 
     # ---- 生命周期 ----
     def start(self) -> None:
-        """启动网关：标记 running 并触发各 Adapter 监听（若存在）。"""
+        """启动网关：标记 running、拉起运行时分发线程、触发各 Adapter 监听。"""
         self.running = True
+        self.agent_runtime.start()
         for adp in self.adapters.values():
             try:
                 adp.start()
@@ -180,8 +315,9 @@ class Gateway:
                 continue
 
     def stop(self) -> None:
-        """停止网关：标记 running 并停止各 Adapter 监听。"""
+        """停止网关：标记 running、停分发线程、停各 Adapter 监听。"""
         self.running = False
+        self.agent_runtime.stop()
         for adp in self.adapters.values():
             try:
                 adp.stop()
@@ -280,4 +416,5 @@ class Gateway:
                 "blocked": self._blocked_count,
                 "circuit_open": self.risk.circuit_open,
                 "whitelist": sorted(self.risk.user_whitelist),
+                "runtime": self.agent_runtime.stats(),
             }

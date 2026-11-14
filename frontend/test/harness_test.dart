@@ -9,6 +9,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tangram/agent/sandbox/sandboxed_shell.dart';
+import 'package:tangram/app_version.dart';
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/embedded_backend.dart';
 import 'package:tangram/harness/store.dart';
@@ -124,7 +125,7 @@ void main() {
     test('capability_negotiation 声明真实能力，不谎称 Python', () async {
       final r = await call('capability_negotiation');
       expect(r['ok'], true);
-      expect(r['version'], '0.0.1');
+      expect(r['version'], kAppVersion);
       expect(r['transport'], 'in-process-dart');
       expect(r['python'], 'not-used');
       expect((r['control_domains'] as List).length, greaterThan(15));
@@ -145,6 +146,17 @@ void main() {
     test('rpc: active 无模型时如实返回空列表', () async {
       final r = await call('rpc', <String, dynamic>{'action': 'active'});
       expect(r['models'], isA<List>());
+    });
+
+    test('perception_event: 真实本机读数，未采集项如实列出', () async {
+      final r = await call('perception_event');
+      expect(r['ok'], true);
+      expect(r['source'], 'device-local-real');
+      expect(r['platform'], isNotEmpty);
+      expect((r['cpu_count'] as int), greaterThan(0));
+      expect(r['captured_at'], isNotEmpty);
+      expect(r['not_collected'], isA<List>());
+      expect(r['note'].toString(), contains('不编造'));
     });
 
     test('chat: 表达式问法真实求值', () async {
@@ -235,7 +247,7 @@ void main() {
     test('distill: describe 报告真实轨迹数', () async {
       final r = await call('distill', <String, dynamic>{'action': 'describe'});
       final data = r['data'] as Map;
-      expect(data['version'], '0.0.1');
+      expect(data['version'], kAppVersion);
       expect(data['harness']['backend'], 'pure-dart-in-process');
     });
 

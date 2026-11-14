@@ -11,16 +11,49 @@
 
 ## 组成
 
-- `frontend/` — Flutter APP（Android / Windows / Linux / macOS / Web），
+- `frontend/` — Flutter APP（Android / Windows / Linux / macOS / iOS），
   内置纯 Dart 后端（`lib/harness/embedded_backend.dart`）、受限 Isolate 沙箱、
-  真实模型推理链路与全部业务页面。
+  端侧 GGUF 真推理（`llamadart`）与全部业务页面。
+- `backend/` — 本地 Python 后端运行时（真实入口 `main.py`）：
+  `app/runtime/agent_service.py` 应答内核、`local_llm.py` 真实 GGUF/HF 推理、
+  `memory.py` 持久化记忆、`app/models/store.py` 魔搭真实检索。
+  只用标准库即可运行 `--chat` / `--bridge tcp`；推理后端按需惰性探测。
+- `training/` — `pipeline.py`：真实梯度下降训练（有 torch 走 autograd 落盘
+  `.pt`，无 torch 走纯 Python 解析梯度落盘 `.json`）+ 真实合并 / 原子晋升。
 - `im/` — IM 网关（微信 iLink / QQ NapCat / 飞书设备授权流三渠道扫码接入、
-  消息收发、局域网 UDP 自动发现）。
-- `harness/` — 能力契约 / 工具注册表 / 工作轨迹 / 蒸馏与教师接口的 Python 参考实现。
+  消息收发、局域网 UDP 自动发现、真实持久化 inbox 与 WS 事件监听）。
+- `harness/` — 能力契约 / 工作轨迹 / 蒸馏与教师接口的 Python 参考实现。
+- `tests/` — 真实功能回归测试（`python3 -m pytest tests -q`）。
 - `skills/` — 内置技能清单。
 - `schema/` `shared/` — 协议与共享定义。
-- `scripts/` — 构建脚本（`build_frontend.sh` 等）。
+- `scripts/` — 构建脚本（`build_frontend.sh` / `build_backend.sh` /
+  `run_headless.sh` 等）。
 - `.github/workflows/` — 全平台云端构建工作流。
+
+## 本地后端与蒸馏（真实可运行）
+
+```bash
+# 无头对话：确定性能力真实执行；配置模型后走真实推理
+bash scripts/run_headless.sh --data ~/.tangram
+
+# 真实本地模型（GGUF）或 OpenAI 兼容云端 API
+TANGRAM_MODEL=/path/to/model.gguf python3 backend/main.py --chat
+TANGRAM_API_BASE=https://api.example.com/v1 TANGRAM_API_KEY=xxx \
+  TANGRAM_API_MODEL=gpt-4o-mini python3 backend/main.py --bridge tcp --port 50440
+
+# 工作蒸馏：真实数据集 → 真实训练 → 真实合并权重 → active.json 晋升
+python3 -m harness --models-root ./models demo          # 离线端到端自测
+python3 -m harness --models-root ./models download qwen2.5-0.5b --mirror
+python3 -m harness --models-root ./models distill --source local --base qwen2.5-0.5b
+
+# 真实功能回归测试与后端构建
+python3 -m pytest tests -q
+bash scripts/build_backend.sh --output dist/backend
+```
+
+未配置任何模型时，运行时会明确报「未配置模型」，绝不用模板/检索式占位文本
+冒充模型回复。训练产物会如实标注格式（适配核 / 合并权重 / 标记文件），
+不把 JSON 或适配核伪装成完整 GGUF/LLM 权重。
 
 ## 快速开始（构建 APP）
 

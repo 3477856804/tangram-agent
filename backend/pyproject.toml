@@ -1,0 +1,16 @@
+[project]
+name = "tangram-backend"
+version = "0.0.4"
+description = "Tangram 本地 Agent 运行时（真实推理 / 记忆 / 工具 / 无头对话 / TCP 桥）"
+requires-python = ">=3.10"
+
+[project.scripts]
+tangram-backend = "main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app", "app.runtime", "app.models", "app.sandbox"]
+py-modules = ["main"]

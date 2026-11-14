@@ -19,6 +19,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
 
+from .version import PRODUCT_VERSION
+
 
 class TeacherError(Exception):
     """教师不可用或推理失败。"""
@@ -77,7 +79,8 @@ class LocalTeacher(BaseTeacher):
     def _engine(self):
         if self._llm is not None:
             return self._llm
-        # 允许 backend 以两种 sys.path 形态被导入（仓库根 / backend 根）
+        # 真实后端在仓库自带 backend/app/runtime/local_llm.py；
+        # 兼容两种 sys.path 形态（仓库根 / backend 根）。
         try:
             from backend.app.runtime.local_llm import LocalLLMInference
         except ImportError:
@@ -88,7 +91,10 @@ class LocalTeacher(BaseTeacher):
                     "无法导入 LocalLLMInference；请从仓库根运行或检查 backend 路径"
                 ) from exc
         self._llm = LocalLLMInference(gguf_path=self.model_path)
-        self._llm.load(self.model_path)
+        try:
+            self._llm.load(self.model_path)
+        except Exception as exc:  # noqa: BLE001 - 权重/后端不可用如实报错
+            raise TeacherError(f"本地教师权重加载失败：{exc}") from exc
         return self._llm
 
     def complete(self, prompt: str, system: str = "") -> str:
@@ -177,7 +183,7 @@ class ApiTeacher(BaseTeacher):
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
-            "User-Agent": "tangram-agent/0.0.1",
+            "User-Agent": f"tangram-agent/{PRODUCT_VERSION}",
         }
         headers.update(self.extra_headers)
         req = urllib.request.Request(

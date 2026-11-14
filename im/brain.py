@@ -33,8 +33,9 @@ CAPABILITIES_TEXT = (
     "2) 定时提醒：说「三分钟后提醒我喝水」，到点我主动发消息给你\n"
     "3) 时间日期：随时问我现在几点、今天几号\n"
     "4) 天气查询：「北京天气怎么样」（Open-Meteo 实时接口）\n"
-    "5) 本地问答：其他问题由我设备里的本地模型直接回答，全程离线不上传\n"
-    "6) 记忆：我会记住聊天内容，下次还能问我要"
+    "5) 开放域问答：配置本地 GGUF 权重或云端 API 后由真实模型回答；"
+    "没配置就如实告诉你，绝不编造\n"
+    "6) 记忆：聊天内容与长期笔记真实落盘在本机，下次还能问我要"
 )
 
 _CN_NUM = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7,
@@ -133,18 +134,43 @@ def try_identity(text: str) -> Optional[str]:
         return ("我是檀阁瑞木 Tangram——住在你设备里的个人专属 AI Agent，"
                 "本地推理、接入微信/QQ、能记事和设提醒。不是七巧板，是干活的那个。")
     if re.search(r"什么模型|用的啥模型|模型是", text):
-        return ("我现在由设备里的本地模型驱动（GGUF 量化权重、离线推理），"
-                "具体版本由主人随时可换；我的身份是 Tangram，模型只是我的一部分。")
+        # 如实报告当前真实配置的推理来源，不再笼统声称「本地 GGUF 离线推理」。
+        local = os.environ.get("TANGRAM_MODEL", "")
+        cloud = all(os.environ.get(k) for k in
+                    ("TANGRAM_API_BASE", "TANGRAM_API_KEY", "TANGRAM_API_MODEL"))
+        if cloud:
+            src = "已配置的 OpenAI 兼容云端 API（TANGRAM_API_MODEL）"
+        elif local:
+            src = f"本地权重 {os.path.basename(local)}（真实 GGUF/HF 推理）"
+        else:
+            src = ("当前未配置任何模型：算术/报时/提醒/天气/检索由确定性能力真实执行，"
+                   "开放域问答需配置本地 GGUF 或云端 API，不会编造答案")
+        return f"我的身份是 Tangram；当前推理来源是：{src}。模型只是我的一部分。"
     if re.search(r"(你|您)(可以|能|会不会|会|能)\s*(干|做|搞|帮忙做)[a-zA-Z吗啥什么]*|有(哪些)?功能|能帮我|你会什么|都能干什么", text) or re.search(r"你可以干什么|你能做什么|你会干什么|你能干啥", text):
         return CAPABILITIES_TEXT
     return None
 
 
 def try_time(text: str) -> Optional[str]:
+    """真实读取设备本地时钟与时区，不把本地时间硬说成「北京时间」。"""
+    from datetime import datetime, timezone
+
+    now = datetime.now().astimezone()
+    tz = now.tzinfo
+    tzname = tz.tzname(now) if tz is not None else "本地时区"
+    offset = now.utcoffset()
+    off_txt = ""
+    if offset is not None:
+        total = int(offset.total_seconds() // 60)
+        off_txt = f"UTC{'+' if total >= 0 else '-'}{abs(total) // 60:02d}:{abs(total) % 60:02d}"
+    zone = f"{tzname} {off_txt}".strip() or "设备本地时区"
+    utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
     if re.search(r"几点|现在.{0,3}时间|报时", text):
-        return "现在是 " + time.strftime("%H:%M:%S") + "（北京时间，设备本地时钟）。"
+        return (f"现在是 {now.strftime('%H:%M:%S')}（设备本地时间，{zone}）；"
+                f"UTC {utc}。")
     if re.search(r"今天几号|今天(是)?(星期|周)几|几月几号|日期", text):
-        return "今天是 " + time.strftime("%Y-%m-%d %A") + "（设备本地日历）。"
+        weekday = "星期" + "一二三四五六日"[now.weekday()]
+        return f"今天是 {now.strftime('%Y-%m-%d')} {weekday}（设备本地日历，{zone}）。"
     return None
 
 

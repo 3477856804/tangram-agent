@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0.0",
+  "product": "tangram-agent",
+  "kind": "chat",
+  "active": null,
+  "real_artifact": "",
+  "note": "初始状态：没有已晋升的私人模型。工作蒸馏成功后由 training.pipeline.Promoter 原子更新本文件；此 JSON 里的 schema_version 是策略版本，不是产品版本号。"
+}

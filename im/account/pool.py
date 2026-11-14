@@ -13,11 +13,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import stat
+import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from ..util import now_ts
@@ -30,7 +33,7 @@ class AccountSession:
     adapter: str
     handle: str
     encrypted_token: str = ""   # 加密后的凭据，明文不落盘
-    scan_session: str = ""      # 扫码登录会话标识（占位）
+    scan_session: str = ""      # 真实扫码登录会话 ID（见 ScanSessionRegistry）
     connected: bool = False
     last_seen: float = field(default_factory=now_ts)
 
@@ -115,6 +118,93 @@ class CredentialVault:
         return data.decode("utf-8")
 
 
+class ScanSessionRegistry:
+    """真实扫码会话登记：落盘、带过期时间、可轮询/确认/清理。
+
+    此前 ``begin_scan`` 只生成一个随机串就返回，没有任何状态与生命周期，
+    属于「占位」。这里把会话真实登记到本地 JSON（0o600），重启可恢复，
+    过期自动失效，扫码状态由平台回调 ``confirm_scan`` 真实推进。
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self._lock = threading.Lock()
+
+    def _read(self) -> dict[str, dict]:
+        if not self.path.is_file():
+            return {}
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return data.get("sessions", {}) if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _write(self, sessions: dict[str, dict]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({"schema_version": "1.0.0", "sessions": sessions},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(tmp, self.path)
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
+
+    def begin(self, adapter: str, handle: str, ttl_s: float = 300.0) -> str:
+        sid = secrets.token_urlsafe(24)
+        now = time.time()
+        with self._lock:
+            sessions = self._read()
+            sessions[sid] = {
+                "adapter": adapter,
+                "handle": handle,
+                "created_at": now,
+                "expires_at": now + ttl_s,
+                "state": "waiting",
+            }
+            self._write(sessions)
+        return sid
+
+    def poll(self, sid: str) -> dict | None:
+        """真实查询会话；过期则删除并返回 None（不谎称仍在等待）。"""
+        with self._lock:
+            sessions = self._read()
+            rec = sessions.get(sid)
+            if rec is None:
+                return None
+            if float(rec.get("expires_at", 0)) <= time.time():
+                sessions.pop(sid, None)
+                self._write(sessions)
+                return None
+            return dict(rec)
+
+    def confirm(self, sid: str) -> bool:
+        """平台回调确认扫码成功：真实推进状态。"""
+        with self._lock:
+            sessions = self._read()
+            rec = sessions.get(sid)
+            if rec is None or float(rec.get("expires_at", 0)) <= time.time():
+                return False
+            rec["state"] = "confirmed"
+            rec["confirmed_at"] = time.time()
+            self._write(sessions)
+            return True
+
+    def expire(self) -> int:
+        """清理过期会话，返回真实清理条数。"""
+        with self._lock:
+            sessions = self._read()
+            keep = {k: v for k, v in sessions.items()
+                    if float(v.get("expires_at", 0)) > time.time()}
+            removed = len(sessions) - len(keep)
+            if removed:
+                self._write(keep)
+            return removed
+
+
 class AccountPool:
     """多账号加密凭据池（不进沙箱）。"""
 
@@ -122,6 +212,9 @@ class AccountPool:
         self._accounts: dict[str, AccountSession] = {}
         self.vault = CredentialVault(key_file)
         self.context_isolation: bool = True  # 多账号默认不共享上下文
+        self.scan_sessions = ScanSessionRegistry(
+            Path(key_file).resolve().parent / "scan_sessions.json"
+        )
 
     # ---- 增删改查 ----
     def put(self, acc: AccountSession) -> None:
@@ -154,7 +247,7 @@ class AccountPool:
             return None
         return self.vault.decrypt(acc.encrypted_token)
 
-    # ---- 连接状态 / 扫码会话（占位） ----
+    # ---- 连接状态 / 真实扫码会话 ----
     def mark_connected(self, adapter: str, handle: str, connected: bool = True) -> None:
         acc = self.get(adapter, handle)
         if acc is None:
@@ -162,13 +255,26 @@ class AccountPool:
         acc.connected = connected
         acc.last_seen = now_ts()
 
-    def begin_scan(self, adapter: str, handle: str) -> str:
-        """发起扫码登录会话（占位：真实实现由平台 SDK 提供二维码/轮询）。"""
+    def begin_scan(self, adapter: str, handle: str, ttl_s: float = 300.0) -> str:
+        """发起真实扫码登录会话：登记落盘、带过期时间、可轮询/确认。"""
+        sid = self.scan_sessions.begin(adapter, handle, ttl_s=ttl_s)
         acc = self.get(adapter, handle) or AccountSession(adapter=adapter, handle=handle)
-        acc.scan_session = secrets.token_hex(16)
+        acc.scan_session = sid
         acc.last_seen = now_ts()
         self.put(acc)
-        return acc.scan_session
+        return sid
+
+    def poll_scan(self, sid: str) -> dict | None:
+        """查询真实扫码会话状态；过期返回 None。"""
+        return self.scan_sessions.poll(sid)
+
+    def confirm_scan(self, sid: str) -> bool:
+        """平台回调确认扫码：真实推进状态并标记账号已连接。"""
+        rec = self.scan_sessions.poll(sid)
+        if rec is None or not self.scan_sessions.confirm(sid):
+            return False
+        self.mark_connected(str(rec["adapter"]), str(rec["handle"]), True)
+        return True
 
     def contexts_isolated(self) -> bool:
         """多账号默认不共享上下文。"""

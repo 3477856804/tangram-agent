@@ -30,10 +30,28 @@ class WeChatOfficialAdapter(Adapter):
         self._app_secret = app_secret
         self._net = NetClient(base_url=server_base)
 
-    # ---- 连接（占位） ----
-    def connect(self, account: Any) -> None:
-        # 官方一对一无需本地长连接；凭据由服务端持有。
-        return None
+    # ---- 连接：真实校验证书配置与验签代理可达性 ----
+    def connect(self, account: Any = None) -> None:
+        """真实连接校验：凭据齐全 + 服务端验签代理真的能应答。
+
+        官方一对一不需要本地长连接，但「什么都不做就返回成功」是假连接；
+        这里必须验证 app_secret 已配置、代理地址已配置且真实可达。
+        """
+        if isinstance(account, dict):
+            if account.get("server_base"):
+                self.server_base = str(account["server_base"])
+                self._net.base_url = self.server_base
+            if account.get("app_secret"):
+                self._app_secret = str(account["app_secret"])
+        if not self._app_secret:
+            raise RuntimeError("wechat_official 未配置 app_secret：无法验签，拒绝伪装已连接")
+        if not self.server_base:
+            raise RuntimeError("wechat_official 未配置服务端验签代理 server_base")
+        resp, why = self._net.get_json("/api/im/wechat/health")
+        if resp is None and why.startswith(("network-error", "network-degraded")):
+            raise RuntimeError(f"wechat-official-connect-failed:{why}")
+        # 代理回了 HTTP 错误码（如 404 未实现 health）说明链路确实可达，
+        # 只把「连不上」判为失败，避免把可达误判成不可用。
 
     def verify_message_signature(
         self, signature: str, timestamp: str, nonce: str, body: str = ""

@@ -3,8 +3,9 @@
 # 檀阁瑞木 Tangram —— 后端可分发构建脚本
 #
 # 行为：
-#   1. 检测 pyinstaller；若存在则打包为可分发包（占位检测，默认不打包，提示以源码运行）。
-#   2. 拷贝运行时资源：sandbox_policy.json / active.json / channels.json 到产出目录。
+#   1. 真实编译检查 backend / training / harness / im（compileall 失败即退出）。
+#   2. 可选 --pyinstaller：真的调用 pyinstaller 打一个可分发单文件包。
+#   3. 拷贝真实随包运行时资源到产出目录（缺一个就报错，不静默跳过）。
 #
 # 用法：
 #   scripts/build_backend.sh [--output DIR] [--pyinstaller] [-h|--help]
@@ -20,11 +21,12 @@ OUTPUT_DIR="${REPO_ROOT}/dist/backend"
 USE_PYINSTALLER=0
 VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null || echo unknown)"
 
-# 待拷贝的运行时资源（相对仓库根）
+# 待拷贝的真实运行时资源（相对仓库根）；全部随仓库存在，构建时逐一校验。
 RESOURCES=(
   "backend/app/sandbox/sandbox_policy.json"
   "backend/app/models/active.json"
-  "server/ota/channels.json"
+  "backend/requirements.txt"
+  "im/requirements.txt"
 )
 
 while [[ $# -gt 0 ]]; do
@@ -44,38 +46,56 @@ done
 
 echo "==> 后端构建 (Tangram ${VERSION})"
 
-# 编译检查（源码可运行前的基本门禁）
-echo "提示: 编译检查 python3 -m compileall backend"
-( cd "${REPO_ROOT}" && python3 -m compileall -q backend )
+# ---- 真实编译门禁：四个 Python 包全部 compileall ----
+echo "==> 编译检查 backend / training / harness / im"
+for pkg in backend training harness im; do
+  if [[ ! -d "${REPO_ROOT}/${pkg}" ]]; then
+    echo "错误: 缺少源码目录 ${pkg}" >&2
+    exit 1
+  fi
+  ( cd "${REPO_ROOT}" && python3 -m compileall -q "${pkg}" ) || {
+    echo "错误: ${pkg} 编译检查未通过" >&2
+    exit 1
+  }
+  echo "  ${pkg}: OK"
+done
 
 mkdir -p "${OUTPUT_DIR}"
 
-# ---- 可选 pyinstaller 打包（占位检测）----
+# ---- 可选 pyinstaller 打包（真实执行 + 校验产物）----
 if [[ "${USE_PYINSTALLER}" -eq 1 ]]; then
   if command -v pyinstaller >/dev/null 2>&1; then
     echo "使用 pyinstaller 打包 ..."
-    ( cd "${BACKEND_DIR}" && pyinstaller --name tangram-backend --onefile main.py )
-    if [[ -f "${BACKEND_DIR}/dist/tangram-backend" ]]; then
-      cp "${BACKEND_DIR}/dist/tangram-backend" "${OUTPUT_DIR}/"
-      echo "已生成可执行包: ${OUTPUT_DIR}/tangram-backend"
+    ( cd "${BACKEND_DIR}" && pyinstaller --noconfirm --clean --name tangram-backend \
+        --onefile --paths "${REPO_ROOT}" --paths "${BACKEND_DIR}" main.py ) || {
+      echo "错误: pyinstaller 打包失败" >&2
+      exit 1
+    }
+    built="${BACKEND_DIR}/dist/tangram-backend"
+    if [[ ! -f "${built}" ]]; then
+      echo "错误: 打包结束但找不到可执行文件 ${built}" >&2
+      exit 1
     fi
+    cp "${built}" "${OUTPUT_DIR}/"
+    echo "已生成可执行包: ${OUTPUT_DIR}/tangram-backend"
   else
-    echo "警告: 未找到 pyinstaller，跳过打包。" >&2
-    echo "提示: 直接用源码运行 python backend/main.py --bridge tcp" >&2
+    echo "错误: 指定了 --pyinstaller 但本机没有 pyinstaller。" >&2
+    echo "提示: python3 -m pip install pyinstaller，或去掉该参数以源码分发。" >&2
+    exit 1
   fi
 else
   echo "提示: 未启用 --pyinstaller，默认以源码方式分发。"
-  echo "      无头运行: python backend/main.py --chat"
-  echo "      桥接调试: python backend/main.py --bridge tcp"
+  echo "      无头运行: python3 backend/main.py --chat"
+  echo "      桥接调试: python3 backend/main.py --bridge tcp"
 fi
 
-# ---- 拷贝运行时资源 ----
+# ---- 拷贝真实运行时资源（缺失即失败，不静默跳过）----
 echo "==> 拷贝运行时资源到 ${OUTPUT_DIR}"
 for rel in "${RESOURCES[@]}"; do
   src="${REPO_ROOT}/${rel}"
   if [[ ! -f "${src}" ]]; then
-    echo "警告: 缺少资源 ${rel}，跳过" >&2
-    continue
+    echo "错误: 缺少运行时资源 ${rel}" >&2
+    exit 1
   fi
   dest="${OUTPUT_DIR}/${rel}"
   mkdir -p "$(dirname "${dest}")"

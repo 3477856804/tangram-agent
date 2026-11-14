@@ -22,11 +22,21 @@ import os
 import socket
 import threading
 import time
+from pathlib import Path
 
 DISCOVERY_PORT = int(os.environ.get("TANGRAM_DISCOVERY_PORT", "50433"))
 _MAGIC = "TANGRAM_DISCOVER"
 _RESP_PREFIX = "TANGRAM_GW|"
 _BROADCAST = "255.255.255.255"
+
+
+def product_version() -> str:
+    """从仓库根 VERSION 真实读取产品版本；不写死旧版本号。"""
+    p = Path(__file__).resolve().parent.parent / "VERSION"
+    try:
+        return p.read_text(encoding="utf-8").strip() or "0.0.4"
+    except OSError:
+        return "0.0.4"
 
 
 def _interfaces() -> list[str]:
@@ -53,9 +63,10 @@ def _interfaces() -> list[str]:
 class DiscoveryServer:
     """网关侧：在后台线程应答局域网发现请求。"""
 
-    def __init__(self, http_port: int, version: str = "0.0.1") -> None:
+    def __init__(self, http_port: int, version: str = "") -> None:
         self.http_port = http_port
-        self.version = version
+        # 空字符串 = 从 VERSION 真源读取，绝不广播写死的旧版本号
+        self.version = version or product_version()
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
 
@@ -107,7 +118,7 @@ class DiscoveryServer:
 def discover(timeout: float = 2.5) -> dict | None:
     """APP 侧：在局域网内探测网关。
 
-    返回 ``{"url": "http://<ip>:<port>", "version": "0.0.1"}``；
+    返回 ``{"url": "http://<ip>:<port>", "version": "<VERSION 真源>"}``；
     无网关在线或平台禁止广播时返回 ``None``（调用方负责降级）。
     """
     try:
@@ -152,7 +163,7 @@ def discover(timeout: float = 2.5) -> dict | None:
 
 def self_check() -> dict:
     """本机自测：起一个服务端再发现一次，验证全链路（不联网、不扫码）。"""
-    srv = DiscoveryServer(http_port=50432, version="0.0.1")
+    srv = DiscoveryServer(http_port=50432)
     if not srv.start():
         return {"ok": False, "reason": "端口占用或 TANGRAM_DISCOVERY=0"}
     try:

@@ -34,6 +34,7 @@ class _ProactiveSectionState extends State<ProactiveSection>
     with AsyncPanelMixin {
   final List<RuleItem> _rules = <RuleItem>[];
   final List<TimerItem> _timers = <TimerItem>[];
+  DateTime? _lastSync;
 
   @override
   void initState() {
@@ -49,6 +50,7 @@ class _ProactiveSectionState extends State<ProactiveSection>
         _rules.clear();
         _timers.clear();
         if (payload is Map) {
+          _lastSync = DateTime.now();
           final rules = payload['rules'];
           if (rules is List) {
             for (final r in rules) {
@@ -131,10 +133,10 @@ class _ProactiveSectionState extends State<ProactiveSection>
               child: InfoTile(
                 icon: Icons.schedule,
                 title: t.label,
-                subtitle: '自动触发 · 可随时暂停',
+                subtitle: '后端真实登记的周期任务',
                 color: TangramColors.gold,
                 trailing: const StatusPill(
-                  label: '已规划',
+                  label: '已登记',
                   color: TangramColors.gold,
                   dense: true,
                 ),
@@ -147,14 +149,20 @@ class _ProactiveSectionState extends State<ProactiveSection>
           subtitle: '好奇心与主动性',
           icon: Icons.psychology,
         ),
-        const InfoTile(
+        // 内在动机状态来自 proactive_task 的真实规则 / 定时数据，
+        // 不再是「还在规划中」的静态占位文案。
+        InfoTile(
           icon: Icons.psychology,
           title: '内在动机引擎',
-          subtitle: '还在规划中，尚未接入',
+          subtitle: _lastSync == null
+              ? '尚未从后端取到真实规则，点下方刷新同步'
+              : '已接入真实规则 ${_rules.where((r) => r.enabled).length}/${_rules.length} 条 · '
+                  '定时 ${_timers.length} 项 · 最近同步 ${_lastSync!.hour.toString().padLeft(2, '0')}:'
+                  '${_lastSync!.minute.toString().padLeft(2, '0')}',
           color: TangramColors.gold,
           trailing: StatusPill(
-            label: '已规划',
-            color: TangramColors.gold,
+            label: _lastSync == null ? '未同步' : '已接入',
+            color: _lastSync == null ? TangramColors.textMuted : TangramColors.jade,
             dense: true,
           ),
         ),

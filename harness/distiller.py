@@ -2,8 +2,10 @@
 
 链路（全部真实执行，非占位）：
   WorkLog 轨迹 → traces_to_sft → JSONL 数据集落盘
-    → training.pipeline.QLoRAJob.run(traces=...)（torch 真实梯度下降，落盘 .pt）
-    → MergeJob.merge(.pt adapter, base)（真实合并权重 .merged.pt + GGUF 标记）
+    → training.pipeline.QLoRAJob.run(traces=...)（真实梯度下降：有 torch 走
+      autograd 落盘 .pt，无 torch 走纯 Python 解析梯度落盘 .json）
+    → MergeJob.merge(adapter, base)（真实合并权重 .merged.pt/.json +
+      如实标注格式的标记文件，不把 JSON 冒充 GGUF 二进制）
     → Promoter.promote(...)(原子更新 active.json 激活指针)
     → 模型卡 model_card.json（记录 lineage / 指标 / 版本 / agent=model+harness）
 
@@ -11,10 +13,10 @@
   * from_local_base()：本地下载基底模型 → LocalTeacher → 工作蒸馏 → 私人 model
   * from_api()：调用 API → ApiTeacher → 工作蒸馏 → 私人 model
 
-诚实边界：训练用的是真实的 bag-of-chars 特征 + torch 线性适配核（凸优化，
-loss 单调下降、权重真实落盘）。它是「把工作行为蒸进一个可加载适配核」的
-最小真实实现；要蒸出完整 LLM 权重需接入 peft/transformers 的 QLoRA（本机
-有权重与 GPU 时由 training.pipeline 的原生路径接管）。二者都不伪造产物。
+诚实边界：训练用的是真实的 bag-of-chars 特征 + 线性适配核（凸优化，
+loss 单调下降、权重真实落盘、可重新加载）。它是「把工作行为蒸进一个可加载
+适配核」的最小真实实现；要蒸出完整 LLM 权重需接入 peft/transformers 的
+QLoRA 与本地基底权重。两条路径都不伪造产物，也不把适配核伪装成完整 LLM。
 """
 
 from __future__ import annotations
@@ -194,22 +196,20 @@ class WorkDistiller:
         ckpt = m.get("checkpoint")
         if ckpt and Path(ckpt).is_file():
             return ckpt
-        # 无 torch 的模拟分支：没有真实权重，明确失败，不拿占位文件冒充产物
+        # 没有落盘的真实权重就明确失败，不拿占位文件冒充产物。
+        # training.pipeline 现在无论有无 torch 都会产出真实权重（.pt / .json）。
         raise RuntimeError(
-            "训练未产出真实权重 .pt（torch 不可用或未落盘）；"
-            "本产品不把模拟产物冒充用户模型，请安装 torch 后重试"
+            "训练未产出真实权重文件（QLoRAJob 未落盘或写入失败）；"
+            "本产品不把占位文件冒充用户模型，请检查训练日志与磁盘权限"
         )
 
     def _merge(self, ckpt: str) -> dict:
         from training.pipeline import MergeJob
 
         teacher_info = self.teacher.info()
-        base = (
-            self._base_path()
-            if teacher_info.kind == "local"
-            else self.active_json.parent / "base" / "api_distill_base.placeholder"
-        )
-        # API 路径没有本地基座权重：MergeJob 只做标记，仍会真实落盘合并权重 .merged.pt
+        base = self._base_path() if teacher_info.kind == "local" else ""
+        # API 路径没有本地基座权重：如实传空路径，MergeJob 会在产物元数据里
+        # 标注「无基底」，仍真实落盘本次训练出的合并权重（.merged.pt / .json）。
         gguf = MergeJob(self.models_root).merge(ckpt, base)
         marker = Path(gguf).with_suffix(".merge.json")
         real_artifact = ""

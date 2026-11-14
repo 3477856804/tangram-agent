@@ -75,7 +75,7 @@ def _agent(args) -> TangramAgent:
 def cmd_version(args) -> int:
     assert_version_frozen()
     print(f"{PRODUCT_NAME} {PRODUCT_VERSION}  (agent = model + harness)")
-    print("产品版本定版前恒为 0.0.1；唯一真源：仓库根 VERSION")
+    print("产品版本唯一真源：仓库根 VERSION；各声明点由 assert_version_frozen 校验一致")
     return 0
 
 

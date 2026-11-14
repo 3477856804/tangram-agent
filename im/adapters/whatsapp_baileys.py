@@ -23,8 +23,14 @@ class WhatsAppBaileysAdapter(Adapter):
         self.bridge_base = bridge_base
         self._net = NetClient(base_url=bridge_base)
 
-    def connect(self, account: Any) -> None:
-        return None
+    def connect(self, account: Any = None) -> None:
+        """真实连接校验：向 Baileys 桥进程 GET /status，拿不到就报错。"""
+        if isinstance(account, dict) and account.get("bridge_base"):
+            self.bridge_base = str(account["bridge_base"])
+            self._net.base_url = self.bridge_base
+        resp, why = self.bridge_status()
+        if resp is None:
+            raise RuntimeError(f"whatsapp-bridge-connect-failed:{why}（请启动桥进程）")
 
     def parse_inbound(self, raw: dict[str, Any]) -> MultimodalMessage:
         user_id = str(raw.get("user_id", ""))

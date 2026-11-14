@@ -3,7 +3,7 @@
 风险提示：非官方接口存在封号 / 合规风险，默认 enabled=False，
 必须用户显式调用 enable() 开启并确认风险后方可使用。
 - inbound：解析企业微信/wechatbot webhook 事件。
-- outbound：文本 / 图片（经 webhook 占位）。
+- outbound：文本 / 图片（真实 POST 到 webhook，失败抛错由网关风控记录）。
 """
 
 from __future__ import annotations
@@ -36,10 +36,19 @@ class WeChatUnofficialAdapter(Adapter):
     def disable(self) -> None:
         self.enabled = False
 
-    def connect(self, account: Any) -> None:
+    def connect(self, account: Any = None) -> None:
+        """真实连接校验：webhook 已配置且真的能连上，不谎称可用。"""
         if not self.enabled:
             raise RuntimeError("wechat_unofficial 默认禁用，需显式开启（见 enable）")
-        return None
+        if isinstance(account, dict) and account.get("webhook_url"):
+            self.webhook_url = str(account["webhook_url"])
+        if not self.webhook_url:
+            raise RuntimeError("wechat_unofficial 未配置 webhook_url，拒绝伪装已连接")
+        resp, why = self._net.get_json(self.webhook_url)
+        # 服务端回了 HTTP 状态码即视为链路可达（webhook 一般只收 POST）；
+        # 只有网络层失败才是真的连不上。
+        if resp is None and why.startswith(("network-error", "network-degraded")):
+            raise RuntimeError(f"wechat-unofficial-connect-failed:{why}")
 
     def parse_inbound(self, raw: dict[str, Any]) -> MultimodalMessage:
         if not self.enabled:
