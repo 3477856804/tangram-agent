@@ -205,6 +205,8 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
                 maxLines: 1,
                 textInputAction: TextInputAction.send,
                 onSubmitted: (_) => _submit(),
+                // 点终端其它区域不丢焦点：保持聚焦，软键盘/物理键盘始终能输入。
+                onTapOutside: (_) => _inputFocus.requestFocus(),
                 style: _ts,
                 cursorColor: _termGreen,
                 cursorWidth: 2,
@@ -471,7 +473,9 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
                   // 欢迎语 + 执行历史 + 内联输入行（同一缓冲区，贴着最新输出）
                   Expanded(
                     child: GestureDetector(
-                      behavior: HitTestBehavior.translucent,
+                      // opaque：确保点终端任何空白区域都能命中并聚焦输入，
+                      // 否则 translucent 会让点击穿透，出现「只有点输入框才能打字」。
+                      behavior: HitTestBehavior.opaque,
                       onTap: () => _inputFocus.requestFocus(),
                       child: ListView(
                         controller: _scroll,
