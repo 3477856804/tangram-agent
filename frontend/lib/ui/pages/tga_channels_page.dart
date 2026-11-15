@@ -27,10 +27,12 @@ import '../../design/tga_design.dart';
 ///    本地 QrImageView 渲染，扫码即建应用，无需网关）；微信有网关时
 ///    渲染网关下发的真登录码；未发现网关时渲染「网关部署说明」真实 URL
 ///    的引导码 + 如实文案 + 手填网关地址即自动重试出码。
-///    QQ 是两条真实路径（见 _QqAuthSheet）：①官方机器人——填 AppID/
+///    QQ 是三条真实路径（见 _QqAuthSheet）：①官方机器人——填 AppID/
 ///    AppSecret 即真实调用官方 getAppAccessToken 验证并连 wss 网关收
-///    消息、被动回复；②沙箱网关（NapCat）——保留网关真码扫码流程。
-///    全程轮询 login_status；绝不伪造登录二维码或画占位码。
+///    消息、被动回复；②沙箱网关（NapCat）——保留网关真码扫码流程；
+///    ③沙箱直连（扫码）——走「我们的沙箱」真实执行腾讯官方
+///    @tencent-connect/dsh-qqbot（npx dsh），捕获其终端输出的扫码二维码，
+///    渲染方式与微信完全一致。全程轮询状态；绝不伪造登录二维码或画占位码。
 ///    「保存到相册」把真实二维码渲染成 PNG 交给系统分享。
 class TgaChannelsPage extends StatefulWidget {
   const TgaChannelsPage({super.key});
@@ -303,11 +305,15 @@ class _QrAuthSheet extends StatefulWidget {
       {required this.client,
       required this.channel,
       required this.onConfirmed,
-      this.embedded = false});
+      this.embedded = false,
+      this.mode});
   final BackendClient client;
   final _Channel channel;
   final Future<void> Function() onConfirmed;
   final bool embedded;
+  /// null = 原网关真码流程（login_qr/login_status）；
+  /// 'qq_sandbox' = QQ 沙箱直连扫码（qq_sandbox_start/status/cancel）。
+  final String? mode;
 
   @override
   State<_QrAuthSheet> createState() => _QrAuthSheetState();
@@ -349,6 +355,11 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
     _timer?.cancel();
     _cdTimer?.cancel();
     _gwCtl.dispose();
+    // QQ 沙箱直连：未确认就关闭弹窗时，回收后台 dsh 进程，避免僵尸进程。
+    if (widget.mode == 'qq_sandbox' && _status != 'confirmed') {
+      unawaited(widget.client.sendControl(
+          'im_event', <String, dynamic>{'action': 'qq_sandbox_cancel'}));
+    }
     super.dispose();
   }
 
@@ -398,10 +409,21 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
       _remaining = 0;
     });
     try {
+      // QQ 沙箱直连（扫码）：先回收上一次可能残留的后台 dsh 进程，再拉起。
+      if (widget.mode == 'qq_sandbox') {
+        try {
+          await widget.client.sendControl('im_event',
+              <String, dynamic>{'action': 'qq_sandbox_cancel'});
+        } on Object {
+          // 忽略取消失败，继续拉起新进程。
+        }
+      }
+      final String action =
+          widget.mode == 'qq_sandbox' ? 'qq_sandbox_start' : 'login_qr';
       final BridgeEnvelope env = await widget.client.sendControl(
         'im_event',
         <String, dynamic>{
-          'action': 'login_qr',
+          'action': action,
           'connector': widget.channel.id,
           if (gatewayUrl != null) 'url': gatewayUrl,
         },
@@ -433,6 +455,14 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
           (m['status'] ?? '').toString() == 'confirmed') {
         if (!mounted) return;
         await _onConfirmed();
+        return;
+      }
+      // QQ 沙箱直连：start 不含二维码，进入等待后由 _poll 拉取真实二维码。
+      if (widget.mode == 'qq_sandbox') {
+        if (!mounted) return;
+        setState(() => _status = 'waiting');
+        _startCountdown(300);
+        _timer = Timer.periodic(const Duration(seconds: 1), (Timer _) => _poll());
         return;
       }
       final String content = (m['qr_content'] ?? '').toString();
@@ -475,10 +505,12 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
   Future<void> _poll() async {
     Map<String, dynamic> m = <String, dynamic>{};
     try {
+      final String action =
+          widget.mode == 'qq_sandbox' ? 'qq_sandbox_status' : 'login_status';
       final BridgeEnvelope env = await widget.client.sendControl(
         'im_event',
         <String, dynamic>{
-          'action': 'login_status',
+          'action': action,
           'connector': widget.channel.id,
         },
       );
@@ -487,6 +519,11 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
       return;
     }
     if (!mounted) return;
+    // QQ 沙箱直连：真实二维码内容由 start 之后的轮询逐步吐出，先缓存再渲染。
+    final String? qr = m['qr_content']?.toString();
+    if (qr != null && qr.isNotEmpty && qr != _content) {
+      setState(() => _content = qr);
+    }
     final String s = (m['status'] ?? 'waiting').toString();
     if (s == 'confirmed') {
       _timer?.cancel();
@@ -675,6 +712,14 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
 
   String _hint() {
     if (_guide) return _guideText;
+    if (widget.mode == 'qq_sandbox') {
+      if (_status == 'confirmed') return 'QQ 沙箱直连已绑定成功';
+      if (_status == 'error') {
+        return _error.isEmpty ? '暂时拿不到二维码' : _error;
+      }
+      return '正在我们的沙箱里运行官方 dsh-qqbot，请使用手机 QQ 扫描上方二维码'
+          '完成绑定（真码有效 ${_remaining}s）';
+    }
     if (_expired) {
       return _error.isEmpty ? '真码 5 分钟已到期，点「要新码」重新取一张' : _error;
     }
@@ -781,7 +826,7 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
 }
 
 // ---------------------------------------------------------------------------
-// QQ 授权弹窗：两条真实路径
+// QQ 授权弹窗：三条真实路径
 //  ① 官方机器人：填 AppID/AppSecret → 真实调用 QQ 官方
 //     bots.qq.com/app/getAppAccessToken 验证（成功=官方真实签发 token，
 //     落 App 私有目录 qq_official.json）→ 再真实连 api.sgroup.qq.com
@@ -789,7 +834,10 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
 //     推理并以 v2 被动回复 API 回发。协议对齐官方开源 SDK botpy。
 //  ② 沙箱网关（NapCat）：保留原 im_event{action:'login_qr'} 真码流程
 //     （内嵌 _QrAuthSheet，网关在跑时出 NapCat 真登录码）。
-// 状态标签只认真实 token / 网关状态，UI 绝不假绿。
+//  ③ 沙箱直连（扫码）：走「我们的沙箱」真实执行腾讯官方
+//     @tencent-connect/dsh-qqbot（npx dsh），捕获其终端输出的扫码二维码，
+//     渲染方式与微信完全一致（内嵌 _QrAuthSheet(mode:'qq_sandbox')）。
+// 状态标签只认真实 token / 网关状态 / 沙箱进程输出，UI 绝不假绿。
 // ---------------------------------------------------------------------------
 class _QqAuthSheet extends StatefulWidget {
   const _QqAuthSheet(
@@ -830,7 +878,7 @@ class _QqAuthSheetState extends State<_QqAuthSheet> {
               const SizedBox(height: 10),
               Text('${widget.channel.name}授权', style: Tga.h2),
               const SizedBox(height: 14),
-              // 两条路径切换
+              // 三条路径切换
               Container(
                 decoration: BoxDecoration(
                   color: Tga.bgSoft,
@@ -840,7 +888,8 @@ class _QqAuthSheetState extends State<_QqAuthSheet> {
                 child: Row(
                   children: <Widget>[
                     _tabChip(0, '官方机器人'),
-                    _tabChip(1, '沙箱网关（NapCat）'),
+                    _tabChip(1, '沙箱网关'),
+                    _tabChip(2, '沙箱直连(扫码)'),
                   ],
                 ),
               ),
@@ -850,12 +899,20 @@ class _QqAuthSheetState extends State<_QqAuthSheet> {
                   client: widget.client,
                   onConfirmed: widget.onConfirmed,
                 )
+              else if (_tab == 1)
+                _QrAuthSheet(
+                  client: widget.client,
+                  channel: widget.channel,
+                  onConfirmed: widget.onConfirmed,
+                  embedded: true,
+                )
               else
                 _QrAuthSheet(
                   client: widget.client,
                   channel: widget.channel,
                   onConfirmed: widget.onConfirmed,
                   embedded: true,
+                  mode: 'qq_sandbox',
                 ),
             ],
           ),

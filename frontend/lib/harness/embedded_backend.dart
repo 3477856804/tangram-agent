@@ -45,6 +45,7 @@ import 'package:tangram/harness/im_service.dart';
 import 'package:tangram/harness/local_inference.dart';
 import 'package:tangram/harness/mcp_client.dart';
 import 'package:tangram/harness/proot_sandbox.dart';
+import 'package:tangram/harness/qq_sandbox.dart';
 import 'package:tangram/harness/store.dart';
 import 'package:tangram/services/model_registry.dart' show kBuiltinFreeModels;
 import 'package:tangram/services/ssh_sandbox.dart';
@@ -57,12 +58,13 @@ class BackendReply {
   final List<Map<String, dynamic>> events;
 }
 
-class EmbeddedBackend {
+class EmbeddedBackend implements QqShellRunner {
   EmbeddedBackend._(this.store, this.downloads) {
     _registerTools();
     // 真实 IM 网关：微信/QQ/飞书消息进来后走 _chat 的真实模型推理，
-    // 回复经 AGP WebSocket 原样发回，绝不编造。
-    im = ImService(store, _imInfer);
+    // 回复经 AGP WebSocket 原样发回，绝不编造。QQ 沙箱直连扫码需要真实
+    // shell 执行能力，把本后端作为 QqShellRunner 注入。
+    im = ImService(store, _imInfer, qqShell: this);
   }
 
   static EmbeddedBackend? _instance;
@@ -2112,6 +2114,83 @@ class EmbeddedBackend {
     };
   }
 
+  // ---- QqShellRunner 实现：供 QQ 沙箱直连扫码（dsh-qqbot）真实执行 ----
+  // dsh 会阻塞等待扫码，必须用托管长驻进程，不能用一次性 60s 命令模型。
+
+  /// 当前平台下用于执行命令的 shell；无可用 shell 返回 null（如实降级）。
+  String? _pickShell() {
+    if (Platform.isWindows) return r'C:\Windows\System32\cmd.exe';
+    if (Platform.isAndroid) {
+      return File('/system/bin/sh').existsSync() ? '/system/bin/sh' : null;
+    }
+    if (File('/bin/bash').existsSync()) return '/bin/bash';
+    if (File('/bin/sh').existsSync()) return '/bin/sh';
+    return null;
+  }
+
+  final Map<String, _ManagedProc> _qqProcs = <String, _ManagedProc>{};
+
+  @override
+  Future<Map<String, dynamic>> runOnce(
+    String command, {
+    String cwd = '.',
+  }) async {
+    final r = await _shellExec(<String, dynamic>{'command': command, 'cwd': cwd});
+    return r;
+  }
+
+  @override
+  Future<QqShellProc> startDaemon(
+    String command, {
+    String cwd = '.',
+    Map<String, String>? env,
+  }) async {
+    final String? shell = _pickShell();
+    if (shell == null) {
+      throw StateError('沙箱无可用 shell，无法启动 dsh-qqbot');
+    }
+    // 沙箱根目录必须先存在（store.sub 只拼路径不建目录）。
+    final Directory sandboxDir = store.sub('sandbox');
+    await sandboxDir.create(recursive: true);
+    final String root = sandboxDir.path;
+    final String cwdAbs =
+        cwd.startsWith('/') ? cwd : '$root/${cwd == '.' ? '' : cwd}';
+    if (!Directory(cwdAbs).existsSync()) {
+      await Directory(cwdAbs).create(recursive: true);
+    }
+    final StringBuffer buf = StringBuffer();
+    final Process proc;
+    try {
+      proc = await Process.start(
+        shell,
+        Platform.isWindows
+            ? <String>['/c', 'cd /d "$cwdAbs" && $command']
+            : <String>['-c', 'cd ${_shellQuote(cwdAbs)} 2>/dev/null; $command'],
+        workingDirectory: cwdAbs,
+        includeParentEnvironment: true,
+        environment: <String, String>{
+          'HOME': root,
+          'TERM': 'xterm-256color',
+          'LANG': 'C.UTF-8',
+          'PS1': 'tga@sandbox:\\w\$ ',
+          if (env != null) ...env,
+        },
+      );
+    } on Object catch (e) {
+      throw StateError('启动 shell 进程失败：$e');
+    }
+    proc.stdout.transform(utf8.decoder).listen((String s) => buf.write(s));
+    proc.stderr.transform(utf8.decoder).listen((String s) => buf.write(s));
+    final _ManagedProc mp = _ManagedProc(buf);
+    unawaited(proc.exitCode.then((int c) {
+      mp.alive = false;
+      mp.exitCode = c;
+    }));
+    mp.killFn = () => proc.kill(ProcessSignal.sigkill);
+    _qqProcs['qq_sandbox'] = mp;
+    return mp;
+  }
+
   static String _shellQuote(String s) => "'${s.replaceAll("'", r"'\''")}'";
 
   /// MCP 真实同步：断开重连 mcp_servers.json 里的全部服务，
@@ -4035,5 +4114,23 @@ class EmbeddedBackend {
 
   Future<void> dispose() async {
     await _hotController.close();
+  }
+}
+
+/// 托管长驻进程句柄：实现 [QqShellProc]，供 QQ 沙箱直连扫码真实执行 dsh。
+class _ManagedProc implements QqShellProc {
+  _ManagedProc(this._buf);
+  final StringBuffer _buf;
+  @override
+  bool alive = true;
+  @override
+  int? exitCode;
+  void Function()? killFn;
+
+  @override
+  String get output => _buf.toString();
+  @override
+  Future<void> kill() async {
+    killFn?.call();
   }
 }

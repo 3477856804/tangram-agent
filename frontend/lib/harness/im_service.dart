@@ -17,6 +17,7 @@ import 'package:tangram/harness/im_gateway.dart';
 import 'package:tangram/harness/ilink_wechat.dart';
 import 'package:tangram/harness/login_protocol.dart';
 import 'package:tangram/harness/qq_official.dart';
+import 'package:tangram/harness/qq_sandbox.dart';
 import 'package:tangram/harness/qr_login_client.dart';
 import 'package:tangram/harness/store.dart';
 
@@ -91,6 +92,7 @@ class ImService {
     this.infer, {
     this.onLog,
     QrLoginClient? qrClient,
+    this.qqShell,
   }) : _qrClient = qrClient ?? QrLoginClient();
 
   final HarnessStore store;
@@ -128,6 +130,12 @@ class ImService {
   int _qqOutbound = 0;
   String _qqDetail = '';
   bool _qqEventSubscribed = false;
+
+  // ---- QQ 沙箱直连（扫码）：走本机沙箱真实执行官方 @tencent-connect/
+  // dsh-qqbot（npx dsh），捕获其终端输出的扫码二维码，渲染方式与微信一致。
+  // 真实 shell 执行能力由后端注入（qqShell）。
+  final QqShellRunner? qqShell;
+  QqSandboxController? _qqSandbox;
 
   /// 与 im/feishu_bot.py FeishuBotSession._ADDONS 一致：bot 收发消息权限、
   /// 消息接收事件与卡片回调，随验证 URL 的 addons 参数预置给新建应用。
@@ -312,6 +320,13 @@ class ImService {
         return _qqOfficialStatus();
       case 'qq_official_disconnect':
         return await _qqOfficialDisconnect();
+      // ---- QQ 沙箱直连扫码（真实执行官方 dsh-qqbot，捕获终端二维码）----
+      case 'qq_sandbox_start':
+        return await _qqSandboxStart();
+      case 'qq_sandbox_status':
+        return _qqSandboxStatus();
+      case 'qq_sandbox_cancel':
+        return await _qqSandboxCancel();
       case 'get_config':
         final id = _id(p);
         return <String, dynamic>{
@@ -773,6 +788,42 @@ class ImService {
         : '';
     return <String, dynamic>{
       'ok': true,
+      'adapters': adapters().map((ImAdapterStatus a) => a.toJson()).toList(),
+    };
+  }
+
+  /// QQ 沙箱直连（扫码）第一步：确保本机沙箱有 Node，真实拉起官方
+  /// @tencent-connect/dsh-qqbot，等待其终端输出扫码二维码。二维码内容来自
+  /// dsh 真实输出，绝不在本地伪造。沙箱 shell 不可用则如实报错。
+  Future<Map<String, dynamic>> _qqSandboxStart() async {
+    if (qqShell == null) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '沙箱 shell 未就绪（后端未提供真实执行环境），无法运行 dsh-qqbot。',
+      };
+    }
+    _qqSandbox ??= QqSandboxController(
+      runner: qqShell!,
+      profileDir: store.sub('sandbox'),
+    )..onLog = onLog;
+    return await _qqSandbox!.start();
+  }
+
+  /// QQ 沙箱直连（扫码）第二步：轮询 dsh 终端输出里的二维码链接与绑定状态。
+  Map<String, dynamic> _qqSandboxStatus() {
+    if (_qqSandbox == null) {
+      return <String, dynamic>{'active': false, 'status': 'idle'};
+    }
+    return _qqSandbox!.poll();
+  }
+
+  /// QQ 沙箱直连（扫码）撤销：杀掉后台 dsh 进程，释放资源。
+  Future<Map<String, dynamic>> _qqSandboxCancel() async {
+    await _qqSandbox?.cancel();
+    return <String, dynamic>{
+      'ok': true,
+      'active': false,
+      'status': 'idle',
       'adapters': adapters().map((ImAdapterStatus a) => a.toJson()).toList(),
     };
   }
@@ -1256,6 +1307,8 @@ class ImService {
     _qqOfficial?.dispose();
     _qqOfficial = null;
     _qqEventSubscribed = false;
+    await _qqSandbox?.cancel();
+    _qqSandbox = null;
     for (final gw in _gateways.values) {
       await gw.dispose();
     }
