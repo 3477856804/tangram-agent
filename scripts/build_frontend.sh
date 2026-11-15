@@ -20,37 +20,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FRONTEND_DIR="${REPO_ROOT}/frontend"
 
-# 版本真源统一：CI 的 TGA_VER > 产物仓库最新 Release 自动进位 > 本地 VERSION 兜底。
-# 所有平台都注入 dart-define 并同步 pubspec version，桌面端 PackageInfo 才能
-# 返回真实版本（此前只有 android 注入，linux/windows/macos/ios 恒为 0.0.1）。
+# 版本真源统一：仓库根 VERSION 是唯一真源（harness/version.py 的
+# assert_version_frozen 会校验 pubspec / 后端包 / App 常量全部等于它）。
+# 优先级：显式 TGA_VER（CI 发版时注入）> VERSION > 0.0.1。
+# 旧实现会去 GitHub 产物仓库查「最新 Release +1」，本地构建因此把 pubspec
+# 写成 0.0.11 而 VERSION 仍是 0.0.4，直接把版本一致性校验打红——这是一处
+# 真实的「构建反向污染源码」缺陷，已移除远端查询。
 TGA_VERSION="${TGA_VER:-}"
 if [[ -z "${TGA_VERSION}" ]]; then
-  TGA_VERSION="$(python3 -c "
-import json, sys, urllib.request
-try:
-    t = json.load(urllib.request.urlopen(
-        'https://api.github.com/repos/3477856804/tangram-agent-releases/releases/latest',
-        timeout=8))['tag_name'].lstrip('v')
-    a, b, c = (int(x) for x in t.split('.'))
-    c += 1
-    if c > 99:
-        b += 1; c = 0
-        if b > 99:
-            a += 1; b = 0
-    print(f'{a}.{b}.{c}')
-except Exception:
-    print(open(sys.argv[1], encoding='utf-8').read().strip() or '0.0.1')
-" "${REPO_ROOT}/VERSION" 2>/dev/null || true)"
+  TGA_VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION" 2>/dev/null || true)"
 fi
-[[ -n "${TGA_VERSION}" ]] || TGA_VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION" 2>/dev/null || echo 0.0.4)"
+[[ -n "${TGA_VERSION}" ]] || TGA_VERSION="0.0.1"
 python3 -c "
 import re, sys
-p = sys.argv[1]
+p, ver = sys.argv[1], sys.argv[2]
 s = open(p, encoding='utf-8').read()
-s2 = re.sub(r'(?m)^version:\s*\S+', 'version: ' + sys.argv[2] + '+1', s, count=1)
-open(p, 'w', encoding='utf-8').write(s2)
+s2 = re.sub(r'(?m)^version:\s*\S+', 'version: ' + ver + '+1', s, count=1)
+if s2 != s:
+    open(p, 'w', encoding='utf-8', newline='').write(s2)
 " "${FRONTEND_DIR}/pubspec.yaml" "${TGA_VERSION}"
-echo "==> OTA 版本真源: TANGRAM_VERSION=${TGA_VERSION}（全平台 + pubspec 同步）"
+echo "==> OTA 版本真源: TANGRAM_VERSION=${TGA_VERSION}（VERSION 单一真源 + pubspec 同步）"
 
 EXTRA_ARGS=()
 
@@ -112,8 +101,15 @@ fi
 # 权限声明与原生授权通道必须在每次生成后幂等注入，保证任意机器重建的 APK
 # 都具备设备文件访问能力。脚本对非 android 平台不执行，幂等可重复运行。
 # 品牌资产：鹿 PNG 已入库，构建前校验其与真源 SVG 一致（不引入渲染库依赖）。
+# 校验需要 Pillow（读 PNG 模式/尺寸/像素）。缺 Pillow 时明确降级并给出安装
+# 命令，而不是抛 ModuleNotFoundError 把构建卡死在一个与代码无关的依赖上。
 echo "==> 校验品牌鹿资产（真源派生、透明 PNG 齐备）"
-python3 "${SCRIPT_DIR}/gen_brand_assets.py" --check
+if python3 -c "import PIL" >/dev/null 2>&1; then
+  python3 "${SCRIPT_DIR}/gen_brand_assets.py" --check
+else
+  echo "  [WARN] 当前 python3 缺少 Pillow，跳过品牌资产校验（不阻塞构建）。"
+  echo "         需要完整校验请先安装：python3 -m pip install pillow"
+fi
 
 if [[ "${PLATFORM}" == "android" ]]; then
   # Flutter 增量构建会复用旧的 Dart kernel 与 asset bundle，出现过「源码已改、
@@ -165,10 +161,21 @@ if [[ "${PLATFORM}" == "android" ]]; then
     exit 1
   fi
   cp -f "$APK" "${REPO_ROOT}/tangram-agent.apk"
+  mkdir -p "${REPO_ROOT}/dist"
+  cp -f "$APK" "${REPO_ROOT}/dist/tangram-agent-${TGA_VERSION}-android.apk"
   echo "==> APK 已产出: ${REPO_ROOT}/tangram-agent.apk"
+  echo "    版本化副本: ${REPO_ROOT}/dist/tangram-agent-${TGA_VERSION}-android.apk"
   echo "    源产物: ${APK}"
 else
   EXTRA_ARGS+=(--dart-define=TANGRAM_VERSION="${TGA_VERSION}")
   ( cd "${FRONTEND_DIR}" && flutter pub get && flutter build "${PLATFORM}" "${EXTRA_ARGS[@]}" )
+  if [[ "${PLATFORM}" == "windows" ]]; then
+    # Windows 全量便携包：Release 目录全部内容 + 排除 Windows 无法加载的 ELF 库。
+    # 打包只做「排除」，不删除磁盘产物，便于本地直接调试。
+    echo "==> 打包 Windows 全量便携包"
+    python3 "${SCRIPT_DIR}/pack_windows.py" \
+      "${FRONTEND_DIR}/build/windows/x64/runner/Release" \
+      "${REPO_ROOT}/dist/tangram-agent-${TGA_VERSION}-windows-x64.zip"
+  fi
 fi
 echo "前端构建完成: ${PLATFORM}"

@@ -1,4 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- tangram:device_file_access -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
     <!-- 真实出站：模型商店索引、API 教师、模型/插件下载、社区索引都需要网络 -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
@@ -8,7 +13,7 @@
 <application
         android:label="TGA"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher" android:requestLegacyExternalStorage="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"

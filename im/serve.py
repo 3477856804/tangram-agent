@@ -517,6 +517,16 @@ def _exec_agent_tool(name: str, args: dict, svc) -> str:
             command = str(args.get("command") or "")
             if not command.strip():
                 return "工具执行失败：command 为空"
+            # 命名空间沙箱依赖 Linux 的 unshare/chroot；Windows 上直接给出
+            # 明确原因，而不是让子进程抛 FileNotFoundError 或吐一段乱码 stderr。
+            # 放在工具入口而不是 _sandbox_exec 内部，是为了让底层执行器本身
+            # 在任意平台都能被单元测试覆盖（命令文件唯一性等）。
+            if os.name == "nt":
+                return (
+                    "工具执行失败：网关的命名空间沙箱仅在 Linux 可用"
+                    "（依赖 unshare/chroot）。Windows 请改用 APP 内置沙箱，"
+                    "或在 WSL 中运行网关。"
+                )
             return _sandbox_exec(command)
         if name == "current_time":
             from datetime import datetime, timezone

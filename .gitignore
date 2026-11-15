@@ -50,8 +50,10 @@ tmp/
 *secret*.json
 
 # 构建交付物
+dist/
 *.apk
 tangram-agent.apk
+*.zip
 
 # 签名密钥绝不入库（CI 从 Secret 还原）
 frontend/android/keystore.properties

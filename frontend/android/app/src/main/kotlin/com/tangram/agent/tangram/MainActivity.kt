@@ -30,6 +30,8 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // tangram:device_file_access (generated)
+        DeviceFileAccessPlugin(this).register(flutterEngine)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger, CHANNEL
         ).setMethodCallHandler { call, result ->

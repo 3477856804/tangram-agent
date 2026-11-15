@@ -4,7 +4,8 @@
 可接云端 API 模型或本地 GGUF 模型，支持在微信 / QQ / 飞书里对话，
 带工作轨迹、蒸馏模型管理、知识图谱、日记与定时任务等能力。
 
-版本：**0.0.1**
+版本：**0.0.11**（唯一真源为仓库根 `VERSION`，由 `harness/version.py`
+的 `assert_version_frozen()` 校验 pubspec / 后端包 / App 常量全部一致）
 
 > 本仓库为闭源专有软件（All rights reserved）。仓库内全部源码与资源版权归
 > 檀阁瑞木 / COSMOn 所有，未经授权不得复制、修改、再分发或用于商业用途。
@@ -29,6 +30,22 @@
 - `scripts/` — 构建脚本（`build_frontend.sh` / `build_backend.sh` /
   `run_headless.sh` 等）。
 - `.github/workflows/` — 全平台云端构建工作流。
+
+## 核心能力（均为真实实现，无占位数据）
+
+- **内置 Linux 沙箱**：Android 端只有一套环境——`proot` + Alpine 3.20
+  用户态（约 4.2MB，首次使用真实下载并解包）。`apk` / `python3` / `pip`
+  在用户态真实执行，`uid=0`、根分区与可用工具链由 `env_report` 单点探测；
+  宿主玩具箱 shell 永不参与命令执行，不会出现「两台互相矛盾的机器」。
+- **3D 建模**：OBJ / STL / PLY(ASCII) / GLB 真实解析、Canvas 实时渲染、
+  导出 OBJ/STL；顶点按 1e-6 量化焊接，导出后可无损回读。
+- **主动发消息**：微信 iLink、QQ v2、飞书 OpenAPI 三渠道真实 REST 发送，
+  收件人来自真实会话列表，失败如实回传错误码，不伪造成功。
+- **思考过程**：对话中默认直接展开推理内容，可点按收起 / 再展开。
+- **鹿桌宠**：基于项目鹿 logo 的可拖拽浮层，不拦截业务点击，可随时关闭。
+- **端侧推理**：DeepInfer 调度思想落地——稳定前缀复用（`cache_prompt`）、
+  分块预填充、prompt-lookup 投机起草、预算化生成、真实指标累加；
+  不虚构加速比，硬件不满足时如实降级。
 
 ## 本地后端与蒸馏（真实可运行）
 
@@ -58,13 +75,18 @@ bash scripts/build_backend.sh --output dist/backend
 ## 快速开始（构建 APP）
 
 ```bash
-# 依赖：Flutter 3.50+（含 Dart 3.10.7+）
+# 依赖：Flutter 3.41+（含 Dart 3.10.7+；实测 3.47.9 stable 可用）
 cd frontend && flutter pub get
-bash ../scripts/build_frontend.sh android        # 出 APK
+bash ../scripts/build_frontend.sh android        # 出 APK → dist/tangram-agent-<ver>-android.apk
 bash ../scripts/build_frontend.sh linux          # 出 Linux 桌面
-bash ../scripts/build_frontend.sh windows        # 出 Windows
+bash ../scripts/build_frontend.sh windows        # 出 Windows 全量便携包 zip
 bash ../scripts/build_frontend.sh macos          # 出 macOS
 ```
+
+Windows 便携包由 `scripts/pack_windows.py` 生成：Release 目录全量内容，
+并**排除** Windows 无法加载的 ELF（`*.so`）——原生资产钩子会把预置的
+android-arm64 运行库一并拷进 Windows 产物，排除后体积约 25MB（原 150MB+）。
+打包只做排除，不删除磁盘产物。
 
 云端一键全平台构建：仓库 push 到 `main` 会自动触发
 `.github/workflows/build-all.yml`，产物汇总到一个 Release，可直接下载。

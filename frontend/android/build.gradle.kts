@@ -1,5 +1,39 @@
+// tangram:compile-sdk-plugins (generated)
+// 统一所有 Flutter 插件子模块的 compileSdk：部分老插件把 compileSdk 写死为 34，
+// 与 flutter_plugin_android_lifecycle(36) 的 AAR metadata 要求冲突。
+// 反射同时覆盖旧 DSL (BaseExtension) 与新 DSL (CommonExtension)。
+gradle.beforeProject(org.gradle.api.Action<org.gradle.api.Project> {
+    afterEvaluate(org.gradle.api.Action<org.gradle.api.Project> {
+        val androidExt = extensions.findByName("android")
+        if (androidExt != null) {
+            val cls = androidExt.javaClass
+            for (sig in listOf(
+                "setCompileSdk|int",
+                "setCompileSdk|java.lang.Integer",
+                "compileSdkVersion|int",
+                "compileSdkVersion|java.lang.Integer",
+                "setCompileSdkVersion|int"
+            )) {
+                val parts = sig.split("|")
+                val param: Class<*> =
+                    if (parts[1] == "int") java.lang.Integer.TYPE
+                    else java.lang.Integer::class.java
+                try {
+                    cls.getMethod(parts[0], param).invoke(androidExt, 36)
+                } catch (_: Throwable) {
+                }
+            }
+        }
+    })
+})
+
 allprojects {
     repositories {
+        // tangram:build-mirrors (generated)
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
+        maven { url = uri("https://maven.aliyun.com/repository/public") }
+        maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
+
         // 国内镜像优先，境外官方仓库作 fallback（与 settings.gradle.kts 对齐）。
         maven { url = uri("https://maven.aliyun.com/repository/google") }
         maven { url = uri("https://maven.aliyun.com/repository/public") }
@@ -54,3 +88,4 @@ subprojects {
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }
+// tangram:build-mirrors

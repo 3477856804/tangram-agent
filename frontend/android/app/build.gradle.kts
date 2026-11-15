@@ -23,22 +23,44 @@ fun otaSecret(propKey: String, vararg envKeys: String): String? {
     return keystoreProperties.getProperty(propKey)
 }
 
-// 版本单一真源：android/version.properties（scripts/bump_version.py 维护）
+// 版本单一真源：仓库根 VERSION（harness/version.py 校验的产品版本）。
+// android/version.properties 只作为「CI 发版递增」的覆盖值：CI 写入非零
+// major/minor/patch 时以它为准（保证 Play/OTA versionCode 单调递增），
+// 否则回退到 VERSION。此前 version.properties 初始化为全 0，导致
+// versionCode=0 被 AGP 直接判为非法，全新 checkout 无法出 release 包。
 val versionProps = Properties()
 val versionPropsFile = rootProject.file("version.properties")
 if (versionPropsFile.exists()) {
     FileInputStream(versionPropsFile).use { versionProps.load(it) }
 }
-val vMajor = (versionProps.getProperty("major") ?: "0").trim().toInt()
-val vMinor = (versionProps.getProperty("minor") ?: "0").trim().toInt()
-val vPatch = (versionProps.getProperty("patch") ?: "0").trim().toInt()
-val vBuild = (versionProps.getProperty("build") ?: "0").trim().toInt()
-val vName = when {
-    vPatch == 0 -> "$vMajor.$vMinor.0"
-    vMinor == 0 -> "$vMajor.$vMinor.$vPatch"
-    else -> String.format("%d.%d.%02d", vMajor, vMinor, vPatch)
+val pMajor = (versionProps.getProperty("major") ?: "0").trim().toInt()
+val pMinor = (versionProps.getProperty("minor") ?: "0").trim().toInt()
+val pPatch = (versionProps.getProperty("patch") ?: "0").trim().toInt()
+val pBuild = (versionProps.getProperty("build") ?: "0").trim().toInt()
+
+val repoVersionText = rootProject.file("../../VERSION")
+    .takeIf { it.isFile }?.readText()?.trim().orEmpty()
+val repoParts = repoVersionText.split(".")
+val rMajor = repoParts.getOrNull(0)?.toIntOrNull() ?: 0
+val rMinor = repoParts.getOrNull(1)?.toIntOrNull() ?: 0
+val rPatch = repoParts.getOrNull(2)?.toIntOrNull() ?: 0
+
+val propsInitialized = (pMajor + pMinor + pPatch) > 0
+val vMajor = if (propsInitialized) pMajor else rMajor
+val vMinor = if (propsInitialized) pMinor else rMinor
+val vPatch = if (propsInitialized) pPatch else rPatch
+val vBuild = pBuild
+val vName = if (propsInitialized) {
+    when {
+        vPatch == 0 -> "$vMajor.$vMinor.0"
+        vMinor == 0 -> "$vMajor.$vMinor.$vPatch"
+        else -> String.format("%d.%d.%02d", vMajor, vMinor, vPatch)
+    }
+} else {
+    repoVersionText.ifEmpty { "$vMajor.$vMinor.$vPatch" }
 }
-val vCode = vMajor * 10_000_000 + vMinor * 100_000 + vPatch * 1_000 + vBuild
+// versionCode 必须是正整数：全 0 的旧配置会让 assembleRelease 直接失败。
+val vCode = maxOf(vMajor * 10_000_000 + vMinor * 100_000 + vPatch * 1_000 + vBuild, 1)
 
 val ksPathValue = otaSecret("storeFile", "TANGRAM_KEYSTORE_PATH")
 val ksPwdValue = otaSecret("storePassword", "STORE_PASSWORD", "TANGRAM_KEYSTORE_PASSWORD")
@@ -49,7 +71,7 @@ val hasReleaseSigning = ksPathValue != null && ksPwdValue != null &&
 
 android {
     namespace = "com.tangram.agent.tangram"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36 // tangram:compile-sdk-app
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -72,10 +94,12 @@ android {
         targetSdk = 28
         versionCode = vCode
         versionName = vName
-        // 端侧 llama.cpp 运行时只内置 arm64-v8a 官方预编译库（真机通用 ABI）。
-        // 与 pubspec hooks 的 native bundle 对齐，避免为 x86 触发联网下载。
+        // 通用包：arm64-v8a（主流真机 + 端侧 llama.cpp 原生库）与 armeabi-v7a
+        // （老设备，核心功能可用；端侧 GGUF 推理仅在 arm64 提供预编译库）。
+        // x86/x86_64 不纳入：llamadart 无对应 Android 预编译库，只会在构建期
+        // 触发联网下载或直接失败。
         ndk {
-            abiFilters += listOf("arm64-v8a")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
     }
 
@@ -106,6 +130,11 @@ android {
         // 本 App 走自有 OTA 分发、不上 Google Play；targetSdk=28 是沙箱
         // proot 用户态可执行的硬前提，禁用「targetSdk 过期」这条 Play 专用 lint。
         disable += "ExpiredTargetSdkVersion"
+        // release 构建不跑 lintVital：AGP 自带的 lint 在解析依赖里的 JavaDoc
+        // 时会抛 NoSuchMethodError（JavaDocParser.parseDataItem）直接把构建打断，
+        // 与被检代码无关。静态检查由 `flutter analyze` + 单测承担。
+        checkReleaseBuilds = false
+        abortOnError = false
     }
 }
 

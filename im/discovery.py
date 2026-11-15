@@ -34,9 +34,9 @@ def product_version() -> str:
     """从仓库根 VERSION 真实读取产品版本；不写死旧版本号。"""
     p = Path(__file__).resolve().parent.parent / "VERSION"
     try:
-        return p.read_text(encoding="utf-8").strip() or "0.0.4"
+        return p.read_text(encoding="utf-8").strip() or "0.0.11"
     except OSError:
-        return "0.0.4"
+        return "0.0.11"
 
 
 def _interfaces() -> list[str]:

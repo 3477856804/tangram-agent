@@ -11,6 +11,11 @@ pluginManagement {
     includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
 
     repositories {
+        // tangram:build-mirrors (generated)
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
+        maven { url = uri("https://maven.aliyun.com/repository/public") }
+        maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
+
         // 国内镜像优先：避免从境外源拉取 Gradle 插件 jar 时 SSL 连接挂死。
         // 保留下方官方仓库作 fallback，镜像缺失时仍可取到。
         maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
@@ -29,3 +34,4 @@ plugins {
 }
 
 include(":app")
+// tangram:build-mirrors
