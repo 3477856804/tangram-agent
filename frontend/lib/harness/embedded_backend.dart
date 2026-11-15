@@ -1707,7 +1707,12 @@ class EmbeddedBackend {
   Future<Map<String, dynamic>> _shellExec(Map<String, dynamic> p) async {
     final raw = (p['command'] ?? '').toString().trim();
     if (raw.isEmpty) return _err('命令为空');
-    final root = store.sub('sandbox').path;
+    // 沙箱根目录必须先存在：store.sub 只拼路径不建目录，全新安装时
+    // 该目录不存在会导致 _realShellExec 的 cwd 校验失败而回退内置解释器，
+    // 表现为「命令啥也用不了」。这里递归建好根，保证真 shell 路径可用。
+    final Directory sandboxDir = store.sub('sandbox');
+    await sandboxDir.create(recursive: true);
+    final root = sandboxDir.path;
     String cwd = (p['cwd'] ?? '.').toString();
 
     final String env = await _sandboxEnvironment();
