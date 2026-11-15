@@ -62,6 +62,15 @@ const List<String> controlDomains = [
   'responsibility_trace',
   'device_file',
   'distill',
+  // 万物皆插件内核 + Super Agent（真实控制域，见 embedded_backend.dart）
+  'plugin_kernel',
+  'super_agent',
+  'chat',
+  'model_store',
+  'plugin_community',
+  'status',
+  'ping',
+  'echo',
 ];
 
 const List<String> hotPathTopics = [

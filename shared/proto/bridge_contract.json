@@ -22,7 +22,15 @@
       "code_task",
       "responsibility_trace",
       "device_file",
-      "distill"
+      "distill",
+      "plugin_kernel",
+      "super_agent",
+      "chat",
+      "model_store",
+      "plugin_community",
+      "status",
+      "ping",
+      "echo"
     ]
   },
   "hot_path": {

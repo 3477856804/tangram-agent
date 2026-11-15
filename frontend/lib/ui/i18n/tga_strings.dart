@@ -129,6 +129,8 @@ class TgaStrings {
     'sidebar.channels': {'cn': '更多通信', 'tw': '更多通訊', 'en': 'Channels'},
     'sidebar.models': {'cn': '模型管理', 'tw': '模型管理', 'en': 'Models'},
     'sidebar.graph': {'cn': '知识图谱', 'tw': '知識圖譜', 'en': 'Knowledge Graph'},
+    'sidebar.kernel': {'cn': '插件内核', 'tw': '外掛核心', 'en': 'Plugin Kernel'},
+    'sidebar.superAgent': {'cn': '超级智能体', 'tw': '超級智能體', 'en': 'Super Agent'},
     'sidebar.settings': {'cn': '设置', 'tw': '設定', 'en': 'Settings'},
     'sidebar.profile': {'cn': '个人', 'tw': '個人', 'en': 'Profile'},
     // ---- 页面标题 ----
@@ -143,6 +145,8 @@ class TgaStrings {
     'training.title': {'cn': '训练设置', 'tw': '訓練設定', 'en': 'Training Settings'},
     'persona.title': {'cn': '人格设置', 'tw': '人格設定', 'en': 'Persona Settings'},
     'models.title': {'cn': '模型管理', 'tw': '模型管理', 'en': 'Model Manager'},
+    'kernel.title': {'cn': '插件内核', 'tw': '外掛核心', 'en': 'Plugin Kernel'},
+    'superAgent.title': {'cn': '超级智能体', 'tw': '超級智能體', 'en': 'Super Agent'},
     // ---- 设置页 ----
     'settings.general': {'cn': '通用设置', 'tw': '通用設定', 'en': 'General'},
     'settings.notifications': {'cn': '消息通知', 'tw': '訊息通知', 'en': 'Notifications'},

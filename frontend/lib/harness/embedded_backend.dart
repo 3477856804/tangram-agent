@@ -39,14 +39,17 @@ import 'package:http/http.dart' as http;
 
 import 'package:tangram/agent/sandbox/sandboxed_shell.dart';
 import 'package:tangram/app_version.dart';
+import 'package:tangram/harness/builtin_plugins.dart';
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/downloader.dart';
 import 'package:tangram/harness/im_service.dart';
 import 'package:tangram/harness/local_inference.dart';
 import 'package:tangram/harness/mcp_client.dart';
+import 'package:tangram/harness/plugin_kernel.dart';
 import 'package:tangram/harness/proot_sandbox.dart';
 import 'package:tangram/harness/qq_sandbox.dart';
 import 'package:tangram/harness/store.dart';
+import 'package:tangram/harness/super_agent.dart';
 import 'package:tangram/services/model_registry.dart' show kBuiltinFreeModels;
 import 'package:tangram/services/ssh_sandbox.dart';
 import 'package:tangram/services/update_service.dart';
@@ -73,6 +76,11 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// 真实 IM 网关服务（配置落盘、连接状态可查、可热更新）。
   late final ImService im;
+
+  // ---- 万物皆插件内核 + Super Agent（懒装配，绑定真实能力）----
+  PluginKernel? _kernel;
+  SuperAgent? _superAgent;
+  Future<void>? _kernelBoot;
 
   final ToolRegistry tools = ToolRegistry();
 
@@ -110,7 +118,8 @@ class EmbeddedBackend implements QqShellRunner {
     'capability_negotiation', 'rpc', 'chat', 'agent_command', 'code_task',
     'model_route', 'model_store', 'distill', 'device_file', 'memory_event',
     'proactive_task', 'security_approval', 'plugin_lifecycle',
-    'plugin_community', 'im_event', 'responsibility_trace', 'update_status',
+    'plugin_community', 'plugin_kernel', 'super_agent', 'im_event',
+    'responsibility_trace', 'update_status',
     'dependency_event', 'perception_event', 'reload', 'status', 'ping', 'echo',
   ];
 
@@ -121,6 +130,8 @@ class EmbeddedBackend implements QqShellRunner {
   Future<void> _initDefaults() async {
     // MCP：启动时后台重连已配置的服务（网络失败不阻塞启动，状态可查）。
     unawaited(_mcpSync());
+    // 插件内核 + Super Agent：后台预热装配（不阻塞启动，失败可重试、如实可查）。
+    unawaited(_ensureKernel());
     // 只在首次启动时建立真实默认记录；不编造模型/插件。
     final rules = await store.readRecords('proactive_rules');
     if (rules.isEmpty) {
@@ -132,6 +143,103 @@ class EmbeddedBackend implements QqShellRunner {
   }
 
   double _now() => DateTime.now().millisecondsSinceEpoch / 1000.0;
+
+  // ===========================================================================
+  // 万物皆插件内核 + Super Agent：懒装配 + 真实能力绑定
+  //
+  // 这两层与原 24 个控制域并行：不接管 dispatch 的既有 case、不改 _emit 的
+  // 流式 hot-path、不合并 cube 契约链与真 shell 链。内建插件的 provider 通过
+  // _kernelHost() 绑定的闭包调用本类**已存在的真实私有方法**，绝不复制实现。
+  // ===========================================================================
+
+  /// 幂等懒装配。首次被 plugin_kernel/super_agent 控制域调用时装配；
+  /// _initDefaults 也会后台预热一次（失败如实记录，不阻塞启动）。
+  Future<void> _ensureKernel() {
+    final Future<void>? ongoing = _kernelBoot;
+    if (ongoing != null) return ongoing;
+    final Future<void> f = _bootKernel().catchError((Object e) {
+      // 装配失败不缓存失败 future，下次调用可重试；如实打印便于排查。
+      debugPrint('TGA_KERNEL_BOOT_FAIL: $e');
+      _kernelBoot = null;
+    });
+    _kernelBoot = f;
+    return f;
+  }
+
+  /// 把内核所需能力绑定到本后端的真实实现。
+  KernelHost _kernelHost() => KernelHost(
+        tools: tools,
+        chat: (Map<String, dynamic> p) => _chat(p),
+        shell: (String command, String cwd) => _shellExec(<String, dynamic>{
+          'command': command,
+          'cwd': cwd,
+        }),
+        cube: (String cube, Map<String, dynamic> args) async {
+          final r = await SandboxedShell.instance.exec(cube, args);
+          return r.toJson();
+        },
+        skills: () async => store.scanFiles('skills',
+            extensions: <String>{'.md', '.json'}),
+        mcpSync: () => _mcpSync(),
+        imStatus: () => <String, dynamic>{
+          'ok': true,
+          'adapters': im.adapters().map((a) => a.toJson()).toList(),
+        },
+        records: (String key) => store.readRecords(key),
+        insertRecord: (String key, Map<String, dynamic> record) =>
+            store.insert(key, record),
+        readJson: (String file) => store.readJson(file),
+        writeJson: (String file, Object? value) => store.writeJson(file, value),
+        writable: () => store.writable,
+        dataDir: () => store.root.path,
+        uiPages: () => const <String>[
+          'training', 'persona', 'sandbox', 'store', 'plugins',
+          'workspace', 'channels', 'models', 'graph', 'kernel', 'super_agent',
+        ],
+        sandboxEnvironment: () => _sandboxEnvironment(),
+      );
+
+  Future<void> _bootKernel() async {
+    final Directory kernelDir = store.sub('kernel');
+    await kernelDir.create(recursive: true);
+    final PluginKernel kernel = PluginKernel(
+      persistence: FileKernelPersistence(kernelDir),
+      toolRegistry: tools,
+      // 内核事件只进自己的 append-only 日志，绝不改流式 token 的 hot-path。
+    );
+    for (final MapEntry<RunMode, Set<String>?> e
+        in BuiltinPlugins.modePlugins().entries) {
+      kernel.defineModePlugins(e.key, e.value);
+    }
+    await kernel.boot(
+      builtinPlugins: BuiltinPlugins.build(_kernelHost()),
+      defaultProfile: BuiltinPlugins.defaultProfile(),
+    );
+    _kernel = kernel;
+    _superAgent = SuperAgent(
+      store: store,
+      chat: (Map<String, dynamic> p) => _chat(p),
+      kernel: kernel,
+    );
+  }
+
+  Future<Map<String, dynamic>> _onPluginKernel(Map<String, dynamic> p) async {
+    await _ensureKernel();
+    final PluginKernel? k = _kernel;
+    if (k == null) {
+      return _err('插件内核装配失败，请稍后重试');
+    }
+    return await k.handle(_action(p, 'describe'), p);
+  }
+
+  Future<Map<String, dynamic>> _onSuperAgent(Map<String, dynamic> p) async {
+    await _ensureKernel();
+    final SuperAgent? sa = _superAgent;
+    if (sa == null) {
+      return _err('Super Agent 装配失败，请稍后重试');
+    }
+    return await sa.handle(_action(p, 'describe'), p);
+  }
 
   void _emit(String topic, Map<String, dynamic> data) {
     final event = <String, dynamic>{'topic': topic, ...data};
@@ -166,6 +274,8 @@ class EmbeddedBackend implements QqShellRunner {
         'security_approval' => await _securityApproval(payload),
         'plugin_lifecycle' => await _pluginLifecycle(payload),
         'plugin_community' => await _pluginCommunity(payload),
+        'plugin_kernel' => await _onPluginKernel(payload),
+        'super_agent' => await _onSuperAgent(payload),
         'im_event' => await im.handle(_action(payload), payload),
         'responsibility_trace' => await _responsibilityTrace(),
         'update_status' => await _updateStatus(),
@@ -211,6 +321,19 @@ class EmbeddedBackend implements QqShellRunner {
         'streaming': true,
         'local_inference': true,
         'data_dir': store.root.path,
+        // 万物皆插件内核 + Super Agent：如实报告装配状态（未就绪不谎称）。
+        'plugin_kernel': <String, dynamic>{
+          'architecture': 'everything-is-a-plugin (Cordis-style)',
+          'booted': _kernel?.booted ?? false,
+          'mounted': _kernel?.mountedCount ?? 0,
+          'seams': _kernel?.seamCount ?? 0,
+          'run_modes': RunMode.values.map((RunMode m) => m.label).toList(),
+        },
+        'super_agent': <String, dynamic>{
+          'architecture': 'router-worker + triggers + two-stage-filter + watchdog',
+          'initialized': _superAgent?.initialized ?? false,
+          'observe_default': true,
+        },
       };
 
   // ---- rpc：真实策略 / 图 / 自检 / 激活指针 / 硬件 ----
@@ -4110,9 +4233,18 @@ class EmbeddedBackend implements QqShellRunner {
         'handlers': controlDomains.map((d) => 'control/$d').toList(),
         'tools': tools.length,
         'debug': kDebugMode,
+        'kernel_booted': _kernel?.booted ?? false,
+        'kernel_mounted': _kernel?.mountedCount ?? 0,
       };
 
   Future<void> dispose() async {
+    // 先等后台预热/装配收敛：否则 dispose 返回后 fire-and-forget 仍在写盘，
+    // 会与调用方清理数据目录产生竞态（目录被重建、删除时目录非空）。
+    final Future<void>? boot = _kernelBoot;
+    if (boot != null) await boot;
+    // 再卸载插件树（可逆撤销工具/接缝注册），关闭热流控制器。
+    // 幂等：forTest 场景下 _kernel 可能为 null。
+    await _kernel?.dispose();
     await _hotController.close();
   }
 }
