@@ -21,8 +21,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import urllib.parse
 import time
+import urllib.parse
+from pathlib import Path
 from typing import Any, Optional
 
 from ..gateway import Adapter, MultimodalMessage
@@ -186,7 +187,8 @@ class WeChatILinkAdapter(Adapter):
 
         plaintext = Path(file_path).read_bytes()
         rawsize = len(plaintext)
-        md5 = hashlib.md5(plaintext).hexdigest()
+        # 官方 CDN 协议要求的文件校验值，非安全签名用途
+        md5 = hashlib.md5(plaintext, usedforsecurity=False).hexdigest()
         padded = ((rawsize + 1 + 15) // 16) * 16
         filekey = secrets.token_hex(16)
         aeskey = secrets.token_bytes(16)

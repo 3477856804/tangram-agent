@@ -13,11 +13,18 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import threading
 import time
 from typing import Any, Optional
 
 from ..gateway import Adapter, MultimodalMessage
 from ..util import NetClient, now_ts
+
+# 验签时间窗与已用 nonce 登记表：防止抓包后无限次重放同一条已签名
+# webhook（CWE-294）。签名校验通过后才登记，避免垃圾 nonce 撑爆内存。
+_MAX_SIGNATURE_SKEW = 300.0
+_SEEN_NONCES: dict[str, float] = {}
+_SEEN_NONCES_LOCK = threading.Lock()
 
 
 class WeChatOfficialAdapter(Adapter):
@@ -59,9 +66,18 @@ class WeChatOfficialAdapter(Adapter):
         """校验服务端转发来的消息签名（HMAC-SHA256，凭证仅服务端）。
 
         signature = HMAC-SHA256(app_secret, sorted(token, timestamp, nonce) 拼接 + body)
-        通过后才接受入站事件，防伪造 webhook。
+
+        安全修复：早期只比对了摘要，一条被抓包的合法请求可以**无限次重放**，
+        持续驱动 Agent 出站。现在额外要求时间戳在 ±300s 内、nonce 非空且
+        在时间窗内不可复用；只有摘要校验通过才登记 nonce（防内存耗尽）。
         """
-        if not self._app_secret:
+        if not self._app_secret or not signature or not nonce or not timestamp:
+            return False
+        try:
+            skew = abs(time.time() - float(timestamp))
+        except (TypeError, ValueError):
+            return False
+        if skew > _MAX_SIGNATURE_SKEW:
             return False
         parts = sorted([self._app_secret, str(timestamp), str(nonce)])
         material = "".join(parts) + str(body)
@@ -70,7 +86,17 @@ class WeChatOfficialAdapter(Adapter):
             material.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        return hmac.compare_digest(digest, str(signature))
+        if not hmac.compare_digest(digest, str(signature)):
+            return False
+        now = time.time()
+        with _SEEN_NONCES_LOCK:
+            for k, ts in list(_SEEN_NONCES.items()):
+                if now - ts > _MAX_SIGNATURE_SKEW * 2:
+                    _SEEN_NONCES.pop(k, None)
+            if str(nonce) in _SEEN_NONCES:
+                return False
+            _SEEN_NONCES[str(nonce)] = now
+        return True
 
     # ---- code -> openid（服务端验签） ----
     def verify_code(self, code: str) -> tuple[Optional[str], str]:

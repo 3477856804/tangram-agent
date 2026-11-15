@@ -285,7 +285,20 @@ def load_adapter(path: str | Path) -> dict:
         torch = _torch()
         if torch is None:
             raise TrainingError("该适配核是 .pt 格式，但本机没有 torch，无法加载")
-        obj = torch.load(str(p), map_location="cpu", weights_only=False)
+        # 安全修复：早期 ``torch.load(..., weights_only=False)`` 等价于对
+        # 任意 .pt 文件执行 pickle 反序列化，攻击者只要能投放/替换一个
+        # 权重文件就能在加载进程里执行任意代码（CWE-502）。
+        # 本仓库自己的检查点只含张量与基础类型，weights_only=True 足够；
+        # 老版本 torch 不支持该参数时明确拒绝，绝不退化为不安全加载。
+        try:
+            obj = torch.load(str(p), map_location="cpu", weights_only=True)
+        except TypeError as exc:
+            raise TrainingError(
+                "本机 torch 版本过旧，不支持 weights_only=True；"
+                "为安全起见拒绝加载该 .pt 适配核"
+            ) from exc
+        if not isinstance(obj, dict) or "W" not in obj:
+            raise TrainingError("适配核结构非法（缺少 W 权重）")
         w = obj["W"]
         return {
             "weights": w.tolist() if hasattr(w, "tolist") else list(w),

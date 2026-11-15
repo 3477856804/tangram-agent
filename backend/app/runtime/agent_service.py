@@ -23,7 +23,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
+from urllib.parse import urlsplit
 
+from ..sandbox import SandboxPolicyError, safe_env, validate_command
 from .local_llm import InferenceError, LocalLLMInference
 from .memory import MemoryStore
 
@@ -109,6 +111,9 @@ class RuntimeService:
                       chunk_size: int = 8) -> Iterator[str]:
         """真实 HTTP 调用 OpenAI 兼容端点；内容全部来自服务端响应。"""
         base, key, model = cfg
+        parsed = urlsplit(base)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise RuntimeNotConfigured("云端 API 地址必须是 http(s) 且带主机名")
         body = json.dumps({
             "model": model,
             "messages": [
@@ -197,23 +202,36 @@ class RuntimeService:
                 return "工具执行失败：text 为空"
             return f"已记入长期核心记忆（id={self.memory.core_commit(note)}）：{note}"
         if name == "sandbox":
+            # 安全修复：命令来自不可信的聊天/桥接输入，绝不能交给 shell，
+            # 也不能继承含 API Key / Token 的进程环境。这里强制走真实策略：
+            # 白名单程序 + shell=False + 工作区路径约束 + 最小环境 + 超时/输出上限。
             command = str(args.get("command") or "").strip()
             if not command:
                 return "工具执行失败：command 为空"
             try:
+                argv, policy = validate_command(command, self.workspace)
+            except SandboxPolicyError as exc:
+                return f"工具执行失败：沙箱策略拒绝：{exc}"
+            except (OSError, ValueError) as exc:
+                # 策略文件缺失/损坏也必须拒绝执行（fail-closed），绝不回退裸 shell
+                return (f"工具执行失败：沙箱策略不可用，已拒绝执行（fail-closed）："
+                        f"{type(exc).__name__}: {exc}")
+            timeout_s = float(policy.get("timeout_seconds", 60))
+            max_out = int(policy.get("max_output_bytes", 4000))
+            try:
                 proc = subprocess.run(
-                    ["bash", "-lc", command], cwd=str(self.workspace),
-                    capture_output=True, text=True, timeout=60,
-                    env=dict(os.environ, HOME=str(self.workspace)),
+                    argv, cwd=str(self.workspace),
+                    capture_output=True, text=True, timeout=timeout_s,
+                    env=safe_env(self.workspace), shell=False,
                 )
             except subprocess.TimeoutExpired:
-                return "工具执行失败：命令超时（>60s）已终止"
+                return f"工具执行失败：命令超时（>{int(timeout_s)}s）已终止"
             except OSError as exc:
                 return f"工具执行失败：{type(exc).__name__}: {exc}"
             out = ((proc.stdout or "") + (proc.stderr or "")).strip()
             if proc.returncode != 0:
                 out += f"\n[exit={proc.returncode}]"
-            return (out or "(无输出)")[:4000]
+            return (out or "(无输出)")[:max_out]
         return f"工具执行失败：未知工具 {name}"
 
     def status(self) -> dict:

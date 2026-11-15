@@ -39,9 +39,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
+import ipaddress
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -93,6 +97,108 @@ def _wx_ctx_restore() -> None:
             wx_ctx.update(json.loads(p.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         pass
+
+
+# --------------------------------------------------------------------------
+# Webhook 入站鉴权（安全修复）
+#
+# 修复前的 ``do_POST`` 对 /webhook/* 不做任何来源校验，且服务默认监听
+# 0.0.0.0：同一局域网（或公网可达时）任何人都能 POST 一条伪造的 OneBot /
+# WhatsApp 消息驱动 Agent 出站。更严重的是 /webhook/qq_openapi 只在
+# 「body 带 data + nonce」时解密，攻击者直接提交**明文**事件即可完全绕过
+# 平台加密校验，任意伪造 C2C_MESSAGE_CREATE / GROUP_AT_MESSAGE_CREATE。
+#
+# 现在：
+#   * 来自回环（本机 NapCat / WhatsApp 桥 / 验签代理）一律放行；
+#   * OneBot / WhatsApp 这类自身无验签能力的通道：非回环请求必须带
+#     TANGRAM_WEBHOOK_SECRET 的 HMAC-SHA256 签名（时间戳 + 随机 nonce +
+#     原始请求体），带时间窗与 nonce 重放防护；未配置共享密钥时直接拒绝；
+#   * 微信官方（app_secret HMAC）与 QQ 官方（AES-GCM 加密回调）自带验真，
+#     由各自端点把关，不叠加自定义 HMAC 以免挡住官方回调；
+#   * qq_openapi 明文回调默认 fail-closed，只有本机显式调试开关才放行。
+# --------------------------------------------------------------------------
+_WEBHOOK_MAX_SKEW = 300.0
+_WEBHOOK_MAX_BODY = 1 << 20  # 1 MiB，防超大请求体耗尽内存
+_WEBHOOK_NONCES: dict[str, float] = {}
+_WEBHOOK_NONCE_LOCK = threading.Lock()
+
+
+def _client_is_loopback(handler: BaseHTTPRequestHandler) -> bool:
+    """判断请求是否来自本机回环地址（不允许用 Host/XFF 头伪造）。"""
+    try:
+        return ipaddress.ip_address(handler.client_address[0]).is_loopback
+    except (ValueError, OSError, IndexError, AttributeError):
+        return False
+
+
+def _verify_webhook_hmac(headers, raw: bytes) -> tuple[bool, str]:
+    """校验非回环 webhook 的 HMAC-SHA256 签名（含时间窗 + nonce 重放防护）。"""
+    secret = os.environ.get("TANGRAM_WEBHOOK_SECRET", "")
+    if not secret:
+        return False, "TANGRAM_WEBHOOK_SECRET 未配置"
+    signature = headers.get("X-Tangram-Signature", "")
+    timestamp = headers.get("X-Tangram-Timestamp", "")
+    nonce = headers.get("X-Tangram-Nonce", "")
+    if not (signature and timestamp and nonce):
+        return False, "missing-webhook-signature"
+    try:
+        skew = abs(time.time() - float(timestamp))
+    except (TypeError, ValueError):
+        return False, "bad-webhook-timestamp"
+    if skew > _WEBHOOK_MAX_SKEW:
+        return False, "stale-webhook-timestamp"
+    material = (str(timestamp) + "\n" + str(nonce) + "\n").encode("utf-8") + raw
+    expected = hmac.new(secret.encode("utf-8"), material, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, str(signature)):
+        return False, "bad-webhook-signature"
+    now = time.time()
+    with _WEBHOOK_NONCE_LOCK:
+        for k, ts in list(_WEBHOOK_NONCES.items()):
+            if now - ts > _WEBHOOK_MAX_SKEW * 2:
+                _WEBHOOK_NONCES.pop(k, None)
+        if str(nonce) in _WEBHOOK_NONCES:
+            return False, "replayed-webhook-nonce"
+        _WEBHOOK_NONCES[str(nonce)] = now
+    return True, "ok"
+
+
+def _webhook_gate(handler: BaseHTTPRequestHandler, raw: bytes,
+                  *, strict_local: bool) -> tuple[bool, str]:
+    """OneBot / WhatsApp 桥这类自身无验签能力通道的来源门禁。
+
+    回环请求放行；非回环请求在配置了共享密钥时校验 HMAC-SHA256，
+    未配置则拒绝。微信 / QQ 官方通道自带密码学校验，不走这里。
+    """
+    if _client_is_loopback(handler):
+        return True, "loopback"
+    if os.environ.get("TANGRAM_WEBHOOK_SECRET", ""):
+        return _verify_webhook_hmac(handler.headers, raw)
+    if strict_local:
+        return False, ("non-loopback-webhook-rejected：请配置 "
+                       "TANGRAM_WEBHOOK_SECRET 并对请求做 HMAC 签名，"
+                       "或让桥进程只从 127.0.0.1 回调")
+    return True, "endpoint-self-verified"
+
+
+def _private_tmp_path(suffix: str) -> str:
+    """在 App 私有数据目录（0o700）下创建不可预测、仅属主可读写的临时文件。
+
+    修复前用 ``/tmp/tts_<毫秒时间戳>.wav`` 这类可预测路径，存在符号链接
+    抢占 / 信息泄露风险（CWE-377），且 /tmp 是全局可写目录。
+    """
+    d = Path(os.environ.get("TANGRAM_DATA") or str(Path.home() / ".tangram")) / "tmp"
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    fd, path = tempfile.mkstemp(prefix="tga-", suffix=suffix, dir=str(d))
+    os.close(fd)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
 
 
 def _media_answer(items, kind: str, key: str) -> str:
@@ -183,7 +289,11 @@ def _cloud_post(cfg: tuple[str, str, str], payload: dict) -> dict:
     """向云端 API 发一次 chat/completions 请求，返回解析后的 JSON。"""
     base, key, _model = cfg
     import urllib.request
+    from urllib.parse import urlsplit
 
+    parts = urlsplit(base)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("TANGRAM_API_BASE 必须是 http(s) 且带主机名")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         base + "/chat/completions",
@@ -321,15 +431,27 @@ def _sandbox_exec(command: str, timeout_s: float = 60.0) -> str:
     （宿主 ~/.tangram/agent_ws，沙箱内为 /workspace）；宿主 home、凭据、
     代码仓库都不在挂载视图里，看不到也改不了。命令经文件传入，不拼 shell 字符串。
     """
+    import shlex
     import subprocess
+    import tempfile
     from pathlib import Path
 
     ws = Path.home() / ".tangram" / "agent_ws"
     ws.mkdir(parents=True, exist_ok=True)
     root = Path.home() / ".tangram" / "agent_root"
     root.mkdir(parents=True, exist_ok=True)
-    (ws / ".agent_cmd.sh").write_text(command, encoding="utf-8")
-    import shlex
+    # 安全修复：早期所有工具调用共用工作区里固定的 ``.agent_cmd.sh``，
+    # 并发时后一个请求会覆盖前一个的命令文件、finally 里又会互相删除，
+    # 造成「A 会话的命令执行成 B 会话的命令」的竞态（CWE-367）。
+    # 现在每次调用各用 0o600 的随机文件名，互不干扰，且只删自己那份。
+    fd, cmd_path = tempfile.mkstemp(prefix=".agent_cmd_", suffix=".sh", dir=str(ws))
+    os.close(fd)
+    try:
+        os.chmod(cmd_path, 0o600)
+    except OSError:
+        pass
+    Path(cmd_path).write_text(command, encoding="utf-8")
+    cmd_name = os.path.basename(cmd_path)
 
     mount_lines = ""
     for m in _sandbox_mounts():
@@ -360,10 +482,11 @@ mount -t proc proc "$R/proc" 2>/dev/null || true
 mount -t tmpfs tmpfs "$R/dev"
 for d in null zero urandom full; do touch "$R/dev/$d"; mount --bind "/dev/$d" "$R/dev/$d"; done
 export HOME=/workspace PATH=/usr/local/bin:/usr/bin:/bin TERM=dumb
-exec timeout -s KILL "__TIMEOUT__" /usr/sbin/chroot "$R" /bin/bash -c 'cd /workspace && bash /workspace/.agent_cmd.sh'
+exec timeout -s KILL "__TIMEOUT__" /usr/sbin/chroot "$R" /bin/bash -c 'cd /workspace && bash "/workspace/__CMD_NAME__"'
 """
     inner = inner.replace("__TIMEOUT__", str(int(timeout_s)))
     inner = inner.replace("__MOUNT_LINES__", mount_lines)
+    inner = inner.replace("__CMD_NAME__", cmd_name)
     env = dict(os.environ, AGENT_ROOT=str(root), AGENT_WS=str(ws))
     try:
         proc = subprocess.run(
@@ -380,8 +503,9 @@ exec timeout -s KILL "__TIMEOUT__" /usr/sbin/chroot "$R" /bin/bash -c 'cd /works
     except subprocess.TimeoutExpired:
         return f"工具执行失败：命令超时（>{int(timeout_s) + 15}s）已终止"
     finally:
+        # 只清理本次调用自己的命令文件，绝不动其他并发调用的文件。
         try:
-            (ws / ".agent_cmd.sh").unlink(missing_ok=True)
+            Path(cmd_path).unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -682,11 +806,14 @@ def extract_text(msg: MultimodalMessage) -> str:
         hint = str(msg.payload.get("text") or "").strip()
         url = str(msg.payload.get("url") or "")
         asr = module_asr()
-        if asr is not False and url and brain.is_safe_url(url):
+        if asr is not False and url:
             try:
-                import urllib.request
-
-                data = urllib.request.urlopen(url, timeout=15).read()  # noqa: S310
+                # 安全修复：URL 来自不可信聊天消息，走逐跳校验的安全 opener，
+                # 不再裸 urlopen（防 SSRF / DNS rebinding / 302 跳内网）。
+                with brain.safe_urlopen(url, timeout=15) as resp:
+                    data = resp.read(10 * 1024 * 1024 + 1)
+                if len(data) > 10 * 1024 * 1024:
+                    raise ValueError("音频数据超过 10MiB 上限")
                 pcm16k = to_pcm16k(data)
                 if pcm16k is not None:
                     got = asr(pcm16k)
@@ -900,12 +1027,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n < 0 or n > _WEBHOOK_MAX_BODY:
+            return self._json({"error": "payload-too-large-or-invalid"}, 413)
         raw = self.rfile.read(n) if n else b"{}"
         try:
             body = json.loads(raw.decode("utf-8", "replace") or "{}")
         except Exception:
             return self._json({"error": "bad-json"}, 400)
+        # 入站 webhook 来源门禁：自身无密码学验签的通道（OneBot / WhatsApp
+        # 桥）必须来自回环或带 TANGRAM_WEBHOOK_SECRET 的 HMAC 签名；微信官方
+        # 与 QQ 官方通道自带 app_secret HMAC / AES-GCM 解密验真，由端点自身
+        # 把关，避免叠加自定义 HMAC 反而把官方回调挡在门外。
+        if path in ("/webhook/qq_napcat", "/webhook/whatsapp"):
+            ok, reason = _webhook_gate(self, raw, strict_local=True)
+            if not ok:
+                return self._json({"error": "unauthorized-webhook", "reason": reason}, 403)
         if path == "/webhook/qq_napcat":
             return self._webhook_onebot(body)
         if path == "/webhook/whatsapp":
@@ -1032,9 +1172,7 @@ class Handler(BaseHTTPRequestHandler):
         want_voice = msg.modality == "voice" or answer.startswith("语音：") or answer.startswith("用语音说")
         if want_voice:
             say = answer.split("：", 1)[-1] if answer.startswith(("语音：", "用语音说")) else answer
-            import os as _os
-            wav = _os.path.join(_os.environ.get("TANGRAM_DATA", "/tmp"),
-                                f"tts_{int(time.time()*1000)}.wav")
+            wav = _private_tmp_path(".wav")
             from im.brain import synth_speech
             if synth_speech(say, wav):
                 modality, payload = "voice", {"file": wav}
@@ -1070,20 +1208,39 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True})
 
     def _webhook_qq_openapi(self, body: dict) -> None:
-        """QQ 官方 APIv2 HTTP 回调：加密事件解密后进同一 Agent 管线。"""
+        """QQ 官方 APIv2 HTTP 回调：加密事件验真后（AES-GCM）才进 Agent 管线。"""
         from .adapters.qq_openapi import QQOpenAPIAdapter
 
         adp = self.gateway.adapters.get("qq_openapi")
         if adp is None or not getattr(adp, "ready", False):
             return self._json({"ok": False, "hint": "qq_openapi 未配置凭据（TANGRAM_QQ_APPID/SECRET）"}, 503)
-        event = body
-        if isinstance(body.get("data"), str) and body.get("nonce"):
+        # 安全修复：明文事件没有任何平台签名/加密保护，任何人都能伪造
+        # C2C_MESSAGE_CREATE 驱动 Agent 向任意 openid 出站。默认 fail-closed，
+        # 仅接受带 nonce+data 且 AES-GCM 解密成功的官方加密回调。
+        encrypted = isinstance(body.get("data"), str) and bool(body.get("nonce"))
+        if not encrypted:
+            debug_ok = (os.environ.get("TANGRAM_QQ_ALLOW_PLAIN", "") == "1"
+                        and _client_is_loopback(self))
+            if not debug_ok:
+                return self._json({
+                    "ok": False, "reason": "plaintext-callback-rejected",
+                    "hint": "QQ 官方回调必须是 nonce+data 加密包；如需本机调试，"
+                            "请显式设置 TANGRAM_QQ_ALLOW_PLAIN=1 且仅从 127.0.0.1 调用",
+                }, 403)
+            event = body
+        else:
             event = QQOpenAPIAdapter.decrypt_callback(body, adp.client_secret)
             if event is None:
                 return self._json({"ok": False, "reason": "decrypt-failed"}, 400)
         etype = str(event.get("type") or "")
         if etype in ("URL_VALIDATION", "aes/0") or (event.get("plain_token") and not etype):
-            # 平台配置回调时的验证请求：按官方要求回显 plain_token（signature 校验由平台公钥体系完成）
+            # 平台配置回调时的验证请求：非回环调用必须带平台签名头或网关 HMAC，
+            # 否则不对任意来源回显 plain_token（防未鉴权反射）。
+            if not _client_is_loopback(self) and not (
+                self.headers.get("X-Signature-Ed25519")
+                or self.headers.get("X-Tangram-Signature")
+            ):
+                return self._json({"ok": False, "reason": "unauthenticated-validation"}, 403)
             return self._json({"plain_token": event.get("plain_token", "")})
         if etype not in ("C2C_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"):
             return self._json({"ignored": etype or "unknown"})
@@ -1430,8 +1587,8 @@ def build_gateway(onebot_base: str, napcat_token: str) -> Gateway:
                             try:
                                 from im.brain import synth_speech
                                 import subprocess as _sp
-                                wav = f"/tmp/wx_tts_{int(time.time()*1000)}.wav"
-                                mp3 = wav.replace(".wav", ".mp3")
+                                wav = _private_tmp_path(".wav")
+                                mp3 = wav[:-4] + ".mp3"
                                 if synth_speech(heard and answer[:200] or "你好", wav):
                                     _sp.run(["ffmpeg", "-loglevel", "error", "-y", "-i", wav,
                                              "-codec:a", "libmp3lame", "-qscale:a", "6", mp3],
@@ -1509,6 +1666,11 @@ def serve(
 
     discovery = DiscoveryServer(http_port=port)
     discovery_ok = discovery.start()
+    if (bind not in ("127.0.0.1", "::1", "localhost")
+            and not os.environ.get("TANGRAM_WEBHOOK_SECRET", "")):
+        print("[security] 警告：网关监听非回环地址且未配置 TANGRAM_WEBHOOK_SECRET；"
+              "非回环 webhook 已被拒绝，但状态/扫码/凭据下发接口仍对局域网开放。"
+              "请仅在可信内网使用，或配置共享密钥 + 反向代理鉴权。", flush=True)
     print(
         f"[im-gateway] http://{bind}:{port}  面板 / 扫码 / AGP 就绪；"
         f"OneBot={onebot_base}  agent={AGENT.mode}  "

@@ -36,35 +36,70 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+# WebSocket 单帧上限（1 MiB）：防止对端声明超大长度耗尽服务端内存。
+WS_MAX_FRAME_BYTES = 1 << 20
 
 # token -> {guid, connector, ts}。进程内有效，网关重启后需重新扫码/取状态。
 AGP_TOKENS: dict[str, dict[str, Any]] = {}
 _TOKENS_LOCK = threading.Lock()
 
+# 安全修复：
+#  * 早期``TANGRAM_AGP_REQUIRE_TOKEN=0``会让**空 token** 直接通过校验，
+#    等于一行环境变量就能关掉整条 WebSocket 鉴权（CWE-306）；已移除该后门。
+#  * 早期 token 永不过期、且不限制数量，而 /api/login/*/status 每次轮询都会
+#    新签一枚：既可被无限重放，也能把进程内存撑爆（CWE-613 / CWE-400）。
+#    现在 token 有 TTL、有总量上限，并按 (host, connector) 复用同一枚凭据。
+_AGP_TOKEN_TTL = float(os.environ.get("TANGRAM_AGP_TOKEN_TTL", str(24 * 3600)))
+_AGP_MAX_TOKENS = 1024
+_AGP_GRANTS: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _evict_expired_locked(now: float) -> None:
+    for tok, rec in list(AGP_TOKENS.items()):
+        if now - float(rec.get("ts", 0)) > _AGP_TOKEN_TTL:
+            AGP_TOKENS.pop(tok, None)
+
 
 def issue_credentials(host: str, connector: str) -> dict[str, str]:
-    """登录成功后签发真实 AGP 连接凭据（不是伪造的登录态）。"""
-    token = secrets.token_urlsafe(32)
-    guid = f"tga-{secrets.token_hex(8)}"
-    with _TOKENS_LOCK:
-        AGP_TOKENS[token] = {
-            "guid": guid,
-            "connector": connector,
-            "ts": time.time(),
-        }
+    """登录成功后签发真实 AGP 连接凭据（不是伪造的登录态）。
+
+    同一 (host, connector) 在有效期内复用同一枚凭据，避免状态轮询接口
+    每 8 秒就签一枚新 token 造成无界增长。
+    """
     scheme = "wss" if os.environ.get("TANGRAM_AGP_WSS") == "1" else "ws"
-    return {
-        "ws_url": f"{scheme}://{host}/ws",
-        "guid": guid,
-        "token": token,
-    }
+    ws_url = f"{scheme}://{host}/ws"
+    key = (host, connector)
+    now = time.time()
+    with _TOKENS_LOCK:
+        _evict_expired_locked(now)
+        cached = _AGP_GRANTS.get(key)
+        if (cached and (now - float(cached["ts"])) < _AGP_TOKEN_TTL
+                and cached["token"] in AGP_TOKENS):
+            return {"ws_url": ws_url, "guid": cached["guid"],
+                    "token": cached["token"]}
+        if len(AGP_TOKENS) >= _AGP_MAX_TOKENS:
+            oldest = min(AGP_TOKENS,
+                         key=lambda t: float(AGP_TOKENS[t].get("ts", 0)))
+            AGP_TOKENS.pop(oldest, None)
+        token = secrets.token_urlsafe(32)
+        guid = f"tga-{secrets.token_hex(8)}"
+        AGP_TOKENS[token] = {"guid": guid, "connector": connector, "ts": now}
+        _AGP_GRANTS[key] = {"guid": guid, "token": token, "ts": now}
+    return {"ws_url": ws_url, "guid": guid, "token": token}
 
 
 def verify_token(token: str) -> Optional[dict[str, Any]]:
-    if os.environ.get("TANGRAM_AGP_REQUIRE_TOKEN", "1") == "0" and not token:
-        return {"guid": "", "connector": "", "ts": time.time()}
+    """校验 AGP token：必须非空、已签发、且未过期。"""
+    if not token:
+        return None
     with _TOKENS_LOCK:
-        return AGP_TOKENS.get(token)
+        rec = AGP_TOKENS.get(token)
+        if rec is None:
+            return None
+        if time.time() - float(rec.get("ts", 0)) > _AGP_TOKEN_TTL:
+            AGP_TOKENS.pop(token, None)
+            return None
+        return dict(rec)
 
 
 # --------------------------------------------------------------------------
@@ -98,8 +133,14 @@ def _recv_exact(read: Callable[[int], bytes], n: int) -> bytes:
     return buf
 
 
-def ws_read_frame(read: Callable[[int], bytes]) -> tuple[int, bytes]:
-    """返回 (opcode, payload)。read 通常传 `handler.rfile.read`。"""
+def ws_read_frame(read: Callable[[int], bytes],
+                  max_payload: int = WS_MAX_FRAME_BYTES) -> tuple[int, bytes]:
+    """返回 (opcode, payload)。read 通常传 `handler.rfile.read`。
+
+    安全修复：早期既不要求客户端帧掩码、也不限制帧长度，对端可声明
+    2^63-1 字节的长度让服务端持续读取 / 分配内存（CWE-400），且未掩码帧
+    违反 RFC 6455。现在强制掩码 + 单帧上限，超限抛 ValueError 由调用方断开。
+    """
     h = _recv_exact(read, 2)
     b1, b2 = h[0], h[1]
     opcode = b1 & 0x0F
@@ -109,10 +150,13 @@ def ws_read_frame(read: Callable[[int], bytes]) -> tuple[int, bytes]:
         n = struct.unpack("!H", _recv_exact(read, 2))[0]
     elif n == 127:
         n = struct.unpack("!Q", _recv_exact(read, 8))[0]
-    mask = _recv_exact(read, 4) if masked else b""
+    if not masked:
+        raise ValueError("unmasked-client-frame：RFC 6455 要求客户端帧必须掩码")
+    if n > max_payload:
+        raise ValueError(f"websocket-frame-too-large：{n} > {max_payload}")
+    mask = _recv_exact(read, 4)
     data = _recv_exact(read, n) if n else b""
-    if masked:
-        data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+    data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
     return opcode, data
 
 
@@ -120,7 +164,10 @@ def ws_accept(key: str) -> str:
     import base64
     import hashlib
 
-    digest = hashlib.sha1((key + WS_MAGIC).encode()).digest()
+    # SHA1 是 RFC 6455 握手规定的固定算法，并非用于安全签名；
+    # usedforsecurity=False 明确标注这一点（也避免审计工具误报）。
+    digest = hashlib.sha1((key + WS_MAGIC).encode(),
+                          usedforsecurity=False).digest()
     return base64.b64encode(digest).decode()
 
 

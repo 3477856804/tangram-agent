@@ -11,15 +11,20 @@
 from __future__ import annotations
 
 import ast
+import ipaddress
 import operator
+import os
+import re
+import socket
 import sys
 import tempfile
-import re
-import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlsplit
 
 PERSONA = (
     "你是檀阁瑞木 Tangram——住在用户设备里的个人专属 AI Agent（不是七巧板玩具游戏）。"
@@ -361,14 +366,81 @@ def is_safe_url(url: str) -> bool:
         return False
 
 
+_SSRF_MAX_REDIRECTS = 3
+_MAX_MEDIA_BYTES = 20 * 1024 * 1024
+
+
+def _public_resolved(host: str) -> bool:
+    """解析主机名并确认**所有** A/AAAA 记录都是公网地址。
+
+    挡住两类 ``is_safe_url`` 的字面串检查覆盖不到的绕过：
+    1) 十进制/十六进制/八进制 IP 字面量（如 ``http://2130706433``）；
+    2) 域名解析到 127.0.0.1 / 169.254.169.254 的 DNS rebinding。
+    解析失败一律按不安全处理（fail-closed）。
+    """
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    addrs = []
+    for info in infos:
+        raw = str(info[4][0]).split("%", 1)[0]
+        try:
+            addrs.append(ipaddress.ip_address(raw))
+        except ValueError:
+            continue
+    if not addrs:
+        return False
+    return all(
+        not (a.is_private or a.is_loopback or a.is_link_local
+             or a.is_reserved or a.is_multicast or a.is_unspecified)
+        for a in addrs
+    )
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """逐跳重新校验 302 目标，防止「公网 URL 跳转到内网」的 SSRF。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not is_safe_url(newurl):
+            raise urllib.error.URLError("redirect 目标协议/主机被拒绝")
+        host = urlsplit(newurl).hostname
+        if not host or not _public_resolved(host):
+            raise urllib.error.URLError("redirect 目标解析到内网地址，已拒绝")
+        hops = getattr(req, "_tga_redirects", 0)
+        if hops >= _SSRF_MAX_REDIRECTS:
+            raise urllib.error.URLError("redirect 次数超过上限")
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            new._tga_redirects = hops + 1
+        return new
+
+
+def safe_urlopen(url: str, timeout: float = 15.0, **kwargs):
+    """安全打开「由聊天消息带入」的 URL：协议 + 字面 IP + DNS + 跳转逐跳校验。
+
+    用于语音转写与媒体下载等不可信输入场景；任何一步不确定都抛异常，
+    由调用方如实报错，绝不降级为裸 ``urlopen``。
+    """
+    if not is_safe_url(url):
+        raise ValueError("不安全的 URL（协议或主机被拒绝）")
+    host = urlsplit(url).hostname
+    if host and not _public_resolved(host):
+        raise ValueError("URL 解析到内网/回环/保留地址，已拒绝")
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    return opener.open(req, timeout=timeout, **kwargs)
+
+
 def _default_media_download(url: str, dest: str) -> bool:
     if not is_safe_url(url):
         return False
     try:
-        import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
-            Path(dest).write_bytes(r.read())
+        with safe_urlopen(url, timeout=30) as r:
+            data = r.read(_MAX_MEDIA_BYTES + 1)
+        if not data or len(data) > _MAX_MEDIA_BYTES:
+            return False
+        Path(dest).write_bytes(data)
         return Path(dest).stat().st_size > 100
     except Exception:
         return False
@@ -415,7 +487,9 @@ def describe_media(items: list, question: str = "请用简体中文描述这张�
             local.append(url)
             continue
         ext = ".jpg" if str(it.get("kind", "image")) == "image" else ".mp4"
-        dest = str(cache / (hashlib.md5(url.encode()).hexdigest()[:16] + ext))
+        # 仅用作缓存文件名（非安全用途），显式标注避免误判为弱签名
+        dest = str(cache / (hashlib.md5(url.encode(),
+                                       usedforsecurity=False).hexdigest()[:16] + ext))
         if not Path(dest).is_file():
             if not download(url, dest):
                 return "你发的这个媒体文件我拿不到（下载失败或需要额外鉴权），这次没法识图——不是我不想看，是真下载不下来。"
