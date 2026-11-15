@@ -5,7 +5,6 @@
 ///
 /// 参考：`flutter_agent_harness` 的 provider 契约（load → infer → dispose），
 /// 实现：`llamadart 0.19.0`（Dart FFI + llama.cpp native assets）。
-library;
 
 import 'dart:io';
 

@@ -7,7 +7,6 @@
 ///    连接状态机、心跳、上行 session.update / session.promptResponse。
 ///
 /// 全部为真实网络行为：连不上就是连不上，绝不伪造「已连接」。
-library;
 
 import 'dart:async';
 import 'dart:convert';

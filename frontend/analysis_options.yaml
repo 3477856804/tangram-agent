@@ -23,6 +23,7 @@ analyzer:
     unnecessary_null_in_if_null_operators: ignore
     unnecessary_nullable_for_final_variable_declarations: ignore
     unnecessary_brace_in_string_interps: ignore
+    dangling_library_doc_comments: ignore
     prefer_interpolation_to_compose_strings: ignore
     prefer_initializing_formals: ignore
     prefer_final_fields: ignore

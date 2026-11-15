@@ -14,7 +14,6 @@
 /// 选中云端模型后 [chatParams] 会产出真实 api_base / api_key / model，
 /// 由 TangramAiProvider 注入聊天请求，让后端真正发起 HTTP 推理。
 
-library;
 
 import 'package:flutter/foundation.dart';
 

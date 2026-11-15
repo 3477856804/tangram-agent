@@ -15,7 +15,6 @@
 ///
 /// 设计原则与 harness 一致：**二维码内容只能来自网关真实下发**。
 /// 本文件不生成、不拼接、不猜测任何二维码内容；上游没给就解析失败并如实报错。
-library;
 
 import 'dart:convert';
 import 'dart:typed_data';

@@ -1,6 +1,5 @@
 /// APP 启动 smoke test：验证根 widget 能真实构建，不引用模板里的 MyApp。
 
-library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';

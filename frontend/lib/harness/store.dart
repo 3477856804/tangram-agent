@@ -5,7 +5,6 @@
 /// 重启后可恢复；不编造、不内存伪造。所有写操作都先写临时文件再原子改名，
 /// 避免中途崩溃留下半个 JSON。
 
-library;
 
 import 'dart:convert';
 import 'dart:io';

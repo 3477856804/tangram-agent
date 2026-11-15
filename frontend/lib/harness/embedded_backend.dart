@@ -18,7 +18,6 @@
 ///
 /// 绝不填充示例数据、绝不静默降级、绝不谎称已连接外部服务。
 
-library;
 
 import 'dart:async';
 import 'dart:convert';

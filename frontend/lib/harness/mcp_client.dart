@@ -11,7 +11,6 @@
 ///   3. tools/list → 得到 [{name, description, inputSchema}]。
 ///   4. tools/call {name, arguments} → 得到 content（文本 / 资源）。
 /// 每一步都真实发请求；失败如实返回错误，不编造工具或结果。
-library;
 
 import 'dart:async';
 import 'dart:convert';

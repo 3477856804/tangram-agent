@@ -4,7 +4,6 @@
 /// 不引 gen-l10n 重型工具链。语言真源是 PersonaStore.language，
 /// [TgaL10n.localeOf] 把它映射为 MaterialApp.locale，同时驱动
 /// 系统组件（时间/日期选择器等）经 flutter_localizations 本地化。
-library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';

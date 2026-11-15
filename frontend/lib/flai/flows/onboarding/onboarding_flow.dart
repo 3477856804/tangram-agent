@@ -1,4 +1,3 @@
-library;
 
 export 'onboarding_config.dart';
 export 'onboarding_controller.dart';

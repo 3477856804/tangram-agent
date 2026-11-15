@@ -20,7 +20,6 @@
 /// fetchQr 即可拿新码（UI 上的「要新码」按钮）。扫完在微信里给 bot 发
 /// 一条消息，getupdates 长轮询即收到，走真实推理后 sendmessage 回发——
 /// 这就是真链路。本文件不生成、不伪造任何二维码。
-library;
 
 import 'dart:convert';
 import 'dart:math';

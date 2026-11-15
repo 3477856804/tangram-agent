@@ -1,6 +1,5 @@
 /// 扫码登录协议测试：验证对三套真实上游字段的兼容解析，以及
 /// 「上游没下发二维码就拒绝渲染」这条诚实约束。
-library;
 
 import 'dart:convert';
 import 'dart:typed_data';

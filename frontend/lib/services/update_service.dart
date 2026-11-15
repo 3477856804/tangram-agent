@@ -12,7 +12,6 @@
 ///
 /// 仓库 owner/name 与 token 都是常量，用户换成自己的 GitHub 仓库即可。
 /// 网络失败如实返回 available=false + error，绝不假装有更新。
-library;
 
 import 'dart:async';
 import 'dart:convert';

@@ -26,7 +26,6 @@
 /// 就抛 [FeishuDirectException]，绝不伪造二维码。确认成功后凭据经官方
 /// `POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal`
 /// 真实验证（端点出处：lark_oapi/core/token/create_self_tenant_token_request.py）。
-library;
 
 import 'dart:async';
 import 'dart:convert';

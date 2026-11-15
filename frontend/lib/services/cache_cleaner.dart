@@ -6,7 +6,6 @@
 ///  - harness 模型/插件目录里的下载分片与 sidecar 临时文件（.part/.tmp/.download）；
 ///  - 沙箱 tmp 目录。
 /// 保留：日记/知识图谱/API 配置/已完成的模型权重/已安装插件——这些不是缓存。
-library;
 
 import 'dart:io';
 

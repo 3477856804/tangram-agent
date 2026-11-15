@@ -12,7 +12,6 @@
 /// 设计原则与参考 harness 一致：**能力缺失即拒绝，异常不逃逸循环，
 /// 工具结果永远是数据而不是异常**，绝不静默降级、绝不编造输出。
 
-library;
 
 import 'dart:async';
 import 'dart:math' as math;

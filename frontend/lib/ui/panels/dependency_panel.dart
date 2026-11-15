@@ -1,6 +1,5 @@
 /// 旧版面板:当前 App 无入口引用,保留备查。
 
-library;
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';

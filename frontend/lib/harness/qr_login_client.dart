@@ -10,7 +10,6 @@
 /// 兼容：若网关实现的是通用 `/tga/login/qr` + JSON 票据（见
 /// `login_protocol.dart` 里抄自 freestylefly / HenryXiaoYang / ClawPanel 的
 /// 字段），同样能解析。二维码内容/图片**只来自网关响应**，APP 不生成。
-library;
 
 import 'dart:convert';
 import 'dart:typed_data';

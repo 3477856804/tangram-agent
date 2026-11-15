@@ -22,7 +22,6 @@
 /// 凭据经 HarnessStore 落盘 qq_official.json（App 私有目录，与 Python 网关
 /// TANGRAM_DATA/qq_official.json 同名同字段）。连接状态只来自真实 HTTP 应答
 /// 与真实 wss READY 事件：拿不到就是拿不到，UI 上绝不出现假绿。
-library;
 
 import 'dart:async';
 import 'dart:convert';

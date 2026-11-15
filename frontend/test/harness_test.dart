@@ -3,7 +3,6 @@
 /// 遵守参考 harness 的验证规范：test/ 镜像实现、真实落盘、逐域断言，
 /// 不使用任何 mock 数据冒充响应。
 
-library;
 
 import 'dart:io';
 

@@ -6,7 +6,6 @@
 /// `.tangram_dl.json` sidecar；中断后重启从 sidecar 记录的偏移续传，全部分片
 /// 完成后原子合并成目标文件。所有进度来自真实落盘字节数，不编造百分比。
 
-library;
 
 import 'dart:async';
 import 'dart:convert';

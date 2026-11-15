@@ -1,4 +1,3 @@
-library;
 
 export 'auth_controller.dart';
 export 'auth_flow_config.dart';

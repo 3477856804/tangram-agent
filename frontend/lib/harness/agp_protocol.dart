@@ -8,7 +8,6 @@
 /// 上行（本 APP → 网关）：session.update / session.promptResponse / ping
 ///
 /// 这是真实协议实现：不含任何模拟数据，所有字段都从 JSON 真实编解码。
-library;
 
 import 'dart:convert';
 import 'dart:math';

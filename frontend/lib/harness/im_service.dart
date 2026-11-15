@@ -6,7 +6,6 @@
 ///
 /// 设计原则与 harness 一致：真实来源、拒绝语义、绝不谎称已连接。
 /// 配置落盘到 HarnessStore，重启可恢复；连接状态全部来自真实 socket。
-library;
 
 import 'dart:async';
 import 'dart:convert';

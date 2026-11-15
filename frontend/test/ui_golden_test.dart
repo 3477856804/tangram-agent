@@ -6,7 +6,6 @@
 ///   * 使用项目真实主题 [TangramTheme] 与真 inProcess 后端 + 全套 Provider；
 ///   * 给视口固定尺寸，避免 PanelPage 内置 ListView 拿到无界高度；
 ///   * 任何 Flutter 布局 overflow 都作为硬失败，其他异常仅记录供审查。
-library;
 
 import 'dart:io';
 import 'dart:typed_data';
