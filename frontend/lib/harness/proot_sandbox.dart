@@ -60,10 +60,15 @@ class ProotSandbox {
   File get tallocLib => File('${extDir.path}/libtalloc.so.2');
   File get readyFile => File('${extDir.path}/READY.json');
 
+  /// 是否真正可用：READY 标记 + proot 二进制完整（>100KB）+ rootfs 里
+  /// 已有可执行的 /bin/busybox 与 /bin/sh。任一缺失都视为未装，避免
+  /// 「以为自己装了、结果跑不起来」的半成品状态。
   bool get installed =>
       readyFile.existsSync() &&
       prootBin.existsSync() &&
-      File('${rootfsDir.path}/bin/busybox').existsSync();
+      prootBin.lengthSync() > 100000 &&
+      File('${rootfsDir.path}/bin/busybox').existsSync() &&
+      File('${rootfsDir.path}/bin/sh').existsSync();
 
   // ---- 安装状态机（流式真实字节进度，失败如实记录）----
 
@@ -179,6 +184,14 @@ class ProotSandbox {
         final dir2 = Directory('${rootfsDir.path}/$d');
         if (!dir2.existsSync()) dir2.createSync(recursive: true);
       }
+      // proot 的临时目录必须真实存在（PROOT_TMP_DIR 指向它），否则首次
+      // 启动会在 relink 阶段失败——这是「装了却跑不起来」的常见原因。
+      final Directory prootTmp = Directory('${extDir.path}/proot_tmp');
+      if (!prootTmp.existsSync()) prootTmp.createSync(recursive: true);
+      // 把 App 沙箱目录挂进用户态，Agent 在工作区写的文件在 Linux 里
+      // 走 /workspace 就能直接看到（同一份磁盘，不是复制）。
+      final Directory appSandbox = store.sub('sandbox');
+      if (!appSandbox.existsSync()) appSandbox.createSync(recursive: true);
       // Alpine minirootfs 不带可用 DNS 配置；写真实公共 DNS。
       await File('${rootfsDir.path}/etc/resolv.conf')
           .writeAsString('nameserver 8.8.8.8\nnameserver 1.1.1.1\n');
@@ -313,6 +326,11 @@ class ProotSandbox {
         'printf "\\n$marker%s$marker\$__rc\\n" "\$(pwd -P 2>/dev/null)"; '
         'exit \$__rc';
 
+    final Directory prootTmp = Directory('${extDir.path}/proot_tmp');
+    if (!prootTmp.existsSync()) prootTmp.createSync(recursive: true);
+    final Directory appSandbox = store.sub('sandbox');
+    if (!appSandbox.existsSync()) appSandbox.createSync(recursive: true);
+
     Process proc;
     try {
       proc = await Process.start(
@@ -328,6 +346,9 @@ class ProotSandbox {
           '/proc',
           '-b',
           '/sys',
+          // 工作区与 App 沙箱共用同一份磁盘：Linux 里 /workspace 就是它。
+          '-b',
+          '${appSandbox.path}:/workspace',
           '/bin/sh',
           '-c',
           script,

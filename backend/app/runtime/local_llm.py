@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
+
+from .deep_infer import DeepInferPlanner, estimate_tokens
 
 __all__ = ["LLMConfig", "LocalLLMInference", "InferenceError"]
 
@@ -53,6 +56,25 @@ class LocalLLMInference:
         self._model = None
         self._tokenizer = None
         self._load_error: str = ""
+        # DeepInfer 规划器：稳定前缀 / 分块预填充 / 起草长度 / 预算化生成。
+        self._planner = DeepInferPlanner(context_size=self.config.context_size)
+
+    # ---- 推理指标（真实生成后累加，供状态页/诊断使用）----
+    def metrics(self) -> dict:
+        return self._planner.metrics()
+
+    def _draft_model(self):
+        """llama.cpp 的 prompt-lookup 投机解码（无额外模型，纯查表起草）。"""
+        try:
+            from llama_cpp.llama_speculative import LlamaPromptLookupDecoding  # noqa: PLC0415
+
+            n = self._planner.draft_length()
+            if n <= 0:
+                return None
+            return LlamaPromptLookupDecoding(num_pred_tokens=int(n))
+        except (ImportError, AttributeError, TypeError, ValueError):
+            # 旧版 llama-cpp-python 没这个模块：如实退回无投机解码。
+            return None
 
     # ---- 后端探测（惰性 import，import 阶段零副作用）----
     def _probe_native(self) -> Optional[str]:
@@ -80,21 +102,28 @@ class LocalLLMInference:
         if not p.exists():
             raise InferenceError(f"本地权重不存在：{p}")
         if p.is_file() and p.stat().st_size < 1024 * 1024:
-            raise InferenceError(f"权重文件不完整（{p.stat().st_size}B），请重新下载：{p}")
+            raise InferenceError(
+                f"权重文件不完整（{p.stat().st_size}B），请重新下载：{p}"
+            )
         backend = self._probe_native()
         self.config.gguf_path = path
         self.config.backend = backend or ""
         self.config.has_native = backend is not None
         self.config.mock = backend is None
-        self._load_error = "" if backend else (
-            "本机没有可用的推理后端（llama_cpp / ctransformers / transformers）；"
-            "请 pip install 其中之一，或改用云端 API 路径"
+        self._load_error = (
+            ""
+            if backend
+            else (
+                "本机没有可用的推理后端（llama_cpp / ctransformers / transformers）；"
+                "请 pip install 其中之一，或改用云端 API 路径"
+            )
         )
         return self
 
     # ---- 真实推理 ----
-    def _real_infer(self, backend: str, model_path: str, prompt: str,
-                    max_tokens: int = 256) -> str:
+    def _real_infer(
+        self, backend: str, model_path: str, prompt: str, max_tokens: int = 256
+    ) -> str:
         """真正调用后端生成文本；任何失败抛 InferenceError，绝不降级成假答案。"""
         if backend == "llama_cpp":
             return self._infer_llama_cpp(model_path, prompt, max_tokens)
@@ -112,12 +141,20 @@ class LocalLLMInference:
             if backend == "llama_cpp":
                 from llama_cpp import Llama  # noqa: PLC0415
 
-                self._model = Llama(
+                kwargs = dict(
                     model_path=model_path,
                     n_ctx=self.config.context_size,
-                    n_threads=self.config.threads,
+                    # 线程数按核数留一核；n_batch 与预填充块上限对齐，
+                    # 让长 prompt 的首字延迟更可控。
+                    n_threads=self._planner.threads,
+                    n_batch=max(64, min(512, self.config.context_size)),
                     verbose=False,
                 )
+                draft = self._draft_model()
+                if draft is not None:
+                    kwargs["draft_model"] = draft
+                self._model = Llama(**kwargs)
+                self.config.threads = self._planner.threads
                 self._tokenizer = None
             elif backend == "ctransformers":
                 from ctransformers import AutoModelForCausalLM  # noqa: PLC0415
@@ -168,20 +205,29 @@ class LocalLLMInference:
 
     def _infer_llama_cpp(self, model_path: str, prompt: str, max_tokens: int) -> str:
         model, _ = self._model_obj("llama_cpp", model_path)
-        out = model(prompt, max_tokens=max_tokens, temperature=0.7, top_p=0.9)
+        # cache_prompt=True：system 前缀逐字稳定时复用 KV，避免每次全量重算。
+        out = model(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=0.7,
+            top_p=0.9,
+            cache_prompt=True,
+        )
         try:
             return str(out["choices"][0]["text"]).strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise InferenceError(f"llama_cpp 返回结构异常：{str(out)[:200]}") from exc
 
-    def _infer_ctransformers(self, model_path: str, prompt: str, max_tokens: int) -> str:
+    def _infer_ctransformers(
+        self, model_path: str, prompt: str, max_tokens: int
+    ) -> str:
         model, _ = self._model_obj("ctransformers", model_path)
         text = model(prompt, max_new_tokens=max_tokens, temperature=0.7, top_p=0.9)
         if not isinstance(text, str):
             text = str(text)
         # ctransformers 通常返回含 prompt 的全文，去掉前缀
         if text.startswith(prompt):
-            text = text[len(prompt):]
+            text = text[len(prompt) :]
         return text.strip()
 
     def _infer_transformers(self, model_path: str, prompt: str, max_tokens: int) -> str:
@@ -198,28 +244,43 @@ class LocalLLMInference:
                 top_p=0.9,
                 pad_token_id=getattr(tok, "eos_token_id", None),
             )
-        new_tokens = generated[0][encoded["input_ids"].shape[-1]:]
+        new_tokens = generated[0][encoded["input_ids"].shape[-1] :]
         return tok.decode(new_tokens, skip_special_tokens=True).strip()
 
     # ---- 对外契约 ----
-    def generate(self, prompt: str, system: str = "", max_tokens: Optional[int] = None) -> str:
+    def generate(
+        self, prompt: str, system: str = "", max_tokens: Optional[int] = None
+    ) -> str:
         """真实生成；无权重 / 无后端 / 推理失败一律抛错。"""
         if not self.config.gguf_path:
             raise InferenceError("尚未 load() 任何本地权重")
         backend = self._probe_native()
         if backend is None:
             raise InferenceError(self._load_error or "没有可用的本地推理后端")
-        full = f"{system}\n\n{prompt}".strip() if system else prompt
-        text = self._real_infer(backend, self.config.gguf_path, full,
-                                int(max_tokens or self.config.max_tokens))
+        limit = int(max_tokens or self.config.max_tokens)
+        plan = self._planner.plan(system, prompt, limit)
+        started = time.monotonic()
+        text = self._real_infer(
+            backend, self.config.gguf_path, plan.prompt, plan.max_tokens
+        )
         if not text:
             raise InferenceError("本地模型本次没有产出任何文本（不伪造输出）")
+        self._planner.record(
+            prompt_tokens=plan.prompt_tokens,
+            completion_tokens=estimate_tokens(text),
+            latency_ms=(time.monotonic() - started) * 1000,
+        )
         return text
 
-    def stream(self, prompt: str, system: str = "", max_tokens: Optional[int] = None,
-               chunk_size: int = 8) -> Iterator[str]:
+    def stream(
+        self,
+        prompt: str,
+        system: str = "",
+        max_tokens: Optional[int] = None,
+        chunk_size: int = 8,
+    ) -> Iterator[str]:
         """把真实生成结果按可见字符分片投递（内容全部来自真实模型输出）。
-        
+
         llama_cpp 支持原生流式时优先用原生 token 流，否则对完整真实输出切片。
         """
         if not self.config.gguf_path:
@@ -227,24 +288,45 @@ class LocalLLMInference:
         backend = self._probe_native()
         if backend is None:
             raise InferenceError(self._load_error or "没有可用的本地推理后端")
-        full = f"{system}\n\n{prompt}".strip() if system else prompt
         limit = int(max_tokens or self.config.max_tokens)
+        plan = self._planner.plan(system, prompt, limit)
+        started = time.monotonic()
+        pieces: list[str] = []
         if backend == "llama_cpp":
             model, _ = self._model_obj("llama_cpp", self.config.gguf_path)
             try:
-                for part in model(full, max_tokens=limit, temperature=0.7,
-                                  stream=True):
+                for part in model(
+                    plan.prompt,
+                    max_tokens=plan.max_tokens,
+                    temperature=0.7,
+                    top_p=0.9,
+                    stream=True,
+                    cache_prompt=True,
+                ):
                     piece = str(part["choices"][0].get("text", ""))
                     if piece:
+                        pieces.append(piece)
                         yield piece
+                self._planner.record(
+                    prompt_tokens=plan.prompt_tokens,
+                    completion_tokens=estimate_tokens("".join(pieces)),
+                    latency_ms=(time.monotonic() - started) * 1000,
+                )
                 return
             except Exception:  # noqa: BLE001 - 原生流不可用时回退完整真实输出
-                pass
-        text = self._real_infer(backend, self.config.gguf_path, full, limit)
+                pieces.clear()
+        text = self._real_infer(
+            backend, self.config.gguf_path, plan.prompt, plan.max_tokens
+        )
         if not text:
             raise InferenceError("本地模型本次没有产出任何文本（不伪造输出）")
+        self._planner.record(
+            prompt_tokens=plan.prompt_tokens,
+            completion_tokens=estimate_tokens(text),
+            latency_ms=(time.monotonic() - started) * 1000,
+        )
         for i in range(0, len(text), max(1, chunk_size)):
-            yield text[i:i + max(1, chunk_size)]
+            yield text[i : i + max(1, chunk_size)]
 
     def dispose(self) -> None:
         with self._lock:

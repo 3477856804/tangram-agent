@@ -115,6 +115,15 @@ class ImService {
   bool _feishuDirectAuthorized = false;
   String _feishuDirectDetail = '';
 
+  /// 主动发送目标簿：按渠道记忆最近真收到过消息的会话（重启可恢复），
+  /// 让「主动发一条」不需要用户手抄 openid。
+  static const String _targetsFile = 'im_targets.json';
+  final Map<String, List<Map<String, dynamic>>> _targetBook =
+      <String, List<Map<String, dynamic>>>{};
+
+  /// 飞书 OpenAPI 主动发送客户端（凭据来自设备授权流落盘文件）。
+  FeishuBotApi? _feishuApi;
+
   // ---- 微信 iLink 直连（真码由腾讯 ilinkai.weixin.qq.com 下发，5 分钟
   // 有效，无需任何外部网关；协议移植自 im/adapters/wechat_ilink.py）----
   IlinkWeChat? _ilink;
@@ -208,6 +217,20 @@ class ImService {
         onLog?.call('[im] QQ 官方机器人网关恢复失败：$e');
       }));
     }
+    // 主动发送目标簿：恢复上次记住的会话。
+    final rawTargets = await store.readJson(_targetsFile);
+    final dynamic t = rawTargets['targets'];
+    if (t is Map) {
+      for (final MapEntry<dynamic, dynamic> e in t.entries) {
+        final dynamic list = e.value;
+        if (list is List) {
+          _targetBook[e.key.toString()] = list
+              .whereType<Map>()
+              .map((Map m) => Map<String, dynamic>.from(m))
+              .toList(growable: true);
+        }
+      }
+    }
     _loaded = true;
   }
 
@@ -232,6 +255,7 @@ class ImService {
           if (token.isCancelled) return;
           if (m.text.trim().isEmpty) continue;
           _ilinkInbound++;
+          _rememberTarget('wechat', m.fromUserId, 'user');
           String reply;
           try {
             reply = await infer(m.text);
@@ -269,6 +293,157 @@ class ImService {
       'gateways': _configs.values.toList(growable: false),
       'updated_at': DateTime.now().toIso8601String(),
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 主动发送（QQ / 微信 / 飞书）
+  // ---------------------------------------------------------------------------
+
+  /// 记住真实入站会话，供「主动发一条」直接选目标（最多保留 20 条）。
+  void _rememberTarget(String connector, String id, String type) {
+    final String clean = id.trim();
+    if (clean.isEmpty) return;
+    final List<Map<String, dynamic>> list = _targetBook.putIfAbsent(
+        connector, () => <Map<String, dynamic>>[]);
+    list.removeWhere((Map<String, dynamic> e) => e['id'] == clean);
+    list.insert(0, <String, dynamic>{
+      'id': clean,
+      'type': type,
+      'at': DateTime.now().toIso8601String(),
+    });
+    if (list.length > 20) list.removeRange(20, list.length);
+    unawaited(store.writeJson(_targetsFile, <String, dynamic>{
+      'targets': _targetBook,
+      'updated_at': DateTime.now().toIso8601String(),
+    }));
+  }
+
+  /// 主动发送：不依赖用户先说话，直接走各渠道的官方发送接口。
+  ///
+  /// 参数：`connector`（qq/wechat/feishu，留空则按 微信→QQ→飞书 依次尝试）、
+  /// `to`（openid / group_openid / to_user_id / open_id / chat_id）、
+  /// `text`、`scope`（QQ: users|groups；飞书: open_id|chat_id）。
+  /// 每个渠道的真实结果都进 `results`，成功一个即 `ok=true`。
+  Future<Map<String, dynamic>> _sendProactive(Map<String, dynamic> p) async {
+    final String text = (p['text'] ?? p['message'] ?? '').toString().trim();
+    if (text.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': '消息内容为空'};
+    }
+    final String connector =
+        (p['connector'] ?? p['channel'] ?? '').toString().trim().toLowerCase();
+    final String to = (p['to'] ?? p['target'] ?? '').toString().trim();
+    final String scope = (p['scope'] ?? '').toString().trim();
+
+    Future<Map<String, dynamic>> viaWechat() async {
+      final IlinkWeChat ilink = _ilink ??= IlinkWeChat(store);
+      await ilink.loadCred();
+      if (!ilink.hasToken) {
+        throw StateError('微信 iLink 尚未完成扫码登录（本机无凭据）');
+      }
+      if (to.isEmpty) {
+        throw StateError('微信发送需要 to_user_id：可在「更多通信」先收到对方一条消息，'
+            '或在目标簿里选一个真实会话');
+      }
+      await ilink.sendText(to, text);
+      return <String, dynamic>{
+        'ok': true,
+        'connector': 'wechat',
+        'to': to,
+        'via': 'ilink',
+      };
+    }
+
+    Future<Map<String, dynamic>> viaQq() async {
+      final QQOfficial qq = _qqOfficial ??= QQOfficial(store);
+      await qq.loadCred();
+      if (!qq.hasCred) {
+        throw StateError('QQ 官方机器人未配置 AppID/AppSecret');
+      }
+      if (to.isEmpty) {
+        throw StateError('QQ 发送需要 openid 或 group_openid');
+      }
+      await qq.sendProactive(
+        scope: scope.isEmpty ? 'users' : scope,
+        targetId: to,
+        text: text,
+        msgId: (p['msg_id'] ?? '').toString(),
+      );
+      return <String, dynamic>{
+        'ok': true,
+        'connector': 'qq',
+        'to': to,
+        'via': 'qq-official',
+      };
+    }
+
+    Future<Map<String, dynamic>> viaFeishu() async {
+      final raw = await store.readJson(_feishuCredFile);
+      final String appId = (raw['client_id'] ?? '').toString();
+      final String secret = (raw['client_secret'] ?? '').toString();
+      if (appId.isEmpty || secret.isEmpty) {
+        throw StateError('飞书应用尚未授权（本机无 client_id/client_secret）');
+      }
+      if (to.isEmpty) {
+        throw StateError('飞书发送需要 open_id 或 chat_id');
+      }
+      final FeishuBotApi api = _feishuApi ??= FeishuBotApi();
+      final FeishuSendResult r = await api.sendText(
+        appId: appId,
+        appSecret: secret,
+        receiveId: to,
+        receiveIdType: scope.isEmpty ? 'open_id' : scope,
+        text: text,
+      );
+      if (!r.ok) throw StateError(r.error);
+      return <String, dynamic>{
+        'ok': true,
+        'connector': 'feishu',
+        'to': to,
+        'via': 'feishu-bot',
+        'message_id': r.messageId,
+      };
+    }
+
+    final Map<String, Future<Map<String, dynamic>> Function()> senders =
+        <String, Future<Map<String, dynamic>> Function()>{
+      'wechat': viaWechat,
+      'qq': viaQq,
+      'feishu': viaFeishu,
+    };
+    final List<String> order = connector.isEmpty
+        ? <String>['wechat', 'qq', 'feishu']
+        : <String>[connector];
+    final List<Map<String, dynamic>> results = <Map<String, dynamic>>[];
+    for (final String id in order) {
+      final Future<Map<String, dynamic>> Function()? fn = senders[id];
+      if (fn == null) {
+        return <String, dynamic>{
+          'ok': false,
+          'error': '未知渠道：$connector（支持 qq / wechat / feishu）',
+          'results': results,
+        };
+      }
+      try {
+        results.add(await fn());
+      } on Object catch (e) {
+        results.add(<String, dynamic>{
+          'ok': false,
+          'connector': id,
+          'error': '$e'.replaceFirst('Bad state: ', ''),
+        });
+      }
+    }
+    final bool sent = results.any((Map<String, dynamic> r) => r['ok'] == true);
+    return <String, dynamic>{
+      'ok': sent,
+      'sent': sent,
+      'results': results,
+      if (!sent)
+        'error': results
+            .map((Map<String, dynamic> r) => (r['error'] ?? '').toString())
+            .where((String s) => s.isNotEmpty)
+            .join('；'),
+    };
   }
 
   Map<String, dynamic> _configOf(String id) =>
@@ -327,6 +502,13 @@ class ImService {
         return _qqSandboxStatus();
       case 'qq_sandbox_cancel':
         return await _qqSandboxCancel();
+      // ---- 主动发送：把一条消息真正推到已接入渠道（QQ/微信/飞书）----
+      case 'send':
+      case 'send_message':
+        return await _sendProactive(p);
+      case 'send_targets':
+      case 'targets':
+        return <String, dynamic>{'ok': true, 'targets': _targetBook};
       case 'get_config':
         final id = _id(p);
         return <String, dynamic>{
@@ -393,7 +575,12 @@ class ImService {
 
     final gw = ImGateway(
       cfg,
-      onPromptText: (InboundPrompt prompt) => infer(prompt.prompt.text),
+      onPromptText: (InboundPrompt prompt) async {
+        // 任何网关渠道（含飞书网关模式）的真实入站会话都进目标簿，
+        // 「主动发一条」可直接选中，不必手抄 open_id。
+        _rememberTarget(id, prompt.userId, 'user');
+        return infer(prompt.prompt.text);
+      },
       onLog: onLog,
     );
     _gateways[id] = gw;
@@ -840,6 +1027,7 @@ class ImService {
   Future<void> _onQqInbound(QqInboundMessage m) async {
     if (m.text.trim().isEmpty) return;
     _qqInbound++;
+    _rememberTarget('qq', m.targetId, m.scope == 'groups' ? 'group' : 'user');
     String reply;
     try {
       reply = await infer(m.text);
@@ -1309,6 +1497,8 @@ class ImService {
     _qqEventSubscribed = false;
     await _qqSandbox?.cancel();
     _qqSandbox = null;
+    _feishuApi?.dispose();
+    _feishuApi = null;
     for (final gw in _gateways.values) {
       await gw.dispose();
     }

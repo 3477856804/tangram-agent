@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import threading
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
@@ -136,7 +137,12 @@ def test_runtime_deterministic_real_and_no_model_honest(tmp_path):
     assert "56088" in svc.chat("计算 123*456")           # 真实算术
     assert "本地时间" in svc.exec_tool("current_time", {})  # 真实时钟
     out = svc.exec_tool("sandbox", {"command": "echo hello-from-real-shell"})
-    assert "hello-from-real-shell" in out
+    if os.name == "nt":
+        # Windows 受控 PATH 中没有 echo.exe（cmd 内建不是可执行文件），
+        # 安全策略如实拒绝；POSIX 上这条命令真实执行。
+        assert "拒绝" in out or "不存在" in out, out
+    else:
+        assert "hello-from-real-shell" in out
     with pytest.raises(RuntimeNotConfigured):
         svc.chat("请谈谈量子力学的哲学含义")  # 未配置模型：明确报错，不伪造
 

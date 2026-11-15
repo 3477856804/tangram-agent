@@ -96,13 +96,11 @@ const List<_VendorPreset> _kVendors = <_VendorPreset>[
       name: '自定义（OpenAI 兼容）', baseUrl: '', model: ''),
 ];
 
-/// 环境下拉的选项（与 harness sandbox_policy.environment 的取值一致，
-/// 三个值都会真实落盘；远端/工作区沙箱由后端策略字段承载）。
-const List<String> _kEnvironments = <String>[
-  '内置沙箱',
-  '远端沙箱(SSH)',
-  '工作区沙箱',
-];
+/// 环境下拉的选项（与 harness sandbox_policy.environment 的取值一致）。
+/// 安卓端只有一套 Linux 环境，因此下拉恒为单元素，不提供第二个环境入口。
+List<String> get _kEnvironments => Platform.isAndroid
+    ? const <String>['内置沙箱']
+    : const <String>['内置沙箱', '远端沙箱(SSH)', '工作区沙箱'];
 
 /// 按名称查厂商预设（找不到返回 null，即视为自定义）。
 _VendorPreset? _vendorByName(String name) {

@@ -127,7 +127,10 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
           ? '${c.user}@${c.host.split('.').first}'
           : 'tga@remote';
     }
-    if (Platform.isAndroid && _debianReady) return 'root@debian';
+    // 安卓端只有唯一那套 Linux（proot + Alpine）环境，提示符不再出现
+    // 「debian/toybox 两个主机名」的暗示。
+    if (Platform.isAndroid && _debianReady) return 'root@linux';
+    if (Platform.isAndroid) return 'tga@linux';
     return 'tga@sandbox';
   }
 
@@ -313,6 +316,35 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
     }
   }
 
+  /// 环境自检：只读后端那一份统一报告（内核/uid/发行版/磁盘/包管理器/
+/// 可写性）。安卓端恒为唯一那套 proot Linux——不会再出现两份互相矛盾的
+/// 机器描述。
+  Future<void> _showEnvReport() async {
+    final SandboxRuntime runtime = context.read<SandboxRuntime>();
+    final Map<String, dynamic> r = await runtime.report();
+    if (!mounted) return;
+    final List<String> out = <String>['\$ env-report（后端唯一真源）'];
+    if (r['ok'] != true) {
+      out.add('失败：${r['error'] ?? r['note'] ?? '自检未通过'}');
+      if (r['installing'] == true) out.add('Linux 环境初始化中，可稍后重试。');
+    } else {
+      out
+        ..add('kernel : ${r['kernel'] ?? '—'}')
+        ..add('uid    : ${r['uid'] ?? '—'}  distro: ${r['distro'] ?? '—'}')
+        ..add('disk   : ${r['disk_free_mb'] ?? '?'} MB 可用 / '
+            '${r['disk_total_mb'] ?? '?'} MB')
+        ..add('pkg    : ${r['package_manager'] ?? '—'}  '
+            'writable: ${r['writable'] == true ? 'yes' : 'no'}')
+        ..add('single environment: ${r['single_environment'] == true ? 'yes' : 'no'}');
+      final dynamic tools = r['tools'];
+      if (tools is Map) {
+        out.add('tools  : ${tools.entries.map((e) => '${e.key}=${e.value}').join(', ')}');
+      }
+    }
+    setState(() => _lines.addAll(out));
+    _scrollToEnd();
+  }
+
   void _showDebianSheet() {
     _refreshDebianStatus();
     showModalBottomSheet<void>(
@@ -373,13 +405,15 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
     if (Platform.isAndroid) {
       if (_debianReady) {
         return <String>[
-          'alpine 3.20 userland via proot · apk · python · pip 真实执行',
-          '（apt 为 Debian 系命令，此 rootfs 用 apk；需要 apt 请用「远端沙箱(SSH)」。）',
+          'alpine 3.20 Linux userland via proot · 这是本机唯一一套 Linux 环境',
+          'apk · python3 · pip 全部在用户态真实执行；/workspace 指向 App 沙箱目录',
+          'apt 属于 Debian 系包管理器，这套环境用 apk（需要 apt 可自行再装 Debian rootfs）。',
         ];
       }
       return <String>[
-        'toybox /system/bin/sh · 安卓本机无 apt/pip（如实 command not found）',
-        '跑 apt：右上「下载」装 Debian 扩展包（proot），或「设置」连远端 Linux(SSH)。',
+        '本机只有这一套 Linux 环境（proot + Alpine），当前尚未完成初始化',
+        '点右上「下载」真实安装（约 4.2MB）；装好前命令会如实返回「初始化中」',
+        '不会回落到 Android 宿主 shell，避免出现两套互相矛盾的环境。',
       ];
     }
     return <String>[
@@ -402,6 +436,11 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
         scrolledUnderElevation: 0,
         title: Text(remote ? '沙箱终端 · 远端' : '沙箱终端', style: Tga.h1),
         actions: <Widget>[
+          IconButton(
+            icon: Icon(Icons.fact_check_outlined, color: Tga.textSub),
+            tooltip: '环境自检（统一口径）',
+            onPressed: _showEnvReport,
+          ),
           if (Platform.isAndroid && !remote)
             IconButton(
               icon: Icon(
@@ -409,7 +448,7 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
                       ? Icons.verified_outlined
                       : Icons.download_outlined,
                   color: Tga.primary),
-              tooltip: 'Debian 扩展包（proot 用户态）',
+              tooltip: 'Linux 环境（proot 用户态）',
               onPressed: _showDebianSheet,
             ),
           IconButton(
@@ -461,7 +500,7 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
                                 ? 'ssh · connected'
                                 : 'ssh · 未连接')
                             : (Platform.isAndroid
-                                ? (_debianReady ? 'proot' : 'toybox')
+                                ? (_debianReady ? 'proot · linux' : 'linux 未安装')
                                 : 'bash/sh'),
                             style: const TextStyle(
                                 fontSize: 11,
@@ -676,8 +715,8 @@ class _DebianSheetBodyState extends State<_DebianSheetBody>
   }
 
   String _progressLine() {
-    if (_installed) return 'Debian 用户态已就绪';
-    if (!_busy) return '未安装 · 共约 4.1 MB，进度按真实接收字节统计';
+    if (_installed) return 'Linux 环境已就绪（本机唯一一套）';
+    if (!_busy) return '未安装 · 共约 4.2 MB，进度按真实接收字节统计';
     if (_phase == 'extract') return '正在解包…';
     final String tot = _total > 0 ? ' / ${_mb(_total)}' : '';
     final String sp = _speed > 1 ? ' · ${_mb(_speed)}/s' : '';
@@ -705,13 +744,14 @@ class _DebianSheetBodyState extends State<_DebianSheetBody>
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text('Debian 扩展包（proot 用户态）',
+          Text('Linux 环境（proot 用户态）',
               style: const TextStyle(
                   color: _termGreen, fontSize: 14, fontFamily: 'monospace')),
           const SizedBox(height: 8),
           Text(
               '下载 proot（UserLAnd arm64）+ Alpine 3.20 minirootfs，'
-              '解包后 apk/python/pip 在本机用户态真实执行。',
+              '解包后 apk/python/pip 在本机用户态真实执行；装好后它就是'
+              '安卓端唯一的一套 Linux 环境。',
               style: const TextStyle(
                   color: _termDim, fontSize: 12, height: 1.4)),
           const SizedBox(height: 12),
@@ -768,7 +808,7 @@ class _DebianSheetBodyState extends State<_DebianSheetBody>
           const SizedBox(height: 8),
           Text(
             '注：Android 10+ 若 ROM 强制禁止执行应用私有目录文件，首次执行会'
-            '如实报错；此时请用「远端沙箱（SSH）」跑 apt。',
+            '如实报错（EACCES/EPERM），不会偷偷回退到宿主 shell 冒充 Linux。',
             style: const TextStyle(color: Color(0xFF5A6880), fontSize: 11)),
         ],
       ),

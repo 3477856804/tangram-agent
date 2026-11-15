@@ -126,6 +126,7 @@ class TgaStrings {
     'sidebar.store': {'cn': '模型商店', 'tw': '模型商店', 'en': 'Model Store'},
     'sidebar.plugins': {'cn': '插件社区', 'tw': '外掛社群', 'en': 'Plugins'},
     'sidebar.workspace': {'cn': '工作区域', 'tw': '工作區域', 'en': 'Workspace'},
+    'sidebar.model3d': {'cn': '3D 建模', 'tw': '3D 建模', 'en': '3D Studio'},
     'sidebar.channels': {'cn': '更多通信', 'tw': '更多通訊', 'en': 'Channels'},
     'sidebar.models': {'cn': '模型管理', 'tw': '模型管理', 'en': 'Models'},
     'sidebar.graph': {'cn': '知识图谱', 'tw': '知識圖譜', 'en': 'Knowledge Graph'},

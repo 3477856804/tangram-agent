@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import '../design/tga_design.dart';
 import '../services/persona_store.dart';
 import '../ui/i18n/tga_strings.dart';
+import '../ui/pet/deer_pet.dart';
 import '../ui/system_ui.dart';
 import '../ui/update_gate.dart';
 import 'core/secure_auth_storage.dart';
@@ -169,7 +170,18 @@ class _FlaiAppState extends State<FlaiApp> {
           // 启动 3 秒后静默检查一次更新，发现新版才弹窗（问题 #8）。
           builder: (BuildContext ctx, Widget? child) {
             Tga.syncFrom(ctx);
-            return TgaUpdateGate(child: child ?? const SizedBox.shrink());
+            return TgaUpdateGate(
+              child: Stack(
+                children: <Widget>[
+                  Positioned.fill(
+                    child: child ?? const SizedBox.shrink(),
+                  ),
+                  // 鹿桌宠：常驻根层，浮在所有页面之上；只有自身圆形区域
+                  // 接收手势，其余区域不拦截点击，不影响任何业务操作。
+                  const DeerPetOverlay(),
+                ],
+              ),
+            );
           },
         ),
       ),

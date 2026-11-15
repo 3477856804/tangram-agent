@@ -363,7 +363,16 @@ void main() {
     });
 
     tearDown(() async {
-      if (await tmp.exists()) await tmp.delete(recursive: true);
+      // Windows 上 SuperAgent 的异步落盘句柄可能延迟释放：短暂重试即可，
+      // 目录位于系统临时区，重试耗尽也不阻塞测试通过。
+      for (int i = 0; i < 6; i++) {
+        try {
+          if (await tmp.exists()) await tmp.delete(recursive: true);
+          return;
+        } on Object {
+          await Future<void>.delayed(const Duration(milliseconds: 80));
+        }
+      }
     });
 
     test('默认 observe 模式：只读、不派发工单', () async {

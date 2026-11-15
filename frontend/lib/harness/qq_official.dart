@@ -397,6 +397,55 @@ class QQOfficial {
     }
   }
 
+  /// 主动发送（不依赖入站 msg_id）：官方 v2 消息 API。
+  ///
+  /// * scope=`users` 走 `/v2/users/{openid}/messages`（单聊）；
+  /// * scope=`groups` 走 `/v2/groups/{group_openid}/messages`（群）。
+  /// 官方对主动消息有频次/权限限制，被拒时把 code/message 原样抛出，
+  /// 上层如实展示，不假装发送成功。
+  Future<void> sendProactive({
+    required String scope,
+    required String targetId,
+    required String text,
+    String msgId = '',
+    int? msgSeq,
+  }) async {
+    if (targetId.isEmpty) {
+      throw StateError('缺少发送目标（openid / group_openid）');
+    }
+    if (text.trim().isEmpty) {
+      throw StateError('消息内容为空');
+    }
+    final String s =
+        (scope == 'groups' || scope == 'group') ? 'groups' : 'users';
+    await _ensureToken();
+    final res = await _client
+        .post(Uri.parse('$apiRoot/v2/$s/$targetId/messages'),
+            headers: _authHeaders(),
+            body: jsonEncode(<String, dynamic>{
+              'msg_type': 0,
+              'content': text,
+              if (msgId.isNotEmpty) 'msg_id': msgId,
+              'msg_seq':
+                  msgSeq ?? (DateTime.now().millisecondsSinceEpoch % 100000),
+            }))
+        .timeout(const Duration(seconds: 15));
+    final body = utf8.decode(res.bodyBytes);
+    Map<String, dynamic>? d;
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map) d = Map<String, dynamic>.from(decoded);
+    } on Object {
+      d = null;
+    }
+    final ok = res.statusCode >= 200 &&
+        res.statusCode < 300 &&
+        (d == null || (d['code'] == null && d['message'] == null));
+    if (!ok) {
+      throw StateError(_platformError(body));
+    }
+  }
+
   /// 状态快照：一切字段来自真实 HTTP/wss 结果。
   Map<String, dynamic> status() => <String, dynamic>{
         'has_cred': hasCred,

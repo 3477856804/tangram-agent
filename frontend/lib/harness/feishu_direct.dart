@@ -330,3 +330,119 @@ class FeishuDirectFlow {
     if (_ownsClient) _client.close();
   }
 }
+
+/// 一次主动发消息的结果（成功带 message_id，失败带官方 code/msg）。
+class FeishuSendResult {
+  const FeishuSendResult({required this.ok, this.messageId = '', this.error = ''});
+  final bool ok;
+  final String messageId;
+  final String error;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'ok': ok,
+        if (messageId.isNotEmpty) 'message_id': messageId,
+        if (error.isNotEmpty) 'error': error,
+      };
+}
+
+/// 飞书机器人主动发送（不依赖设备授权流，直接用已落盘的 app 凭据）。
+///
+/// 端点与字段来自官方 OpenAPI：
+///  * `POST /open-apis/auth/v3/tenant_access_token/internal`
+///    取 tenant_access_token（Bearer）。
+///  * `POST /open-apis/im/v1/messages?receive_id_type=open_id|chat_id`
+///    body: `{receive_id, msg_type:"text", content: "{\"text\":\"...\"}"}`。
+/// 发送失败一律把官方 code/msg 原样抛出，不静默当成成功。
+class FeishuBotApi {
+  FeishuBotApi({http.Client? client, this.timeout = const Duration(seconds: 15)})
+      : _client = client ?? http.Client(),
+        _ownsClient = client == null;
+
+  final http.Client _client;
+  final bool _ownsClient;
+  final Duration timeout;
+
+  static const String kOpenApiBase = 'https://open.feishu.cn';
+
+  Future<String> tenantToken({
+    required String appId,
+    required String appSecret,
+  }) async {
+    final http.Response res = await _client
+        .post(
+          Uri.parse('$kOpenApiBase/open-apis/auth/v3/tenant_access_token/internal'),
+          headers: const <String, String>{
+            'Content-Type': 'application/json; charset=utf-8',
+          },
+          body: jsonEncode(<String, String>{
+            'app_id': appId,
+            'app_secret': appSecret,
+          }),
+        )
+        .timeout(timeout);
+    final Object? d = jsonDecode(utf8.decode(res.bodyBytes));
+    if (d is! Map) {
+      throw FeishuDirectException('取 tenant_access_token 失败：响应不是 JSON',
+          code: 'bad_response');
+    }
+    final String token = (d['tenant_access_token'] ?? '').toString();
+    if (d['code'] != 0 || token.isEmpty) {
+      throw FeishuDirectException(
+        '取 tenant_access_token 失败：${d['msg'] ?? d['code']}',
+        code: '${d['code'] ?? ''}',
+      );
+    }
+    return token;
+  }
+
+  /// 主动发文本。`receiveIdType` 取 open_id / chat_id / user_id / email。
+  Future<FeishuSendResult> sendText({
+    required String appId,
+    required String appSecret,
+    required String receiveId,
+    required String text,
+    String receiveIdType = 'open_id',
+  }) async {
+    if (receiveId.trim().isEmpty) {
+      return const FeishuSendResult(ok: false, error: '缺少接收方（open_id / chat_id）');
+    }
+    if (text.trim().isEmpty) {
+      return const FeishuSendResult(ok: false, error: '消息内容为空');
+    }
+    final String token =
+        await tenantToken(appId: appId, appSecret: appSecret);
+    final http.Response res = await _client
+        .post(
+          Uri.parse('$kOpenApiBase/open-apis/im/v1/messages'
+              '?receive_id_type=${Uri.encodeQueryComponent(receiveIdType)}'),
+          headers: <String, String>{
+            'Authorization': 'Bearer $token',
+            'Content-Type': 'application/json; charset=utf-8',
+          },
+          body: jsonEncode(<String, dynamic>{
+            'receive_id': receiveId,
+            'msg_type': 'text',
+            'content': jsonEncode(<String, String>{'text': text}),
+          }),
+        )
+        .timeout(timeout);
+    final Object? decoded = jsonDecode(utf8.decode(res.bodyBytes));
+    if (decoded is! Map) {
+      return FeishuSendResult(
+          ok: false, error: '飞书返回 HTTP ${res.statusCode} 且非 JSON');
+    }
+    if (decoded['code'] == 0) {
+      final dynamic data = decoded['data'];
+      final String mid = (data is Map ? data['message_id'] : '')?.toString() ?? '';
+      return FeishuSendResult(ok: true, messageId: mid);
+    }
+    return FeishuSendResult(
+      ok: false,
+      error: '飞书发送失败 code=${decoded['code']}：${decoded['msg'] ?? ''}',
+    );
+  }
+
+  void dispose() {
+    if (_ownsClient) _client.close();
+  }
+}

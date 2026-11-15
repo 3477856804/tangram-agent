@@ -305,7 +305,8 @@ class _ThinkingBlock extends StatefulWidget {
 
 class _ThinkingBlockState extends State<_ThinkingBlock>
     with SingleTickerProviderStateMixin {
-  bool _expanded = false;
+  // 默认直接展示思考过程：用户可点击收起，再点展开（状态仅在本气泡生命周期内）。
+  bool _expanded = true;
   late final AnimationController _controller;
   late final Animation<double> _expandAnimation;
   late final Animation<double> _rotationAnimation;
@@ -317,6 +318,8 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
       duration: const Duration(milliseconds: 200),
       vsync: this,
     );
+    // 已展开状态直接就位，避免每条历史消息入场时都播一次展开动画。
+    _controller.value = 1.0;
     _expandAnimation = CurvedAnimation(
       parent: _controller,
       curve: Curves.easeOutCubic,
@@ -369,7 +372,7 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
                 ),
                 SizedBox(width: theme.spacing.xs),
                 Text(
-                  '思考中',
+                  '思考过程',
                   style: theme.typography.sm.copyWith(
                     color: theme.colors.mutedForeground,
                   ),

@@ -21,6 +21,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:io'
     show
         Directory,
@@ -45,7 +46,9 @@ import 'package:tangram/harness/downloader.dart';
 import 'package:tangram/harness/im_service.dart';
 import 'package:tangram/harness/local_inference.dart';
 import 'package:tangram/harness/mcp_client.dart';
+import 'package:tangram/harness/model3d.dart';
 import 'package:tangram/harness/plugin_kernel.dart';
+import 'package:tangram/harness/prompt_kit.dart';
 import 'package:tangram/harness/proot_sandbox.dart';
 import 'package:tangram/harness/qq_sandbox.dart';
 import 'package:tangram/harness/store.dart';
@@ -192,9 +195,11 @@ class EmbeddedBackend implements QqShellRunner {
         writeJson: (String file, Object? value) => store.writeJson(file, value),
         writable: () => store.writable,
         dataDir: () => store.root.path,
+        // 页面清单：插件内核与 Super Agent 是内置核心，不暴露操作页，
+        // 因此这里不再列出 plugins / kernel / super_agent。
         uiPages: () => const <String>[
-          'training', 'persona', 'sandbox', 'store', 'plugins',
-          'workspace', 'channels', 'models', 'graph', 'kernel', 'super_agent',
+          'training', 'persona', 'sandbox', 'store',
+          'workspace', 'model3d', 'channels', 'models', 'graph',
         ],
         sandboxEnvironment: () => _sandboxEnvironment(),
       );
@@ -643,7 +648,10 @@ class EmbeddedBackend implements QqShellRunner {
     // 内置免费云端模型（如 Kilo 网关 :free 档）：curl 实测无 Authorization
     // 头即可 200 返回且 cost=0，允许 api_key 为空走真实远程推理。
     final bool freeApi = p['free'] == true;
-    String effectiveSystem = system;
+    // 底座提示词单一真源：用户/人格未提供 system 时用 PromptKit 的结构化底座，
+    // 而不是各处手写的单句「你是 TGA…」，保证行为要求一致且前缀稳定可缓存。
+    String effectiveSystem =
+        system.trim().isEmpty ? PromptKit.defaultSystem : system;
     String modeSuffix = '';
     if (wantSearch) {
       // 问题 #4b：检索过程经 chat_status 热点事件真实上报，前端在
@@ -653,8 +661,7 @@ class EmbeddedBackend implements QqShellRunner {
       });
       final results = await _webSearch(text);
       if (results.isEmpty) {
-        effectiveSystem += '\n\n【联网检索】本次检索失败或无结果，'
-            '请如实告知用户未能联网获取资料，不要编造检索内容。';
+effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       } else {
         effectiveSystem += '\n\n【联网检索结果（真实抓取，需在回答中注明来源）】\n$results';
       }
@@ -760,9 +767,9 @@ class EmbeddedBackend implements QqShellRunner {
     } else if (localSelected) {
       // 2) 选中已下载的 GGUF 权重 → 端侧 llama.cpp 真推理（不编造回答）。
       String localSystem =
-          effectiveSystem.isEmpty ? '你是 TGA，一个简洁、诚实、有用的中文助手。' : effectiveSystem;
+          effectiveSystem.trim().isEmpty ? PromptKit.defaultSystem : effectiveSystem;
       if (wantThinking) {
-        localSystem = '请先分步拆解问题、检验假设、验证结论，再给出最终答案。$localSystem';
+        localSystem = '${PromptKit.deepThinkPrefix}\n\n$localSystem';
       }
       // 端侧 llama.cpp 只接收单条 prompt：把真实历史按角色折进 system，
       // 与云端走同一份上下文，不引入新依赖、不改推理引擎签名。
@@ -969,15 +976,28 @@ class EmbeddedBackend implements QqShellRunner {
   /// 命令经 shell 工具执行，终端与模型共用同一套 shell / cwd / 已装依赖。
   Future<String> _linuxCapabilityBlock() async {
     final String env = await _sandboxEnvironment();
-    return '\n\n【你的 Linux 电脑】你在设备沙箱内拥有一台真实 Linux，'
-        '可以安装依赖（apt / pip）、编译运行代码、读写文件、调用命令行工具。'
+    final bool android = Platform.isAndroid;
+    // 环境描述只按「唯一那套环境」如实给出：安卓端不描述宿主 toybox，
+    // 桌面端才可能切换到远端 SSH / TCP 桥。
+    final String mode = android
+        ? (proot.installed
+            ? '内置沙箱（安卓上唯一一套 Linux：proot + Alpine 用户态；'
+                'apk 装包、python3 / pip 可用，App 沙箱目录在 Linux 内是 /workspace）'
+            : '内置沙箱（安卓上唯一一套 Linux，当前尚未完成初始化；'
+                '首次执行命令会自动真实下载 proot + Alpine，装好前会如实返回进度）')
+        : (env.contains('SSH')
+            ? '远端沙箱（SSH）：命令在远端 Linux 真实执行'
+            : '$env（系统真实 shell）');
+    return '\n\n【你的 Linux 环境】$mode'
+        '可以安装依赖、编译运行代码、读写文件、调用命令行工具。'
         '需要执行命令时，在回答中输出一个 tga-shell 代码块，格式严格为：\n'
         '```tga-shell\n要执行的命令\n```\n'
         '系统会在沙箱里真实执行并把 stdout/stderr 与退出码回传给你，'
         '你再据此继续推理并给出最终答案；不要声称无法执行、不要编造命令输出。'
         '只有确实需要执行时才输出该代码块，普通代码示例请用常规语言标记。'
-        '当前沙箱模式：$env。'
-        '若系统提示降级为内置解释器，可用命令范围会如实给出，不要假装完整 Linux。';
+        '只按真实探测结果描述机器（内核、uid、磁盘、已装工具），'
+        '不要把同一台机器说成两套环境；若系统提示降级为内置解释器，'
+        '可用命令范围会如实给出，不要假装完整 Linux。';
   }
 
   /// 模型发起 shell 工具调用的显式协议块。用专有标记而非通用 ```bash，
@@ -1795,6 +1815,13 @@ class EmbeddedBackend implements QqShellRunner {
                 'speed': bytesPerSec,
               }));
     }
+    // 统一环境自检：一套 Linux 环境只报一次口径（前端与 Agent 共用）。
+    if (action == 'env_report') return _envReport();
+    // ---- 3D 建模（OBJ/STL/PLY 真实解析、统计、变换与导出）----
+    if (action == 'model3d_import') return _model3dImport(p);
+    if (action == 'model3d_info') return _model3dInfo(p);
+    if (action == 'model3d_export') return _model3dExport(p);
+    if (action == 'model3d_primitive') return _model3dPrimitive(p);
     if (cube == null) return _err('未知 code_task 动作：$action');
     final r = await SandboxedShell.instance.exec(
       cube,
@@ -1841,13 +1868,17 @@ class EmbeddedBackend implements QqShellRunner {
     String cwd = (p['cwd'] ?? '.').toString();
 
     final String env = await _sandboxEnvironment();
-    final bool remoteSsh = env.contains('SSH');
-    final bool debianMode =
-        Platform.isAndroid && env == '内置沙箱' && proot.installed;
+    final bool android = Platform.isAndroid;
+    // 安卓端只有一套 Linux 环境（proot + Alpine 用户态）。
+    // 宿主 Android toybox shell（uid=10541、只读系统分区、无包管理器）永不参与
+    // 命令执行——否则同一台机器会同时冒出 uid=0 与 uid=10541 两套互相矛盾的
+    // 环境，正是旧版本被探测成「两台机器」的根因。
+    final bool linuxMode = android;
+    final bool remoteSsh = !android && env.contains('SSH');
 
-    // 远端/用户态的 cwd 是远端/客户机路径，不做本地磁盘存在性校验。
-    if (!remoteSsh && !debianMode) {
-      final cwdCheck = cwd.startsWith('/') ? cwd : '$root/$cwd';
+    // 远端/客户机的 cwd 是远端路径，不做本地磁盘存在性校验。
+    if (!remoteSsh && !linuxMode) {
+      final cwdCheck = File(cwd).isAbsolute ? cwd : '$root/$cwd';
       if (!Directory(cwdCheck).existsSync()) cwd = '.';
     }
 
@@ -1860,10 +1891,36 @@ class EmbeddedBackend implements QqShellRunner {
       if (remoteSsh) {
         return SshSandbox.instance.run(raw, cwd);
       }
-      // ② 安卓 Debian 用户态（proot）：apk/python/pip 真实执行。
-      if (debianMode) {
-        final viaDebian = await proot.run(raw, cwd);
-        if (viaDebian != null) return viaDebian;
+      // ② 安卓：唯一那套 Linux 环境（proot 用户态）。未安装时真实触发下载，
+      //    本次命令如实返回「初始化中」，绝不回落到宿主 shell 冒充 Linux。
+      if (linuxMode) {
+        if (!proot.installed) {
+          final Map<String, dynamic> st = await _startLinuxInstall();
+          return <String, dynamic>{
+            'ok': false,
+            'stdout': '',
+            'error': st['installing'] == true
+                ? 'Linux 环境首次初始化中：正在真实下载 proot + Alpine rootfs'
+                    '（约 4.2MB）。稍后重试即可；打开「沙箱」页可看实时进度。'
+                : 'Linux 环境未就绪：${st['error'] ?? '安装未完成'}'
+                    '。请在「沙箱」页点「Linux 环境」重试安装。',
+            'cwd': cwd,
+            'cube': 'shell',
+            'linux': true,
+            'installing': st['installing'] == true,
+          };
+        }
+        final Map<String, dynamic>? viaLinux = await proot.run(raw, cwd);
+        if (viaLinux != null) return viaLinux;
+        return <String, dynamic>{
+          'ok': false,
+          'stdout': '',
+          'error': 'Linux 环境启动失败（proot 可执行文件不可用）。'
+              '请到「沙箱」页重新安装 Linux 环境后再试。',
+          'cwd': cwd,
+          'cube': 'shell',
+          'linux': true,
+        };
       }
       final real = await _realShellExec(raw, root, cwd);
       if (real != null) return real;
@@ -2106,10 +2163,11 @@ class EmbeddedBackend implements QqShellRunner {
         buf.writeln('注：本终端默认把命令交给系统真实 shell 执行，'
             'apt/pkg/pip/curl 等系统命令按本机真实情况响应。');
         if (Platform.isAndroid) {
-          buf.writeln(debianMode
-              ? '当前已启用 Debian 用户态（proot）：apk/python 真实执行。'
-              : '安卓本机为 toybox；跑 apt 请装「Debian 扩展包」或切'
-                  '「远端沙箱（SSH）」。');
+          buf.writeln(proot.installed
+              ? '当前运行在唯一那套 Linux 环境（proot + Alpine）：'
+                  'apk / python / pip 真实执行。'
+              : 'Linux 环境尚未安装：点右上角图标真实下载'
+                  '（proot + Alpine rootfs，约 4.2MB）。');
         }
       default:
         // 表达式兜底：2+3*4 之类直接走真实求值（受限 Isolate）。
@@ -2132,16 +2190,283 @@ class EmbeddedBackend implements QqShellRunner {
     };
   }
 
-  /// 真实 shell 执行：桌面端 bash/sh、安卓 /system/bin/sh（toybox）。
+  // ===========================================================================
+  // 3D 建模（内置能力，无独立操作页依赖）
+  // ===========================================================================
+
+  /// 最近一次载入/生成的网格（进程内缓存；导出与统计共用同一份）。
+  Mesh3D? _mesh3d;
+  String _mesh3dName = 'tangram';
+
+  File _resolveSandboxFile(String path) {
+    final String root = store.sub('sandbox').path;
+    // Windows 绝对路径是 C:\... 而不是 /...：用平台无关的 isAbsolute 判断，
+    // 否则导出返回的路径再导入会被错误拼到沙箱根下，变成「文件不存在」。
+    if (File(path).isAbsolute) return File(path);
+    final String clean = path.replaceAll(RegExp(r'^\./'), '');
+    return File('$root/$clean');
+  }
+
+  Map<String, dynamic> _model3dPayload(
+    Mesh3D mesh, {
+    required String format,
+    required String name,
+    String path = '',
+    String note = '',
+  }) {
+    final MeshStats stats = mesh.stats();
+    return _ok(<String, dynamic>{
+      'name': name,
+      'format': format,
+      'stats': stats.toJson(),
+      'mesh': mesh.toJson(),
+      if (path.isNotEmpty) 'path': path,
+      if (note.isNotEmpty) 'note': note,
+    });
+  }
+
+  /// 生成程序化图元（cube / deer），并缓存为当前网格。
+  Future<Map<String, dynamic>> _model3dPrimitive(Map<String, dynamic> p) async {
+    final String kind = (p['kind'] ?? 'deer').toString().toLowerCase();
+    final double scale = double.tryParse('${p['scale'] ?? 1}') ?? 1;
+    if (scale <= 0 || scale > 100) return _err('scale 需在 0~100 之间');
+    final Mesh3D mesh;
+    final String name;
+    switch (kind) {
+      case 'cube':
+      case 'box':
+        mesh = Mesh3D.box(width: scale, height: scale, depth: scale);
+        name = 'cube';
+      case 'deer':
+        mesh = Mesh3D.deer(scale: scale);
+        name = 'tanram-deer';
+      default:
+        return _err('未知图元：$kind（支持 cube / deer）');
+    }
+    _mesh3d = mesh;
+    _mesh3dName = name;
+    return _model3dPayload(mesh, format: 'procedural', name: name);
+  }
+
+  /// 从沙箱目录导入真实模型文件（OBJ / STL / PLY）。
+  Future<Map<String, dynamic>> _model3dImport(Map<String, dynamic> p) async {
+    final String rawPath = (p['path'] ?? '').toString().trim();
+    if (rawPath.isEmpty) return _err('缺少模型路径');
+    final File f = _resolveSandboxFile(rawPath);
+    if (!f.existsSync()) return _err('模型文件不存在：$rawPath');
+    final Uint8List bytes = await f.readAsBytes();
+    if (bytes.isEmpty) return _err('模型文件为空：$rawPath');
+    if (bytes.length > 64 * 1024 * 1024) return _err('模型超过 64MB 上限');
+    try {
+      final MeshLoadResult r = Mesh3D.parseBytes(f.path, bytes);
+      _mesh3d = r.mesh;
+      _mesh3dName = f.uri.pathSegments.last;
+      return _model3dPayload(r.mesh,
+          format: r.format, name: _mesh3dName, path: f.path, note: r.note);
+    } on MeshFormatException catch (e) {
+      return _err('$e');
+    } on Object catch (e) {
+      return _err('解析失败：$e');
+    }
+  }
+
+  /// 只读统计（不覆盖当前网格）：可传 path，也可查当前网格。
+  Future<Map<String, dynamic>> _model3dInfo(Map<String, dynamic> p) async {
+    final String rawPath = (p['path'] ?? '').toString().trim();
+    if (rawPath.isNotEmpty) {
+      final Map<String, dynamic> r =
+          await _model3dImport(<String, dynamic>{'path': rawPath});
+      if (r['ok'] != true) return r;
+      final Map<String, dynamic> stats =
+          (r['stats'] as Map).map((k, v) => MapEntry(k.toString(), v));
+      return _ok(<String, dynamic>{'name': r['name'], 'format': r['format'], 'stats': stats});
+    }
+    final Mesh3D? mesh = _mesh3d;
+    if (mesh == null) return _err('还没有载入模型；先生成或导入一个模型');
+    return _ok(<String, dynamic>{
+      'name': _mesh3dName,
+      'stats': mesh.stats().toJson(),
+    });
+  }
+
+  /// 导出当前网格为 OBJ 或二进制 STL（真实写盘，返回字节数与路径）。
+  Future<Map<String, dynamic>> _model3dExport(Map<String, dynamic> p) async {
+    final Mesh3D? mesh = _mesh3d;
+    if (mesh == null) return _err('还没有载入模型；先生成或导入一个模型');
+    final String format = (p['format'] ?? 'obj').toString().toLowerCase();
+    final Directory dir = store.sub('models3d');
+    await dir.create(recursive: true);
+    final String rawName = (p['name'] ?? _mesh3dName).toString();
+    final String base = rawName
+        .replaceAll(RegExp(r'[^\w\-.]+'), '_')
+        .replaceAll(RegExp(r'^_+|_+$'), '');
+    final String safe = base.isEmpty ? 'tangram-model' : base;
+    final File out;
+    if (format == 'obj') {
+      out = File('${dir.path}/$safe.obj');
+      await out.writeAsString(mesh.toObj(name: safe), flush: true);
+    } else if (format == 'stl') {
+      out = File('${dir.path}/$safe.stl');
+      await out.writeAsBytes(mesh.toStlBinary(name: safe), flush: true);
+    } else {
+      return _err('不支持的导出格式：$format（支持 obj / stl）');
+    }
+    return _ok(<String, dynamic>{
+      'format': format,
+      'path': out.path,
+      'bytes': out.lengthSync(),
+      'name': safe,
+    });
+  }
+
+  /// 启动（幂等）唯一那套 Linux 环境的真实安装，并把流式进度发到 UI。
+  Future<Map<String, dynamic>> _startLinuxInstall() async {
+    final Map<String, dynamic> st = proot.status();
+    if (st['installed'] == true || st['installing'] == true) return st;
+    unawaited(proot.install(
+      onProgress: (phase, received, total, bytesPerSec) =>
+          _emit('proot_progress', <String, dynamic>{
+        'phase': phase,
+        'received': received,
+        'total': total,
+        'speed': bytesPerSec,
+      }),
+    ));
+    return proot.status();
+  }
+
+  /// 统一环境自检（唯一真源）。
+  ///
+  /// 旧版本里「沙箱完整性」由调用方各自跑命令判断：一次落进 proot（uid=0、
+  /// 2.4G 根分区、gcc/python 齐全），一次落进 Android 宿主 toybox
+  /// （uid=10541、933M 分区满、无包管理器），于是被描述成两台互相矛盾的机器。
+  /// 现在只有这一份报告：安卓恒为 proot + Alpine 用户态。
+  Future<Map<String, dynamic>> _envReport() async {
+    const String probe = 'echo "kernel:\$(uname -srm)"; '
+        'echo "uid:\$(id -u)"; '
+        'echo "distro:\$(cat /etc/alpine-release 2>/dev/null || '
+        '(cat /etc/os-release 2>/dev/null | head -1))"; '
+        'echo "disk:\$(df -Pk / | tail -1)"; '
+        'echo "apk:\$(command -v apk || echo -)"; '
+        'echo "python:\$(command -v python3 || echo -)"; '
+        'echo "node:\$(command -v node || echo -)"; '
+        'echo "gcc:\$(command -v gcc || echo -)"; '
+        'echo "writable:\$(touch /root/.tga_env_probe 2>/dev/null && echo yes || echo no)"';
+
+    if (Platform.isAndroid) {
+      if (!proot.installed) {
+        final Map<String, dynamic> st = await _startLinuxInstall();
+        return <String, dynamic>{
+          'ok': false,
+          'single_environment': true,
+          'platform': 'android',
+          'environment': '内置沙箱',
+          'profile': 'android-proot-alpine',
+          'linux_installed': false,
+          'installing': st['installing'] == true,
+          'step': (st['step'] ?? 'idle').toString(),
+          if (st['error'] != null) 'error': st['error'],
+          'note': '安卓端只有这一套 Linux 环境（proot + Alpine 用户态）；'
+              '首次使用会真实下载并解包，装好后 apk / python / pip 都在用户态执行。',
+        };
+      }
+      final Map<String, dynamic>? r = await proot.run(probe, '.');
+      final Map<String, dynamic> report =
+          _parseEnvReport((r?['stdout'] ?? '').toString());
+      report['ok'] = r?['ok'] == true;
+      report['linux_installed'] = true;
+      report['single_environment'] = true;
+      report['platform'] = 'android';
+      report['environment'] = '内置沙箱';
+      report['profile'] = 'android-proot-alpine';
+      if (r?['error'] != null && '${r!['error']}'.isNotEmpty) {
+        report['error'] = r['error'];
+      }
+      return report;
+    }
+
+    // 桌面端：系统真实 shell 探测（与终端同一条链路）。
+    final String shell = Platform.isWindows ? 'cmd' : '/bin/sh';
+    final List<String> args = Platform.isWindows
+        ? <String>['/c', 'ver']
+        : <String>['-c', probe.replaceAll('/root/', '/tmp/')];
+    try {
+      final ProcessResult pr =
+          await Process.run(shell, args).timeout(const Duration(seconds: 20));
+      final Map<String, dynamic> report =
+          _parseEnvReport('${pr.stdout}');
+      report['ok'] = pr.exitCode == 0;
+      report['single_environment'] = true;
+      report['platform'] = Platform.operatingSystem;
+      report['environment'] = await _sandboxEnvironment();
+      report['linux_installed'] = !Platform.isWindows;
+      report['profile'] = Platform.isWindows ? 'windows-host' : 'host-linux';
+      return report;
+    } on Object catch (e) {
+      return <String, dynamic>{
+        'ok': false,
+        'single_environment': true,
+        'platform': Platform.operatingSystem,
+        'environment': await _sandboxEnvironment(),
+        'error': '$e',
+      };
+    }
+  }
+
+  /// 把 `echo key:value` 形式的探测输出解析成结构化环境快照。
+  Map<String, dynamic> _parseEnvReport(String out) {
+    final Map<String, String> kv = <String, String>{};
+    for (final String line in out.split('\n')) {
+      final String t = line.trim();
+      final int i = t.indexOf(':');
+      if (i <= 0) continue;
+      kv[t.substring(0, i).trim()] = t.substring(i + 1).trim();
+    }
+    String tool(String key) {
+      final String v = kv[key] ?? '';
+      return (v.isEmpty || v == '-') ? '' : v;
+    }
+
+    int? totalMb;
+    int? freeMb;
+    final List<String> df =
+        (kv['disk'] ?? '').split(RegExp(r'\s+')).where((e) => e.isNotEmpty).toList();
+    if (df.length >= 4) {
+      final int? totalK = int.tryParse(df[1]);
+      final int? freeK = int.tryParse(df[3]);
+      if (totalK != null) totalMb = (totalK / 1024).round();
+      if (freeK != null) freeMb = (freeK / 1024).round();
+    }
+
+    return <String, dynamic>{
+      'kernel': kv['kernel'] ?? '',
+      'uid': kv['uid'] ?? '',
+      'distro': kv['distro'] ?? '',
+      'disk_total_mb': totalMb,
+      'disk_free_mb': freeMb,
+      'package_manager': tool('apk').isNotEmpty
+          ? 'apk'
+          : (tool('apt-get').isNotEmpty ? 'apt' : ''),
+      'tools': <String, String>{
+        'python3': tool('python'),
+        'node': tool('node'),
+        'gcc': tool('gcc'),
+      },
+      'writable': kv['writable'] == 'yes',
+    };
+  }
+
+  /// 真实 shell 执行：桌面端 bash/sh（安卓宿主 shell 已从链路移除）。
   /// 返回 null 表示真实 shell 不可用（调用方回退内置解释器）。
   /// 命令输出/退出码全部来自真实进程，绝不加工、绝不模拟成功。
   Future<Map<String, dynamic>?> _realShellExec(
       String raw, String root, String cwd) async {
+    // 安卓端已统一到唯一那套 Linux 环境（proot）：宿主 toybox shell 不参与
+    // 执行，避免出现第二套环境（uid=10541）与 proot（uid=0）互相矛盾。
+    if (Platform.isAndroid) return null;
     final String shell;
     if (Platform.isWindows) {
       shell = r'C:\Windows\System32\cmd.exe';
-    } else if (Platform.isAndroid) {
-      shell = '/system/bin/sh';
     } else if (File('/bin/bash').existsSync()) {
       shell = '/bin/bash';
     } else if (File('/bin/sh').existsSync()) {

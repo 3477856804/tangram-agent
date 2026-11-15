@@ -16,6 +16,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../bridge/backend_client.dart';
 import '../../bridge/bridge_protocol.dart';
 import '../../design/tga_design.dart';
+import '../panels/proactive_send_sheet.dart';
 
 /// 更多通信（真实化改造）：
 ///
@@ -197,6 +198,11 @@ class _TgaChannelsPageState extends State<TgaChannelsPage> {
     return TgaPage(
       title: '更多通信',
       actions: <Widget>[
+        IconButton(
+          icon: Icon(Icons.send_rounded, color: Tga.primary),
+          tooltip: '主动发送消息',
+          onPressed: () => showProactiveSendSheet(context),
+        ),
         IconButton(
           icon: Icon(Icons.refresh_rounded, color: Tga.textSub),
           tooltip: '刷新连接状态',

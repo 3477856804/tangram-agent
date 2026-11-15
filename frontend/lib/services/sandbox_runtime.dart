@@ -16,6 +16,13 @@ const String kNoPythonHint = '当前处于外部 Python 桥模式，但未检测
 
 /// 内置沙箱运行时：环境切换、状态展示。
 ///
+/// 环境模型（2026-11 统一）：
+///  * **安卓端只有一套 Linux 环境** —— App 私有目录里的 proot + Alpine
+///    用户态（uid=0、apk/python/pip 真实可用）。宿主 Android shell
+///    （toybox、uid=10541、只读系统分区）不再作为任何「环境」暴露，
+///    也绝不作为命令执行后端：那样会出现两套互相矛盾的探测结果。
+///  * 桌面端保留四套入口（内置 / 远端 SSH / TCP 桥 / 仅本地），按需切换。
+///
 /// 后端控制域（chat / rpc / model_route 等）由进程内 EmbeddedBackend 真实
 /// 执行，绝不用假数据冒充；仅 stdio/tcp 外部桥模式才探测本机 Python。
 class SandboxRuntime extends ChangeNotifier {
@@ -24,14 +31,22 @@ class SandboxRuntime extends ChangeNotifier {
   final BackendClient backend;
   final PersonaStore? persona;
 
-  /// 「远端沙箱（SSH）」= dartssh2 真实 SSH 会话：终端所有命令在远端
-  /// 真实 Linux 执行（apt/pkg/pip/python 全真），配置见沙箱终端「⚙」。
-  static const List<String> environments = <String>[
-    '内置沙箱',
-    '远端沙箱（SSH）',
-    'TCP 桥',
-    '仅本地',
-  ];
+  /// 唯一受管 Linux 环境的名字（安卓端只有它）。
+  static const String kBuiltin = '内置沙箱';
+
+  /// 安卓端是否只有一套 Linux 环境（单一环境模型）。
+  static bool get singleLinuxHost => Platform.isAndroid;
+
+  /// 当前平台可选环境。安卓端恒为单元素列表，UI 因此不会出现第二个选项，
+  /// 也不可能再切出「另一台机器」。
+  static List<String> get environments => Platform.isAndroid
+      ? const <String>[kBuiltin]
+      : const <String>[
+          kBuiltin,
+          '远端沙箱（SSH）',
+          'TCP 桥',
+          '仅本地',
+        ];
 
   PythonRuntimeState python = PythonRuntimeState.unknown;
   bool starting = false;
@@ -39,7 +54,16 @@ class SandboxRuntime extends ChangeNotifier {
 
   bool get online => backend.ready;
 
-  String get environment => persona?.sandboxEnvironment ?? '内置沙箱';
+  /// 生效环境：安卓端强制归一为内置 Linux 环境，历史遗留值（旧版本存过
+  /// SSH/TCP/仅本地）一律不再生效，避免「同一台机器两套环境」。
+  String get environment {
+    final String saved = persona?.sandboxEnvironment ?? kBuiltin;
+    if (Platform.isAndroid) return kBuiltin;
+    return environments.contains(saved) ? saved : kBuiltin;
+  }
+
+  /// 当前环境是否就是那套受管 Linux（安卓恒为 true）。
+  bool get managedLinux => Platform.isAndroid && environment == kBuiltin;
 
   /// 内嵌后端是否随包常驻（inProcess 模式恒为 true）。
   bool get embeddedReady => backend.mode == BridgeMode.inProcess && backend.ready;
@@ -114,6 +138,9 @@ class SandboxRuntime extends ChangeNotifier {
   }
 
   void setEnvironment(String value) {
+    // 安卓端只有一套 Linux 环境：非内置值直接忽略（不写盘、不弹错），
+    // 保证任何入口都切不出第二套环境。
+    if (Platform.isAndroid && value != kBuiltin) return;
     if (!environments.contains(value)) return;
     persona?.setSandboxEnvironment(value);
     notice = null;
@@ -136,6 +163,22 @@ class SandboxRuntime extends ChangeNotifier {
       notice = '环境已在本机保存；后端策略同步失败（后端未就绪），'
           '终端将按后端当前环境执行。';
       notifyListeners();
+    }
+  }
+
+  /// 环境自检：由后端在**唯一那套 Linux** 里真实执行 uname/id/disk/apk 探测，
+  /// 返回一份口径统一的结果（前端与 Agent 都读这一份，不再各测各的）。
+  Future<Map<String, dynamic>> report() async {
+    try {
+      final env = await backend.sendControl(
+          'code_task', <String, dynamic>{'action': 'env_report'});
+      final payload = env.payload;
+      if (payload is Map) {
+        return payload.map((k, v) => MapEntry(k.toString(), v));
+      }
+      return <String, dynamic>{'ok': false, 'error': '后端返回了非预期结构'};
+    } on Object catch (e) {
+      return <String, dynamic>{'ok': false, 'error': '$e'};
     }
   }
 
