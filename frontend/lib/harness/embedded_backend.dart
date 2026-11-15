@@ -32,6 +32,7 @@ import 'dart:io'
         NetworkInterface,
         Platform,
         Process,
+        ProcessResult,
         ProcessSignal;
 
 import 'package:flutter/foundation.dart';
@@ -3946,7 +3947,7 @@ class EmbeddedBackend {
     try {
       final List<NetworkInterface> ifaces = await NetworkInterface.list(
         type: InternetAddressType.any,
-        loopback: false,
+        includeLoopback: false,
       );
       data['network_interfaces'] = ifaces
           .map((NetworkInterface i) => <String, dynamic>{
