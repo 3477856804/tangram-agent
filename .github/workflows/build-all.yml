@@ -1,8 +1,9 @@
 name: build-all-platforms
 
 # 全平台一键构建：Android APK/AAB、Windows x64、Linux x64、macOS(arm64)、iOS(未签名 ipa)。产物仓库只放安装包,不含任何源码。
-# Flutter 3.50.0 一律从国内镜像 storage.flutter-io.cn 直装（GitHub 云 runner 拉
-# storage.googleapis.com 常出现 HTTP/2 INTERNAL_ERROR）。
+# Flutter 3.50.0 由 scripts/install_flutter.sh|ps1 安装：官方源 storage.googleapis.com
+# 优先（GitHub runner 在境外，官方源最快最稳），国内镜像兜底；整包下载 + 完整性
+# 校验后解包，不用 -C - 断点续传（镜像 CDN range 支持不稳定会 curl(33)）。
 # 触发：Actions 面板 Run workflow（可勾选发布 Release），或 push 到 main。
 
 on:
@@ -35,15 +36,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '21' }
-      - name: Install Flutter 3.50.0 (镜像直装)
+      - name: Install Flutter 3.50.0 (官方源优先 + 校验)
         run: |
           set -euo pipefail
           sudo mkdir -p /opt/flutter && sudo chown "$USER" /opt/flutter
-          curl -fL -C - --max-time 600 --retry 5 --retry-all-errors -o /tmp/f.tar.xz \
-            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/linux/flutter_linux_3.50.0-stable.tar.xz
-          tar -xJf /tmp/f.tar.xz -C /opt/flutter --strip-components=1
+          bash scripts/install_flutter.sh linux /opt/flutter
           echo /opt/flutter/bin >> "$GITHUB_PATH"
-          /opt/flutter/bin/flutter --version
       - name: Android SDK 36
         run: |
           set -euo pipefail
@@ -145,17 +143,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '21' }
-      - name: Install Flutter 3.50.0 (镜像直装)
+      - name: Install Flutter 3.50.0 (官方源优先 + 校验)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $dst = 'C:\flutter'
-          New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          curl.exe -fsSL --retry 5 --retry-all-errors -o "$env:TEMP\f.zip" `
-            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/windows/flutter_windows_3.50.0-stable.zip
-          Expand-Archive -Path "$env:TEMP\f.zip" -DestinationPath 'C:\' -Force
+          powershell -ExecutionPolicy Bypass -File scripts/install_flutter.ps1 -Dest 'C:\flutter'
           echo 'C:\flutter\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          & 'C:\flutter\bin\flutter.bat' --version
       - name: Python 构建依赖 (pillow)
         shell: pwsh
         run: python -m pip install --quiet --upgrade pillow
@@ -246,15 +239,12 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libsecret-1-dev libjsoncpp-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-      - name: Install Flutter 3.50.0 (镜像直装)
+      - name: Install Flutter 3.50.0 (官方源优先 + 校验)
         run: |
           set -euo pipefail
           sudo mkdir -p /opt/flutter && sudo chown "$USER" /opt/flutter
-          curl -fL -C - --max-time 600 --retry 5 --retry-all-errors -o /tmp/f.tar.xz \
-            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/linux/flutter_linux_3.50.0-stable.tar.xz
-          tar -xJf /tmp/f.tar.xz -C /opt/flutter --strip-components=1
+          bash scripts/install_flutter.sh linux /opt/flutter
           echo /opt/flutter/bin >> "$GITHUB_PATH"
-          /opt/flutter/bin/flutter --version
       - name: Python 构建依赖 (pillow)
         run: |
           python3 -m pip install --quiet --upgrade pillow || python3 -m pip install --quiet --break-system-packages pillow
@@ -304,15 +294,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Install Flutter 3.50.0 (镜像直装)
+      - name: Install Flutter 3.50.0 (官方源优先 + 校验)
         run: |
           set -euo pipefail
-          curl -fsSL --retry 5 --retry-all-errors -o /tmp/f.zip \
-            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/macos/flutter_macos_3.50.0-stable.zip
-          mkdir -p "$HOME/flutter-sdk"
-          unzip -q /tmp/f.zip -d "$HOME/flutter-sdk"
+          bash scripts/install_flutter.sh macos "$HOME/flutter-sdk"
           echo "$HOME/flutter-sdk/flutter/bin" >> "$GITHUB_PATH"
-          "$HOME/flutter-sdk/flutter/bin/flutter" --version
       - name: Python 构建依赖 (pillow)
         run: |
           python3 -m pip install --quiet --upgrade pillow || python3 -m pip install --quiet --break-system-packages pillow
@@ -347,15 +333,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - name: Install Flutter 3.50.0 (镜像直装)
+      - name: Install Flutter 3.50.0 (官方源优先 + 校验)
         run: |
           set -euo pipefail
-          curl -fsSL --retry 5 --retry-all-errors -o /tmp/f.zip \
-            https://storage.flutter-io.cn/flutter_infra_release/releases/stable/macos/flutter_macos_3.50.0-stable.zip
-          mkdir -p "$HOME/flutter-sdk"
-          unzip -q /tmp/f.zip -d "$HOME/flutter-sdk"
+          bash scripts/install_flutter.sh macos "$HOME/flutter-sdk"
           echo "$HOME/flutter-sdk/flutter/bin" >> "$GITHUB_PATH"
-          "$HOME/flutter-sdk/flutter/bin/flutter" --version
       - name: Python 构建依赖 (pillow)
         run: |
           python3 -m pip install --quiet --upgrade pillow || python3 -m pip install --quiet --break-system-packages pillow
