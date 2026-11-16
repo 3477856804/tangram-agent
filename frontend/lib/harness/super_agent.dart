@@ -163,6 +163,15 @@ class SuperTicket {
   String workDir = '';
   bool replanned = false;
 
+  /// 子工单的人格设定（name/identity/personality/audience）与角色说明。
+  /// 只影响 Worker prompt 的表达方式，不改变 Mandate 授权范围。
+  final Map<String, dynamic> persona = <String, dynamic>{};
+  String role = '';
+
+  /// 风险扫描 / 澄清结论的工单级注入项：只有真实产生时才会出现在 prompt。
+  final List<String> riskNotes = <String>[];
+  final List<String> clarifications = <String>[];
+
   Map<String, dynamic> toJson() => <String, dynamic>{
         'id': id,
         'goal': goal,
@@ -187,6 +196,10 @@ class SuperTicket {
         'worker_session': workerSession,
         'work_dir': workDir,
         'replanned': replanned,
+        'persona': Map<String, dynamic>.of(persona),
+        'role': role,
+        'risk_notes': List<String>.of(riskNotes),
+        'clarifications': List<String>.of(clarifications),
       };
 
   static SuperTicket fromJson(Map<String, dynamic> m) {
@@ -233,6 +246,17 @@ class SuperTicket {
     t.workerSession = (m['worker_session'] ?? '').toString();
     t.workDir = (m['work_dir'] ?? '').toString();
     t.replanned = m['replanned'] == true;
+    if (m['persona'] is Map) {
+      t.persona.addAll((m['persona'] as Map).map(
+          (dynamic k, dynamic v) => MapEntry<String, dynamic>(k.toString(), v)));
+    }
+    t.role = (m['role'] ?? '').toString();
+    t.riskNotes.addAll((m['risk_notes'] is List)
+        ? (m['risk_notes'] as List).map((dynamic e) => e.toString())
+        : <String>[]);
+    t.clarifications.addAll((m['clarifications'] is List)
+        ? (m['clarifications'] as List).map((dynamic e) => e.toString())
+        : <String>[]);
     return t;
   }
 }
@@ -328,6 +352,9 @@ class SuperAgent {
   final List<SuperTrigger> _triggers = <SuperTrigger>[];
   final List<FilterDecision> _decisions = <FilterDecision>[];
   final List<Map<String, dynamic>> _events = <Map<String, dynamic>>[];
+  final List<Map<String, dynamic>> _clarifications = <Map<String, dynamic>>[];
+  final List<Map<String, dynamic>> _options = <Map<String, dynamic>>[];
+  final List<Map<String, dynamic>> _decisionLog = <Map<String, dynamic>>[];
   final List<String> _routerContext = <String>[];
   final Map<String, SourceState> _sources = <String, SourceState>{};
   final Set<String> _seenDedup = <String>{};
@@ -376,6 +403,9 @@ class SuperAgent {
       _tickets[t.id] = t;
     }
     _events.addAll(await store.readRecords('super_events'));
+    _clarifications.addAll(await store.readRecords('super_clarifications'));
+    _options.addAll(await store.readRecords('super_options'));
+    _decisionLog.addAll(await store.readRecords('super_decision_log'));
     final List<dynamic> ctx = await store.readList('super_router_context.json');
     _routerContext.addAll(ctx.map((dynamic e) => e.toString()));
 
@@ -453,6 +483,582 @@ class SuperAgent {
       _safeWrite(() async {
         await store.insert(key, record);
       }, key);
+
+  /// 只追加记录：落盘后把真实自增 id 回填到内存记录；失败如实记账。
+  Future<void> _appendRecord(String key, Map<String, dynamic> record) async {
+    try {
+      final int id = await store.insert(key, record);
+      record['id'] = id;
+    } on Object catch (e) {
+      if (_persistErrors.length < 50) {
+        _persistErrors.add('$key 落盘失败：$e');
+      }
+    }
+  }
+
+  /// 从模型回复中提取严格 JSON 对象。解析失败返回空 map，绝不脑补字段。
+  Map<String, dynamic> _parseJsonObject(String reply) {
+    final String text = reply.trim();
+    if (text.isEmpty) return <String, dynamic>{};
+    final List<String> candidates = <String>[];
+    final RegExpMatch? fenced =
+        RegExp(r'```(?:json)?\s*([\s\S]*?)```').firstMatch(text);
+    if (fenced != null) candidates.add(fenced.group(1)!.trim());
+    candidates.add(text);
+    final RegExpMatch? braced = RegExp(r'\{[\s\S]*\}').firstMatch(text);
+    if (braced != null) candidates.add(braced.group(0)!);
+    for (final String c in candidates) {
+      if (c.isEmpty) continue;
+      try {
+        final dynamic decoded = jsonDecode(c);
+        if (decoded is Map) {
+          return decoded.map(
+              (dynamic k, dynamic v) => MapEntry<String, dynamic>(k.toString(), v));
+        }
+      } on Object {
+        // 该候选不是合法 JSON，继续尝试下一个。
+      }
+    }
+    return <String, dynamic>{};
+  }
+
+  /// 把任意值规整成字符串数组（只接受列表/字符串，其它形态不臆测）。
+  List<String> _stringList(dynamic v) {
+    if (v is List) {
+      return v
+          .map((dynamic e) => e.toString().trim())
+          .where((String s) => s.isNotEmpty)
+          .toList();
+    }
+    if (v is String) {
+      final String s = v.trim();
+      return s.isEmpty ? <String>[] : <String>[s];
+    }
+    return <String>[];
+  }
+
+  /// 内置兜底 / 远端失败不算真实模型推理，调用方据此如实标注。
+  bool _engineDegraded(Map<String, dynamic> r) {
+    final String engine = (r['engine'] ?? '').toString();
+    return r['ok'] == false ||
+        engine.isEmpty ||
+        engine == 'builtin-agent-loop' ||
+        engine == 'remote-failed';
+  }
+
+  String _truncate(String s, int max) =>
+      s.length > max ? '${s.substring(0, max)}…' : s;
+
+  Map<String, dynamic> _sanitizePersona(dynamic raw) {
+    if (raw is! Map) return <String, dynamic>{};
+    final Map<String, dynamic> out = <String, dynamic>{};
+    for (final String key in <String>[
+      'name',
+      'identity',
+      'personality',
+      'audience',
+    ]) {
+      final String v = (raw[key] ?? '').toString().trim();
+      if (v.isNotEmpty) out[key] = v;
+    }
+    return out;
+  }
+
+  /// 统一走真实 chat 回调；调用异常如实回传 error，不伪造引擎名。
+  Future<Map<String, dynamic>> _chatFor(String prompt, String session) async {
+    try {
+      return await chat(<String, dynamic>{'text': prompt, 'session_id': session});
+    } on Object catch (e) {
+      return <String, dynamic>{'ok': false, 'engine': 'error', 'error': '$e'};
+    }
+  }
+
+  // ---- L3 认知闭环：澄清 / 隐性目标 / 风险扫描 / 路线对比 / 决策日志 ----
+
+  /// 澄清目标：产出问题清单、隐性目标、缺失条件与验收标准。
+  Future<Map<String, dynamic>> _clarify(Map<String, dynamic> p) async {
+    final String goal = (p['goal'] ?? '').toString().trim();
+    if (goal.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': '目标内容为空'};
+    }
+    final String context = (p['context'] ?? '').toString().trim();
+    final StringBuffer b = StringBuffer()
+      ..writeln('你是 Super Agent 的需求澄清器（clarify），只输出一个 JSON 对象，不要解释。')
+      ..writeln('硬性要求：缺失的信息必须写进 questions 或 missing_conditions；'
+          '禁止脑补假设，不得把猜测写成 acceptance_criteria。')
+      ..writeln('目标：$goal');
+    if (context.isNotEmpty) b.writeln('已知上下文：$context');
+    b.writeln('JSON 字段：questions(string[])、implicit_goal(string)、'
+        'missing_conditions(string[])、acceptance_criteria(string[])。');
+    final Map<String, dynamic> r = await _chatFor(b.toString(), 'super-clarify');
+    final String engine = (r['engine'] ?? '').toString();
+    final String reply = (r['reply'] ?? r['error'] ?? '').toString();
+    final Map<String, dynamic> parsed = _parseJsonObject(reply);
+    final bool structured = parsed.isNotEmpty;
+    final List<String> questions = _stringList(parsed['questions']);
+    final String implicitGoal = (parsed['implicit_goal'] ?? '').toString().trim();
+    final List<String> missing = _stringList(parsed['missing_conditions']);
+    final List<String> acceptance = _stringList(parsed['acceptance_criteria']);
+    final Map<String, dynamic> record = <String, dynamic>{
+      'ts': DateTime.now().toIso8601String(),
+      'goal': goal,
+      'engine': engine,
+      'degraded': _engineDegraded(r),
+      'structured': structured,
+      'questions': questions,
+      'implicit_goal': implicitGoal,
+      'missing_conditions': missing,
+      'acceptance_criteria': acceptance,
+      'raw': _truncate(reply, 1200),
+    };
+    await _appendRecord('super_clarifications', record);
+    _clarifications.add(record);
+    _log('super.cognitive.clarify', <String, dynamic>{
+      'goal': goal,
+      'structured': structured,
+      'questions': questions.length,
+      'engine': engine,
+    });
+    return <String, dynamic>{
+      'ok': true,
+      'engine': engine,
+      'degraded': record['degraded'],
+      'structured': structured,
+      'questions': questions,
+      'implicit_goal': implicitGoal,
+      'missing_conditions': missing,
+      'acceptance_criteria': acceptance,
+      'clarification': record,
+    };
+  }
+
+  /// 隐性目标：区分表层指令与真实意图，并列出必须人工确认的点。
+  Future<Map<String, dynamic>> _implicitGoal(Map<String, dynamic> p) async {
+    final String goal = (p['goal'] ?? '').toString().trim();
+    if (goal.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': '目标内容为空'};
+    }
+    final String context = (p['context'] ?? '').toString().trim();
+    final StringBuffer b = StringBuffer()
+      ..writeln('你是 Super Agent 的隐性目标分析器（implicit_goal），只输出一个 JSON 对象，不要解释。')
+      ..writeln('要求：只依据目标文字与已知上下文；不确定的推断必须放进 confirm_points，'
+          '禁止把猜测当成事实。')
+      ..writeln('目标：$goal');
+    if (context.isNotEmpty) b.writeln('已知上下文：$context');
+    b.writeln('JSON 字段：surface_instruction(string)、implicit_goal(string)、'
+        'confirm_points(string[])。');
+    final Map<String, dynamic> r = await _chatFor(b.toString(), 'super-implicit');
+    final String engine = (r['engine'] ?? '').toString();
+    final String reply = (r['reply'] ?? r['error'] ?? '').toString();
+    final Map<String, dynamic> parsed = _parseJsonObject(reply);
+    final String parsedSurface =
+        (parsed['surface_instruction'] ?? '').toString().trim();
+    final String surface = parsedSurface.isEmpty ? goal : parsedSurface;
+    final String implicit = (parsed['implicit_goal'] ?? '').toString().trim();
+    final List<String> confirm = _stringList(parsed['confirm_points']);
+    final Map<String, dynamic> entry = <String, dynamic>{
+      'ts': DateTime.now().toIso8601String(),
+      'kind': 'implicit_goal',
+      'goal': goal,
+      'engine': engine,
+      'degraded': _engineDegraded(r),
+      'structured': parsed.isNotEmpty,
+      'surface_instruction': surface,
+      'implicit_goal': implicit,
+      'confirm_points': confirm,
+      'raw': _truncate(reply, 1200),
+    };
+    await _appendRecord('super_decision_log', entry);
+    _decisionLog.add(entry);
+    _log('super.cognitive.implicit_goal', <String, dynamic>{
+      'goal': goal,
+      'structured': entry['structured'],
+      'engine': engine,
+    });
+    return <String, dynamic>{
+      'ok': true,
+      'engine': engine,
+      'degraded': entry['degraded'],
+      'structured': entry['structured'],
+      'surface_instruction': surface,
+      'implicit_goal': implicit,
+      'confirm_points': confirm,
+      'entry': entry,
+    };
+  }
+
+  /// 确定性风险规则：纯文本匹配 + Mandate 越界检查，不依赖模型。
+  List<Map<String, dynamic>> _deterministicRisks(
+    String goal,
+    Map<String, dynamic>? mandate,
+    List<String> requestedTools,
+  ) {
+    final String text = goal.toLowerCase();
+    final List<Map<String, dynamic>> risks = <Map<String, dynamic>>[];
+    List<String> hits(List<String> words) =>
+        words.where((String w) => text.contains(w.toLowerCase())).toList();
+    void add(String level, String type, String detail, String mitigation,
+        List<String> matched) {
+      if (matched.isEmpty) return;
+      risks.add(<String, dynamic>{
+        'level': level,
+        'type': type,
+        'detail': '$detail（命中：${matched.join("、")}）',
+        'mitigation': mitigation,
+        'source': 'rule',
+      });
+    }
+
+    final List<String> destructive = hits(<String>[
+      '删除',
+      '清空',
+      '销毁',
+      'rm -rf',
+      'delete',
+      'truncate',
+      'drop table',
+      'destroy',
+      'erase',
+    ]);
+    add('high', 'destructive', '涉及破坏性删除/清空操作',
+        '先在隔离副本演练，确认可回滚备份后再执行', destructive);
+    add('medium', 'overwrite', '涉及覆盖/覆写既有内容',
+        '保留旧版本备份，并确认覆盖范围与回滚方式',
+        hits(<String>['覆盖', '覆写', 'overwrite']));
+    final List<String> publishHits =
+        hits(<String>['发布', '上线', '部署', 'publish', 'deploy', 'release']);
+    final bool production =
+        hits(<String>['生产环境', '生产', 'prod', '线上环境']).isNotEmpty;
+    add(
+        production ? 'high' : 'medium',
+        'publish',
+        production ? '涉及生产环境发布/上线' : '涉及发布或部署动作',
+        '灰度发布并准备回滚预案；生产发布必须人工二次确认',
+        publishHits);
+    add('high', 'secrets', '涉及密钥/密码/凭据操作',
+        '仅使用受控密钥引用，不写入日志与上下文，必要时先轮换',
+        hits(<String>[
+          '密钥',
+          '密码',
+          '私钥',
+          '凭据',
+          'token',
+          'api key',
+          'apikey',
+          'secret',
+          'credential',
+        ]));
+    add('high', 'disk', '涉及磁盘/分区/格式化等底层操作',
+        '先确认磁盘与快照，限制写入路径与配额',
+        hits(<String>['磁盘', '硬盘', '分区', '格式化', 'mkfs', 'fdisk', 'dd if=']));
+    add('medium', 'gpu', '涉及显存/GPU 资源占用',
+        '评估显存峰值，分批加载并准备回退',
+        hits(<String>['显存', 'gpu', 'vram', 'cuda', '显卡']));
+    add('high', 'permission', '涉及权限变更/提权',
+        '遵循最小权限；越权操作必须人工重新签发 Mandate',
+        hits(<String>['权限', 'chmod', 'chown', 'sudo', 'root', '提权']));
+    add(destructive.isNotEmpty ? 'high' : 'medium', 'batch', '涉及批量/全量操作',
+        '分批执行并设置中止阈值，先小范围验证',
+        hits(<String>['批量', '全部', '所有', '全量', 'bulk', 'all files']));
+
+    final List<String> allowed = (mandate?['allowed_tools'] is List)
+        ? (mandate!['allowed_tools'] as List)
+            .map((dynamic e) => e.toString())
+            .toList()
+        : <String>['chat'];
+    final List<String> overreach =
+        requestedTools.where((String t) => !allowed.contains(t)).toList();
+    if (overreach.isNotEmpty) {
+      risks.add(<String, dynamic>{
+        'level': 'high',
+        'type': 'mandate',
+        'detail': '请求工具 ${overreach.join("、")} 超出 Mandate 授权范围'
+            '（允许：${allowed.join("、")}）',
+        'mitigation': '需人工重新签发授权；系统不会自动放权',
+        'source': 'rule',
+      });
+    }
+    return risks;
+  }
+
+  List<Map<String, dynamic>> _normalizeModelRisks(dynamic raw) {
+    final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
+    if (raw is! List) return out;
+    for (final dynamic e in raw) {
+      if (e is! Map) continue;
+      final String level = (e['level'] ?? '').toString().toLowerCase();
+      final String type = (e['type'] ?? '').toString().trim();
+      final String detail = (e['detail'] ?? '').toString().trim();
+      if (type.isEmpty && detail.isEmpty) continue;
+      out.add(<String, dynamic>{
+        'level': <String>['low', 'medium', 'high', 'critical'].contains(level)
+            ? level
+            : 'unknown',
+        'type': type.isEmpty ? 'unspecified' : type,
+        'detail': detail,
+        'mitigation': (e['mitigation'] ?? '').toString().trim(),
+        'source': 'model',
+      });
+    }
+    return out;
+  }
+
+  /// 风险扫描：确定性规则先行，模型只补充规则未覆盖的风险。
+  /// 高危自动写审计事件；Mandate 一律不改写、不放权。
+  Future<Map<String, dynamic>> _riskScan(Map<String, dynamic> p) async {
+    final String goal = (p['goal'] ?? '').toString().trim();
+    if (goal.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': '目标内容为空'};
+    }
+    final Map<String, dynamic>? mandate = p['mandate'] is Map
+        ? Map<String, dynamic>.from(p['mandate'] as Map)
+        : null;
+    final List<String> tools = _stringList(p['tools']);
+    final List<Map<String, dynamic>> deterministic =
+        _deterministicRisks(goal, mandate, tools);
+    final StringBuffer b = StringBuffer()
+      ..writeln('你是 Super Agent 的风险扫描器（risk_scan），只输出一个 JSON 对象，不要解释。')
+      ..writeln('要求：只补充下面程序规则未覆盖的风险；没有新增就返回空数组，禁止编造。')
+      ..writeln('目标：$goal');
+    if (mandate != null) b.writeln('授权 Mandate：${jsonEncode(mandate)}');
+    if (tools.isNotEmpty) b.writeln('拟使用工具：${tools.join("、")}');
+    b.writeln('程序规则已识别风险：${jsonEncode(deterministic)}');
+    b.writeln('JSON 字段：risks[{level(low|medium|high)、type、detail、mitigation}]。');
+    final Map<String, dynamic> r = await _chatFor(b.toString(), 'super-risk');
+    final String engine = (r['engine'] ?? '').toString();
+    final String reply = (r['reply'] ?? r['error'] ?? '').toString();
+    final Map<String, dynamic> parsed = _parseJsonObject(reply);
+    final List<Map<String, dynamic>> modelRisks =
+        _normalizeModelRisks(parsed['risks']);
+    final List<Map<String, dynamic>> risks =
+        <Map<String, dynamic>>[...deterministic];
+    final Set<String> seen = risks
+        .map((Map<String, dynamic> x) => '${x['type']}|${x['detail']}')
+        .toSet();
+    for (final Map<String, dynamic> m in modelRisks) {
+      if (seen.add('${m['type']}|${m['detail']}')) risks.add(m);
+    }
+    final bool highRisk = risks.any((Map<String, dynamic> x) =>
+        x['level'] == 'high' || x['level'] == 'critical');
+    int audited = 0;
+    for (final Map<String, dynamic> risk in risks
+        .where((Map<String, dynamic> x) =>
+            x['level'] == 'high' || x['level'] == 'critical')
+        .take(10)) {
+      final Map<String, dynamic> audit = <String, dynamic>{
+        'ts': DateTime.now().toIso8601String(),
+        'goal': goal,
+        'level': risk['level'],
+        'type': risk['type'],
+        'detail': risk['detail'],
+        'mitigation': risk['mitigation'],
+        'source': risk['source'],
+      };
+      await _appendRecord('super_audit_events', audit);
+      _log('super.risk.audit', audit);
+      audited += 1;
+    }
+    _log('super.cognitive.risk_scan', <String, dynamic>{
+      'goal': goal,
+      'risks': risks.length,
+      'high_risk': highRisk,
+      'engine': engine,
+    });
+    return <String, dynamic>{
+      'ok': true,
+      'engine': engine,
+      'degraded': _engineDegraded(r),
+      'model_structured': parsed.isNotEmpty,
+      'risks': risks,
+      'deterministic': deterministic,
+      'model_risks': modelRisks,
+      'high_risk': highRisk,
+      'audit_logged': audited > 0,
+      'audit_count': audited,
+      'mandate_unchanged': true,
+    };
+  }
+
+  /// 路线对比：要求模型给出 2-3 条路线及推荐，严格 JSON。
+  /// 模型给少了不补齐（绝不编造），用 meets_route_range 如实标记。
+  Future<Map<String, dynamic>> _optionsAction(Map<String, dynamic> p) async {
+    final String goal = (p['goal'] ?? '').toString().trim();
+    if (goal.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': '目标内容为空'};
+    }
+    final String context = (p['context'] ?? '').toString().trim();
+    final List<String> constraints = _stringList(p['constraints']);
+    final StringBuffer b = StringBuffer()
+      ..writeln('你是 Super Agent 的路线设计器（options），只输出一个 JSON 对象，不要解释。')
+      ..writeln('请给出 2-3 条互不相同的路线，每条必须包含 benefits/costs/risks/fit/tradeoff。')
+      ..writeln('不得虚构未知事实；信息不足时在 fit 中说明需要补充的条件。')
+      ..writeln('目标：$goal');
+    if (context.isNotEmpty) b.writeln('已知上下文：$context');
+    if (constraints.isNotEmpty) b.writeln('约束：${constraints.join("；")}');
+    b.writeln('JSON 字段：options[{name、benefits(string[])、costs(string[])、'
+        'risks(string[])、fit(string)、tradeoff(string)}]、recommendation(string)。');
+    final Map<String, dynamic> r = await _chatFor(b.toString(), 'super-options');
+    final String engine = (r['engine'] ?? '').toString();
+    final String reply = (r['reply'] ?? r['error'] ?? '').toString();
+    final Map<String, dynamic> parsed = _parseJsonObject(reply);
+    final List<Map<String, dynamic>> options = <Map<String, dynamic>>[];
+    final dynamic raw = parsed['options'];
+    if (raw is List) {
+      for (final dynamic e in raw) {
+        if (e is! Map) continue;
+        options.add(<String, dynamic>{
+          'name': (e['name'] ?? e['title'] ?? '').toString().trim(),
+          'benefits': _stringList(e['benefits']),
+          'costs': _stringList(e['costs']),
+          'risks': _stringList(e['risks']),
+          'fit': (e['fit'] ?? '').toString().trim(),
+          'tradeoff': (e['tradeoff'] ?? '').toString().trim(),
+        });
+        if (options.length >= 3) break;
+      }
+    }
+    final String recommendation =
+        (parsed['recommendation'] ?? '').toString().trim();
+    final Map<String, dynamic> record = <String, dynamic>{
+      'ts': DateTime.now().toIso8601String(),
+      'goal': goal,
+      'engine': engine,
+      'degraded': _engineDegraded(r),
+      'structured': parsed.isNotEmpty,
+      'options': options,
+      'recommendation': recommendation,
+      'raw': _truncate(reply, 1600),
+    };
+    await _appendRecord('super_options', record);
+    _options.add(record);
+    _log('super.cognitive.options', <String, dynamic>{
+      'goal': goal,
+      'structured': record['structured'],
+      'routes': options.length,
+      'engine': engine,
+    });
+    return <String, dynamic>{
+      'ok': true,
+      'engine': engine,
+      'degraded': record['degraded'],
+      'structured': record['structured'],
+      'options': options,
+      'recommendation': recommendation,
+      'meets_route_range': options.length >= 2 && options.length <= 3,
+      'report': record,
+    };
+  }
+
+  /// 追加式决策日志：choice / options_considered / reason / constraints /
+  /// rejected / ticket_id，落盘 super_decision_log。
+  Future<Map<String, dynamic>> _logDecision(Map<String, dynamic> p) async {
+    final String choice = (p['choice'] ?? '').toString().trim();
+    if (choice.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': 'choice 不能为空'};
+    }
+    final Map<String, dynamic> entry = <String, dynamic>{
+      'ts': DateTime.now().toIso8601String(),
+      'kind': 'decision',
+      'choice': choice,
+      'options_considered': _stringList(p['options_considered']),
+      'reason': (p['reason'] ?? '').toString().trim(),
+      'constraints': _stringList(p['constraints']),
+      'rejected': _stringList(p['rejected']),
+      'ticket_id': (p['ticket_id'] ?? '').toString().trim(),
+    };
+    await _appendRecord('super_decision_log', entry);
+    _decisionLog.add(entry);
+    _log('super.decision.log', <String, dynamic>{
+      'choice': choice,
+      'ticket': entry['ticket_id'],
+    });
+    return <String, dynamic>{'ok': true, 'entry': entry};
+  }
+
+  /// 决策视图：汇总 decisions / reviews / options / clarifications /
+  /// decision_log 的最近记录（每条最多 limit 条）。
+  Map<String, dynamic> _decisionLogView(Map<String, dynamic> p) {
+    final int limit = p['limit'] is num
+        ? (p['limit'] as num).toInt().clamp(1, 100)
+        : 20;
+    final List<Map<String, dynamic>> reviews = <Map<String, dynamic>>[];
+    for (final SuperTicket t in _tickets.values) {
+      for (final Map<String, dynamic> r in t.reviews) {
+        reviews.add(<String, dynamic>{'ticket': t.id, ...r});
+      }
+    }
+    return <String, dynamic>{
+      'ok': true,
+      'limit': limit,
+      'decisions':
+          _decisions.reversed.take(limit).map((FilterDecision d) => d.toJson()).toList(),
+      'reviews': reviews.reversed.take(limit).toList(),
+      'options': _options.reversed.take(limit).toList(),
+      'clarifications': _clarifications.reversed.take(limit).toList(),
+      'decision_log': _decisionLog.reversed.take(limit).toList(),
+    };
+  }
+
+  /// 人工修订：追加反馈并按需重新入队。running 工单拒绝改动，
+  /// 避免破坏正在累加的步数账本；重入队保留既有 steps 记录。
+  Future<Map<String, dynamic>> _revise(Map<String, dynamic> p) async {
+    final String id = (p['id'] ?? '').toString();
+    final SuperTicket? t = _tickets[id];
+    if (t == null) {
+      return <String, dynamic>{'ok': false, 'error': '工单不存在'};
+    }
+    final String feedback =
+        (p['feedback'] ?? p['text'] ?? '').toString().trim();
+    if (feedback.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': '反馈内容为空'};
+    }
+    if (t.status == TicketStatus.running || _runningWorkers.contains(id)) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '运行中的工单不可修订入队（避免破坏步数账本），请先暂停',
+      };
+    }
+    final bool wantRequeue = p['requeue'] != false;
+    const Set<TicketStatus> requeueable = <TicketStatus>{
+      TicketStatus.done,
+      TicketStatus.failed,
+      TicketStatus.paused,
+      TicketStatus.stalled,
+      TicketStatus.stopped,
+      TicketStatus.queued,
+    };
+    if (wantRequeue && !requeueable.contains(t.status)) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '当前状态 ${t.status.name} 不可修订入队',
+      };
+    }
+    t.history.add('[人工修订] $feedback');
+    t.riskNotes.addAll(_stringList(p['risk_hints']));
+    t.clarifications.addAll(_stringList(p['clarifications']));
+    t.updatedAt = DateTime.now().toIso8601String();
+    bool requeued = false;
+    if (wantRequeue) {
+      t.status = TicketStatus.queued;
+      t.notBefore = null;
+      t.replanned = false;
+      t.history.add('[人工修订入队] 重置为 queued，保留既有步数账本');
+      requeued = true;
+    }
+    await _persistTickets();
+    _log('super.ticket.revise', <String, dynamic>{
+      'ticket': id,
+      'requeued': requeued,
+    });
+    if (requeued) await _drainQueue();
+    return <String, dynamic>{
+      'ok': true,
+      'id': id,
+      'status': t.status.name,
+      'requeued': requeued,
+      'ticket': t.toJson(),
+    };
+  }
 
   Future<void> _persistConfig() => _safeWrite(() async {
         await store.writeJson('super_config.json', <String, dynamic>{
@@ -688,6 +1294,8 @@ class SuperAgent {
     Map<String, dynamic>? mandate,
     int priority = 5,
     String? notBefore,
+    List<String> riskHints = const <String>[],
+    List<String> clarifications = const <String>[],
   }) async {
     final String id = 'ticket-${++_seq}';
     int maxSteps = defaultMaxSteps;
@@ -727,6 +1335,8 @@ class SuperAgent {
       ),
     );
     ticket.history.add('[快捷建任务·$source] $goal');
+    ticket.riskNotes.addAll(riskHints);
+    ticket.clarifications.addAll(clarifications);
     ticket.workerSession = 'worker-$id';
     ticket.workDir = 'sandbox/super_agent/$id';
     _tickets[id] = ticket;
@@ -867,6 +1477,35 @@ class SuperAgent {
     b.writeln('授权范围（Mandate，不可扩张）：${t.mandate.scope}，'
         '最多 ${t.mandate.maxSteps} 步，允许工具 ${t.mandate.allowedTools.join(",")}。');
     b.writeln('请针对目标给出本步真实的分析/处理结果；不要声称已完成未做的事。');
+    if (t.role.trim().isNotEmpty) {
+      b.writeln('角色设定：${t.role.trim()}（只在授权范围内行动，不得自行扩张权限）');
+    }
+    if (t.persona.isNotEmpty) {
+      const Map<String, String> labels = <String, String>{
+        'name': '姓名',
+        'identity': '身份',
+        'personality': '性格',
+        'audience': '受众',
+      };
+      final List<String> parts = <String>[];
+      labels.forEach((String key, String label) {
+        final String v = (t.persona[key] ?? '').toString().trim();
+        if (v.isNotEmpty) parts.add('$label=$v');
+      });
+      if (parts.isNotEmpty) b.writeln('人格设定：${parts.join('；')}');
+    }
+    if (t.riskNotes.isNotEmpty) {
+      b.writeln('【风险提示】以下风险来自扫描或人工修订，执行时必须规避：');
+      for (final String r in t.riskNotes.take(8)) {
+        b.writeln('- $r');
+      }
+    }
+    if (t.clarifications.isNotEmpty) {
+      b.writeln('【澄清结论】以下条件已确认，不得再脑补假设：');
+      for (final String c in t.clarifications.take(8)) {
+        b.writeln('- $c');
+      }
+    }
     b.writeln('--- 工单上下文（独立 session ${t.workerSession}）---');
     if (t.contextSummary.trim().isNotEmpty) {
       final String s = t.contextSummary.trim();
@@ -1024,6 +1663,9 @@ class SuperAgent {
           'tickets': _tickets.length,
           'triggers': _triggers.length,
           'decisions': _decisions.length,
+          'clarifications': _clarifications.length,
+          'options': _options.length,
+          'decision_log': _decisionLog.length,
           'events': _events.length,
           'router_context': _routerContext.length,
           'persist_errors': _persistErrors.length,
@@ -1036,6 +1678,7 @@ class SuperAgent {
             'context': 'Inline/Spill 分级：活跃留在会话，低频归档为摘要 + 事件引用',
             'review': '长任务收尾阶段复盘，结构化判定偏离并触发纠偏',
             'priority': '工单优先级 0-9 可协商，队列按优先级 + 先来先服务调度',
+            'cognition': '澄清/隐性目标/风险扫描/路线对比/决策日志的 L3 认知闭环',
             'storage': '存算分离：执行在内存，状态落 HarnessStore，可恢复',
           },
         };
@@ -1122,6 +1765,8 @@ class SuperAgent {
           mandate: mandate,
           priority: priority,
           notBefore: notBefore,
+          riskHints: _stringList(p['risk_hints']),
+          clarifications: _stringList(p['clarifications']),
         );
         await _drainQueue();
         return <String, dynamic>{
@@ -1466,6 +2111,20 @@ class SuperAgent {
               .take(100)
               .toList(),
         };
+      case 'clarify':
+        return await _clarify(p);
+      case 'implicit_goal':
+        return await _implicitGoal(p);
+      case 'risk_scan':
+        return await _riskScan(p);
+      case 'options':
+        return await _optionsAction(p);
+      case 'log_decision':
+        return await _logDecision(p);
+      case 'decision_log':
+        return _decisionLogView(p);
+      case 'revise':
+        return await _revise(p);
       case 'watchdog':
         return await _scanWatchdog();
       case 'stop':
@@ -1489,8 +2148,14 @@ class SuperAgent {
         await _persistTickets();
         return <String, dynamic>{'ok': true, 'history': t.history.length};
       case 'subagent':
-        return await _spawnSubagent((p['id'] ?? '').toString(),
-            (p['goal'] ?? '').toString());
+        return await _spawnSubagent(
+          (p['id'] ?? '').toString(),
+          (p['goal'] ?? '').toString(),
+          persona: p['persona'] is Map
+              ? Map<String, dynamic>.from(p['persona'] as Map)
+              : null,
+          role: (p['role'] ?? '').toString(),
+        );
       default:
         return <String, dynamic>{'ok': false, 'error': '未知 Super Agent 动作：$action'};
     }
@@ -1523,8 +2188,13 @@ class SuperAgent {
   }
 
   /// Subagent：Worker 派生独立子工单，共享 Router、隔离 session。
+  /// persona/role 只用于 Worker prompt 的角色表达；Mandate 仍沿用父级，不可扩张。
   Future<Map<String, dynamic>> _spawnSubagent(
-      String parentId, String goal) async {
+    String parentId,
+    String goal, {
+    Map<String, dynamic>? persona,
+    String role = '',
+  }) async {
     final SuperTicket? parent = _tickets[parentId];
     if (parent == null) {
       return <String, dynamic>{'ok': false, 'error': '父工单不存在'};
@@ -1548,14 +2218,24 @@ class SuperAgent {
         allowedTools: parent.mandate.allowedTools,
       ),
     );
+    child.persona.addAll(_sanitizePersona(persona));
+    child.role = role.trim();
+    // 风险与澄清结论随父工单继承，避免子任务在同样风险上重复踩坑。
+    child.riskNotes.addAll(parent.riskNotes);
+    child.clarifications.addAll(parent.clarifications);
     child.workerSession = 'worker-$id';
     child.workDir = 'sandbox/super_agent/$id';
     child.history.add('[子任务·由 $parentId 派生] $goal');
+    if (child.role.isNotEmpty) {
+      child.history.add('[角色] ${child.role}');
+    }
     _tickets[id] = child;
     await _persistTickets();
     _log('super.subagent.spawn', <String, dynamic>{
       'parent': parentId,
       'child': id,
+      'role': child.role,
+      'persona_keys': child.persona.keys.toList(),
     });
     unawaited(_runWorker(id));
     return <String, dynamic>{'ok': true, 'ticket': child.toJson()};

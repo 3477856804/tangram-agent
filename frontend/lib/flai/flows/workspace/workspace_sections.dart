@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 
 import 'package:tangram/ui/pages/tga_3d_page.dart';
+import 'package:tangram/ui/pages/tga_account_ops_page.dart';
 import 'package:tangram/ui/pages/tga_app_market_page.dart';
 import 'package:tangram/ui/pages/tga_channels_page.dart';
+import 'package:tangram/ui/pages/tga_creator_page.dart';
+import 'package:tangram/ui/pages/tga_customize_page.dart';
+import 'package:tangram/ui/pages/tga_experience_page.dart';
 import 'package:tangram/ui/pages/tga_group_chat_page.dart';
 import 'package:tangram/ui/pages/tga_knowledge_page.dart';
 import 'package:tangram/ui/pages/tga_models_page.dart';
@@ -13,6 +17,7 @@ import 'package:tangram/ui/pages/tga_sphere_graph_page.dart';
 import 'package:tangram/ui/pages/tga_store_page.dart';
 import 'package:tangram/ui/pages/tga_team_page.dart';
 import 'package:tangram/ui/pages/tga_training_page.dart';
+import 'package:tangram/ui/pages/tga_video_studio_page.dart';
 import 'package:tangram/ui/pages/tga_workflow_page.dart';
 import 'package:tangram/ui/pages/tga_workspace_page.dart';
 
@@ -79,9 +84,33 @@ List<NavItem> buildWorkspaceNavItems() => <NavItem>[
         fullPage: true,
       ),
       NavItem(
+        icon: Icons.auto_stories_outlined,
+        labelKey: 'sidebar.experience',
+        page: const TgaExperiencePage(),
+        fullPage: true,
+      ),
+      NavItem(
         icon: Icons.storefront_rounded,
         labelKey: 'sidebar.appMarket',
         page: const TgaAppMarketPage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.extension_outlined,
+        labelKey: 'sidebar.creator',
+        page: const TgaCreatorPage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.palette_outlined,
+        labelKey: 'sidebar.customize',
+        page: const TgaCustomizePage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.movie_filter_outlined,
+        labelKey: 'sidebar.videoStudio',
+        page: const TgaVideoStudioPage(),
         fullPage: true,
       ),
       NavItem(
@@ -112,6 +141,12 @@ List<NavItem> buildWorkspaceNavItems() => <NavItem>[
         icon: Icons.groups_2_outlined,
         labelKey: 'sidebar.team',
         page: const TgaTeamPage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.alternate_email_rounded,
+        labelKey: 'sidebar.accountOps',
+        page: const TgaAccountOpsPage(),
         fullPage: true,
       ),
       NavItem(

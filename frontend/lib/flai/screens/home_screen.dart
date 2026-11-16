@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../design/dsh_tokens.dart';
+import '../../ui/i18n/tga_strings.dart';
 import '../flows/chat/chat_experience_config.dart';
 import '../flows/chat/screens/empty_chat_state.dart';
 import '../flows/chat/voice_controller.dart';
@@ -113,14 +114,17 @@ class _FlaiHomeScreenState extends State<FlaiHomeScreen> {
     );
   }
 
-  /// 顶栏标题：当前会话的标题（对齐 dsh 的 "会话名"）。
+  /// 顶栏标题：当前会话的标题；空会话时展示产品名，避免标题区留白。
   String _activeTitle() {
+    final String appName = widget.sidebarConfig.appName.trim().isEmpty
+        ? 'TGA'
+        : widget.sidebarConfig.appName.trim();
     final String? id = widget.activeConversationId;
-    if (id == null) return widget.sidebarConfig.appName;
+    if (id == null) return appName;
     for (final ConversationItem item in widget.conversations) {
       if (item.id == id && item.title.trim().isNotEmpty) return item.title;
     }
-    return widget.sidebarConfig.appName;
+    return appName;
   }
 
   Widget _composer(BuildContext context) {
@@ -168,16 +172,23 @@ class _FlaiHomeScreenState extends State<FlaiHomeScreen> {
                     children: <Widget>[
                       _CircleButton(
                         icon: Icons.menu_rounded,
-                        tooltip: '会话',
+                        tooltip: context.t('sidebar.openDrawer', zh: '打开侧边栏'),
+                        semanticsLabel:
+                            context.t('sidebar.openDrawer', zh: '打开侧边栏'),
                         onTap: () => _scaffoldKey.currentState?.openDrawer(),
                       ),
                       const SizedBox(width: DshSpace.x4),
                       Expanded(
-                        child: Text(
-                          hasActiveChat ? _activeTitle() : '',
-                          style: DshType.s14m.copyWith(color: c.labelPrimary),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                        child: Semantics(
+                          header: true,
+                          child: Text(
+                            _activeTitle(),
+                            style: DshType.s14m.copyWith(
+                              color: c.labelPrimary,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                       ),
                       ...effectiveConfig.topNavActions,
@@ -186,7 +197,9 @@ class _FlaiHomeScreenState extends State<FlaiHomeScreen> {
                         _CircleButton(
                           icon: Icons.add_rounded,
                           iconSize: 20,
-                          tooltip: '新会话',
+                          tooltip: context.t('sidebar.newChat', zh: '新会话'),
+                          semanticsLabel:
+                              context.t('sidebar.newChat', zh: '新会话'),
                           onTap: widget.onNewChat!,
                         ),
                     ],
@@ -238,12 +251,14 @@ class _CircleButton extends StatelessWidget {
     required this.onTap,
     this.iconSize = 18,
     this.tooltip,
+    this.semanticsLabel,
   });
 
   final IconData icon;
   final VoidCallback onTap;
   final double iconSize;
   final String? tooltip;
+  final String? semanticsLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -252,6 +267,7 @@ class _CircleButton extends StatelessWidget {
       onTap: onTap,
       customBorder: const CircleBorder(),
       child: Container(
+        // 统一 40dp 点击区，避免不同图标按钮热区大小不一。
         width: 40,
         height: 40,
         decoration: BoxDecoration(
@@ -263,6 +279,11 @@ class _CircleButton extends StatelessWidget {
         child: Icon(icon, size: iconSize, color: c.labelPrimary),
       ),
     );
-    return tooltip == null ? button : Tooltip(message: tooltip!, child: button);
+    final Widget withTooltip =
+        tooltip == null ? button : Tooltip(message: tooltip!, child: button);
+    final String? label = semanticsLabel ?? tooltip;
+    return label == null
+        ? withTooltip
+        : Semantics(button: true, label: label, child: withTooltip);
   }
 }

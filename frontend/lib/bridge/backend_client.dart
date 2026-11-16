@@ -80,6 +80,10 @@ class BackendClient {
   /// 内置 Python 运行时的真实初始化信息（版本、已注册 handler 数、数据目录等）。
   Map<String, dynamic> get embeddedInfo => _embeddedInfo;
 
+  /// 进程内后端实例（仅 inProcess 模式可用；其它模式为 null）。
+  /// 页面用它构造需要真实 chat/shell/kernel 回调的服务，避免再造一套。
+  EmbeddedBackend? get embeddedBackend => _embedded;
+
   BridgeConnectionState get connectionState => _connState;
 
   Stream<BridgeConnectionState> get onConnectionState => _connController.stream;

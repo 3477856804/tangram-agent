@@ -394,11 +394,14 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   Widget _buildAudioNotice(DshPalette c) {
     final bool isError = _audioNotice!.startsWith('转写失败');
     final Color fg = isError ? c.link : c.labelSecondary;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: DshSpace.x8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: <Widget>[
+    return Semantics(
+      liveRegion: true,
+      label: _audioNotice,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: DshSpace.x8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: <Widget>[
           if (_audioTranscribing)
             SizedBox(
               width: 13,
@@ -427,7 +430,8 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
               behavior: HitTestBehavior.opaque,
               child: Icon(Icons.close, size: 14, color: c.labelTertiary),
             ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -479,22 +483,41 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
         ),
         if (widget.config.enableVoice && !_hasText) ...<Widget>[
           const SizedBox(width: DshSpace.x6),
-          DshIconButton(
-            icon: Icons.mic_none_rounded,
-            iconSize: 18,
-            size: 28,
-            tint: c.labelSecondary,
-            onTap: _handleMicTap,
-            tooltip: context.t('home.voiceInput', zh: '语音输入'),
+          Semantics(
+            button: true,
+            label: widget.isRecording
+                ? context.t('home.stopRecording', zh: '停止录音')
+                : context.t('home.voiceInput', zh: '语音输入'),
+            child: DshIconButton(
+              icon: Icons.mic_none_rounded,
+              iconSize: 18,
+              size: 28,
+              tint: c.labelSecondary,
+              onTap: _handleMicTap,
+              tooltip: context.t('home.voiceInput', zh: '语音输入'),
+            ),
           ),
         ],
         const SizedBox(width: DshSpace.x8),
-        DshSendButton(
-          enabled: canSend,
-          onSend: _handleSend,
-          size: 40,
-        ),
+        _sendButton(context, enabled: canSend, size: 40),
       ],
+    );
+  }
+
+  /// 发送键统一语义：禁用态也明确告知“暂无可发送内容”。
+  Widget _sendButton(
+    BuildContext context, {
+    required bool enabled,
+    double size = 34,
+  }) {
+    final String label = enabled
+        ? context.t('home.send', zh: '发送消息')
+        : context.t('home.sendDisabled', zh: '发送消息（暂无可发送内容）');
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      label: label,
+      child: DshSendButton(enabled: enabled, onSend: _handleSend, size: size),
     );
   }
 
@@ -506,35 +529,40 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
       required bool active,
       required VoidCallback onTap,
     }) {
-      return GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: active ? c.businessTertiary : c.inputMajor,
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(
-              color: active
-                  ? c.business.withValues(alpha: 0.30)
-                  : c.borderL3,
-              width: 0.8,
-            ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Icon(icon,
-                  size: 13,
-                  color: active ? c.business : c.labelSecondary),
-              const SizedBox(width: 5),
-              Text(
-                label,
-                style: DshType.xxs12.copyWith(
-                  fontSize: 11.5,
-                  color: active ? c.business : c.labelSecondary,
-                ),
+      return Semantics(
+        button: true,
+        toggled: active,
+        label: label,
+        child: GestureDetector(
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: active ? c.businessTertiary : c.inputMajor,
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: active
+                    ? c.business.withValues(alpha: 0.30)
+                    : c.borderL3,
+                width: 0.8,
               ),
-            ],
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Icon(icon,
+                    size: 13,
+                    color: active ? c.business : c.labelSecondary),
+                const SizedBox(width: 5),
+                Text(
+                  label,
+                  style: DshType.xxs12.copyWith(
+                    fontSize: 11.5,
+                    color: active ? c.business : c.labelSecondary,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       );
@@ -543,20 +571,24 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
     return Row(
       children: <Widget>[
         // “[+]” 添加附件
-        Tooltip(
-          message: context.t('home.attach', zh: '添加附件'),
-          child: InkWell(
-            onTap: _openAttachmentMenu,
-            customBorder: const CircleBorder(),
-            child: Container(
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(
-                color: c.selector,
-                shape: BoxShape.circle,
+        Semantics(
+          button: true,
+          label: context.t('home.attach', zh: '添加附件'),
+          child: Tooltip(
+            message: context.t('home.attach', zh: '添加附件'),
+            child: InkWell(
+              onTap: _openAttachmentMenu,
+              customBorder: const CircleBorder(),
+              child: Container(
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(
+                  color: c.selector,
+                  shape: BoxShape.circle,
+                ),
+                alignment: Alignment.center,
+                child: Icon(Icons.add_rounded, size: 18, color: c.labelPrimary),
               ),
-              alignment: Alignment.center,
-              child: Icon(Icons.add_rounded, size: 18, color: c.labelPrimary),
             ),
           ),
         ),
@@ -629,43 +661,53 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   }
 
   Widget _buildRecordingRow(DshPalette c) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        DshSpace.x8,
-        0,
-        DshSpace.x8,
-        DshSpace.x8,
-      ),
-      child: Row(
-        children: <Widget>[
-          Expanded(
-            child: widget.isTranscribing
-                ? Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      DshSpinner(size: 14, color: c.labelTertiary),
-                      const SizedBox(width: DshSpace.x8),
-                      Text(
-                        context.t('home.transcribing', zh: '识别中…'),
-                        style: DshType.xs13.copyWith(color: c.labelTertiary),
-                      ),
-                    ],
-                  )
-                : _InlineWaveform(color: c.labelPrimary, dim: c.labelCaption),
-          ),
-          const SizedBox(width: DshSpace.x8),
-          DshIconButton(
-            icon: Icons.stop_rounded,
-            size: 28,
-            iconSize: 16,
-            tint: c.labelPrimary,
-            background: c.selector,
-            onTap: () => widget.onVoiceStop?.call(),
-            tooltip: context.t('home.stopRecording', zh: '停止录音'),
-          ),
-          const SizedBox(width: DshSpace.x4),
-          DshSendButton(enabled: _hasText, onSend: _handleSend),
-        ],
+    return Semantics(
+      liveRegion: true,
+      label: widget.isTranscribing
+          ? context.t('home.transcribing', zh: '识别中…')
+          : context.t('home.recording', zh: '正在录音'),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          DshSpace.x8,
+          0,
+          DshSpace.x8,
+          DshSpace.x8,
+        ),
+        child: Row(
+          children: <Widget>[
+            Expanded(
+              child: widget.isTranscribing
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        DshSpinner(size: 14, color: c.labelTertiary),
+                        const SizedBox(width: DshSpace.x8),
+                        Text(
+                          context.t('home.transcribing', zh: '识别中…'),
+                          style: DshType.xs13.copyWith(color: c.labelTertiary),
+                        ),
+                      ],
+                    )
+                  : _InlineWaveform(color: c.labelPrimary, dim: c.labelCaption),
+            ),
+            const SizedBox(width: DshSpace.x8),
+            Semantics(
+              button: true,
+              label: context.t('home.stopRecording', zh: '停止录音'),
+              child: DshIconButton(
+                icon: Icons.stop_rounded,
+                size: 28,
+                iconSize: 16,
+                tint: c.labelPrimary,
+                background: c.selector,
+                onTap: () => widget.onVoiceStop?.call(),
+                tooltip: context.t('home.stopRecording', zh: '停止录音'),
+              ),
+            ),
+            const SizedBox(width: DshSpace.x4),
+            _sendButton(context, enabled: _hasText),
+          ],
+        ),
       ),
     );
   }
@@ -778,12 +820,12 @@ class _AttachmentPreviewRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final DshPalette c = DshPalette.of(context);
     return SizedBox(
-      height: 72,
+      height: 76,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(
           horizontal: DshSpace.x10,
-          vertical: DshSpace.x2,
+          vertical: DshSpace.x4,
         ),
         itemCount: attachments.length,
         itemBuilder: (BuildContext context, int index) {
@@ -793,57 +835,66 @@ class _AttachmentPreviewRow extends StatelessWidget {
             child: Stack(
               clipBehavior: Clip.none,
               children: <Widget>[
-                Container(
-                  width: 60,
-                  height: 60,
-                  decoration: BoxDecoration(
-                    color: c.selector,
-                    borderRadius: BorderRadius.circular(DshR.md),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: _isImage(a)
-                      ? Image.file(File(a.path), fit: BoxFit.cover)
-                      : Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: <Widget>[
-                            Icon(
-                              Icons.attach_file_rounded,
-                              size: 18,
-                              color: c.labelSecondary,
-                            ),
-                            const SizedBox(height: 2),
-                            Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 4,
+                Semantics(
+                  label: '附件 ${a.name}',
+                  child: Container(
+                    width: 60,
+                    height: 60,
+                    decoration: BoxDecoration(
+                      color: c.selector,
+                      borderRadius: BorderRadius.circular(DshR.md),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: _isImage(a)
+                        ? Image.file(File(a.path), fit: BoxFit.cover)
+                        : Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: <Widget>[
+                              Icon(
+                                Icons.attach_file_rounded,
+                                size: 18,
+                                color: c.labelSecondary,
                               ),
-                              child: Text(
-                                a.name,
-                                style: DshType.xxxs11.copyWith(
-                                  color: c.labelTertiary,
+                              const SizedBox(height: 2),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 4,
                                 ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
+                                child: Text(
+                                  a.name,
+                                  style: DshType.xxxs11.copyWith(
+                                    color: c.labelTertiary,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
                               ),
-                            ),
-                          ],
-                        ),
+                            ],
+                          ),
+                  ),
                 ),
                 Positioned(
-                  top: -4,
-                  right: -4,
-                  child: GestureDetector(
-                    onTap: () => onRemove(index),
-                    child: Container(
-                      width: 18,
-                      height: 18,
-                      decoration: BoxDecoration(
-                        color: const Color(0x99000000),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        Icons.close_rounded,
-                        size: 11,
-                        color: Colors.white,
+                  top: -2,
+                  right: -2,
+                  child: Semantics(
+                    button: true,
+                    label: '移除附件 ${a.name}',
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => onRemove(index),
+                      child: Container(
+                        // 放大到 22dp，兼顾可见性与手指命中。
+                        width: 22,
+                        height: 22,
+                        decoration: const BoxDecoration(
+                          color: Color(0x99000000),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.close_rounded,
+                          size: 12,
+                          color: Colors.white,
+                        ),
                       ),
                     ),
                   ),

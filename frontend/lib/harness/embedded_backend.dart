@@ -44,6 +44,9 @@ import 'package:tangram/harness/app_package.dart';
 import 'package:tangram/harness/builtin_plugins.dart';
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/downloader.dart';
+import 'package:tangram/harness/experience_transfer.dart';
+import 'package:tangram/harness/account_ops.dart';
+import 'package:tangram/harness/creator_runtime.dart';
 import 'package:tangram/harness/im_service.dart';
 import 'package:tangram/harness/knowledge_base.dart';
 import 'package:tangram/harness/local_inference.dart';
@@ -57,6 +60,7 @@ import 'package:tangram/harness/snapshot_service.dart';
 import 'package:tangram/harness/store.dart';
 import 'package:tangram/harness/super_agent.dart';
 import 'package:tangram/harness/team_space.dart';
+import 'package:tangram/harness/video_studio.dart';
 import 'package:tangram/harness/workflow.dart';
 import 'package:tangram/services/model_registry.dart' show kBuiltinFreeModels;
 import 'package:tangram/services/ssh_sandbox.dart';
@@ -111,6 +115,41 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// 团队协作沙箱：本机协作空间 + 角色权限 + 审计日志。
   late final TeamSpaceService team = TeamSpaceService(store);
+
+  /// 经验库 / 账号运营：由页面按需构造，回调统一走本后端的真实能力。
+  ExperienceLibrary experienceLibrary() => ExperienceLibrary(store);
+  AccountOps accountOps() => AccountOps(store, send: accountOpsSend);
+  VideoStudio videoStudio() => VideoStudio(
+        store,
+        shell: (String command, String cwd) =>
+            _shellExec(<String, dynamic>{'command': command, 'cwd': cwd}),
+      );
+
+  /// Creator 运行时：带上真实内核、对话与 shell，激活后立即可用。
+  Future<CreatorRuntime> createCreatorRuntime() async {
+    await _ensureKernel();
+    return CreatorRuntime(
+      store,
+      kernel: _kernel,
+      chat: (String prompt, Map<String, dynamic> args) =>
+          _chat(<String, dynamic>{'text': prompt, ...args}),
+      shell: (String command, String cwd) =>
+          _shellExec(<String, dynamic>{'command': command, 'cwd': cwd}),
+    );
+  }
+
+  /// 账号运营发布：按草稿里的渠道推送到已接入的真实 IM 通道；
+  /// 未登录/未配置的渠道由 IM 网关如实返回错误，不伪造成功。
+  Future<Map<String, dynamic>> accountOpsSend(
+      String channel, Map<String, dynamic> payload) async {
+    return im.handle('send', <String, dynamic>{
+      'connector': channel,
+      'channel': channel,
+      'text': (payload['content'] ?? '').toString(),
+      'to': (payload['target'] ?? '').toString(),
+      'scope': (payload['scope'] ?? '').toString(),
+    });
+  }
 
   // ---- 万物皆插件内核 + Super Agent（懒装配，绑定真实能力）----
   PluginKernel? _kernel;
@@ -404,6 +443,22 @@ class EmbeddedBackend implements QqShellRunner {
         'team_space': <String, dynamic>{
           'architecture': 'local shared dir + roles + append-only audit log',
           'cross_device_sync': false,
+        },
+        'creator': <String, dynamic>{
+          'architecture': 'declarative manifest + validate + hot activate into kernel',
+          'actions': <String>['prompt', 'http', 'shell'],
+        },
+        'experience': <String, dynamic>{
+          'architecture': 'local BM25 patterns + heuristic/model adaptation',
+        },
+        'account_ops': <String, dynamic>{
+          'architecture': 'credential-ref only + human approval + audit + real IM send',
+        },
+        'video_studio': <String, dynamic>{
+          'architecture': 'ffmpeg command builder + injected sandbox shell + job records',
+        },
+        'ui_customization': <String, dynamic>{
+          'architecture': 'theme/layout presets + import/export + global/project scope',
         },
       };
 

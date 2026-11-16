@@ -72,13 +72,19 @@ class _ChatLayout extends StatelessWidget {
 
     final isError = message.status == MessageStatus.error;
     // 需求：深色模式输出区文字纯白、浅色模式纯黑。
-    // 统一取当前主题亮度，用户气泡与 AI 正文共用同一前景色。
+    // AI 正文固定使用 chatFg；用户气泡改用主题自带的前景色，避免深色气泡
+    // （浅色主题下的用户气泡）上出现低对比度文字。
     final Color chatFg = Theme.of(context).brightness == Brightness.dark
         ? Colors.white
         : Colors.black;
+    final Color bubbleFg =
+        isUser ? theme.colors.userBubbleForeground : chatFg;
+    // FlaiTheme.dark 的 destructive 是深红底色，直接当文字色在深底上不可读；
+    // 错误提示统一取 dsh 语义错误色（深色 #EF4444 / 浅色 #DC2626）。
+    final Color errorFg = DshPalette.of(context).error;
 
     return Semantics(
-      label: isError ? 'error_message_bubble' : null,
+      label: isError ? '消息发送失败，可重试' : null,
       child: Align(
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
         child: ConstrainedBox(
@@ -109,21 +115,15 @@ class _ChatLayout extends StatelessWidget {
                   SizedBox(height: theme.spacing.xs),
                 ],
 
+                if (isError) ...[
+                  _ErrorNotice(theme: theme, color: errorFg),
+                  SizedBox(height: theme.spacing.xs),
+                ],
+
                 GestureDetector(
                   onLongPress: onLongPress != null
                       ? () => onLongPress!(message)
-                      : () {
-                          Clipboard.setData(
-                            ClipboardData(text: message.content),
-                          );
-                          HapticFeedback.lightImpact();
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('已复制'),
-                              duration: Duration(seconds: 2),
-                            ),
-                          );
-                        },
+                      : () => _copy(context),
                   child: Container(
                     padding: isUser
                         ? const EdgeInsets.symmetric(
@@ -143,8 +143,8 @@ class _ChatLayout extends StatelessWidget {
                         _MessageContent(
                           content: message.content,
                           isStreaming: message.isStreaming,
-                          style: theme.typography.bodyBase(color: chatFg),
-                          cursorColor: chatFg,
+                          style: theme.typography.bodyBase(color: bubbleFg),
+                          cursorColor: bubbleFg,
                         ),
 
                         if (message.hasCitations) ...[
@@ -164,12 +164,124 @@ class _ChatLayout extends StatelessWidget {
                   ),
                 ),
 
-                if (message.status == MessageStatus.error &&
-                    onRetry != null) ...[
+                // 长消息不再只能靠长按猜操作：气泡下方常驻复制 / 重试入口。
+                if (!message.isStreaming &&
+                    message.content.trim().isNotEmpty) ...[
                   SizedBox(height: theme.spacing.xs),
-                  _RetryButton(theme: theme, onTap: () => onRetry!(message)),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _BubbleAction(
+                        icon: Icons.copy_rounded,
+                        label: '复制',
+                        theme: theme,
+                        onTap: () => _copy(context),
+                      ),
+                      if (isError && onRetry != null) ...[
+                        SizedBox(width: theme.spacing.xs),
+                        _BubbleAction(
+                          icon: Icons.refresh_rounded,
+                          label: '重试',
+                          theme: theme,
+                          tone: errorFg,
+                          onTap: () {
+                            HapticFeedback.lightImpact();
+                            onRetry!(message);
+                          },
+                        ),
+                      ],
+                    ],
+                  ),
                 ],
               ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _copy(BuildContext context) {
+    if (message.content.isEmpty) return;
+    Clipboard.setData(ClipboardData(text: message.content));
+    HapticFeedback.lightImpact();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('已复制'), duration: Duration(seconds: 2)),
+    );
+  }
+}
+
+/// 错误气泡顶部提示：用图标 + 文案直说失败，而不是只靠一个重试按钮。
+class _ErrorNotice extends StatelessWidget {
+  final FlaiThemeData theme;
+  final Color color;
+
+  const _ErrorNotice({required this.theme, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(Icons.error_outline_rounded, size: 14, color: color),
+        SizedBox(width: theme.spacing.xs),
+        Flexible(
+          child: Text(
+            '消息发送失败',
+            style: theme.typography.bodySmall(color: theme.colors.foreground),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 气泡可见操作（复制 / 重试）：常驻显示，避免长按才有入口。
+class _BubbleAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final FlaiThemeData theme;
+  final VoidCallback onTap;
+  final Color? tone;
+
+  const _BubbleAction({
+    required this.icon,
+    required this.label,
+    required this.theme,
+    required this.onTap,
+    this.tone,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final Color color = tone ?? theme.colors.mutedForeground;
+    return Semantics(
+      button: true,
+      label: label,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(theme.radius.sm),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 32),
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: theme.spacing.sm,
+                vertical: theme.spacing.xs,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 13, color: color),
+                  SizedBox(width: theme.spacing.xs),
+                  Text(
+                    label,
+                    style: theme.typography.bodySmall(color: color),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -350,61 +462,76 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
   Widget build(BuildContext context) {
     final theme = widget.theme;
 
-    return GestureDetector(
+    return Semantics(
+      button: true,
+      expanded: _expanded,
+      label: _expanded ? '思考过程，已展开，点击收起' : '思考过程，已收起，点击展开',
       onTap: _toggle,
-      child: Container(
-        padding: EdgeInsets.all(theme.spacing.sm),
-        decoration: BoxDecoration(
-          // 用不透明容器而非 0.5 透明：半透明容器会与深色底混合，把正文
-          // 对比度从 5:1 拉低到 3.6:1（截图里整段思考内容发暗的根因）。
-          color: theme.colors.muted,
-          borderRadius: BorderRadius.circular(theme.radius.md),
-          border: Border.all(color: theme.colors.border),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  Icons.psychology_rounded,
-                  size: 14,
-                  color: theme.colors.mutedForeground,
-                ),
-                SizedBox(width: theme.spacing.xs),
-                Text(
-                  '思考过程',
-                  style: theme.typography.sm.copyWith(
+      excludeSemantics: true,
+      child: GestureDetector(
+        onTap: _toggle,
+        child: Container(
+          padding: EdgeInsets.all(theme.spacing.sm),
+          decoration: BoxDecoration(
+            // 用不透明容器而非 0.5 透明：半透明容器会与深色底混合，把正文
+            // 对比度从 5:1 拉低到 3.6:1（截图里整段思考内容发暗的根因）。
+            color: theme.colors.muted,
+            borderRadius: BorderRadius.circular(theme.radius.md),
+            border: Border.all(color: theme.colors.border),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.psychology_rounded,
+                    size: 14,
                     color: theme.colors.mutedForeground,
                   ),
-                ),
-                const Spacer(),
-                RotationTransition(
-                  turns: _rotationAnimation,
-                  child: Icon(
-                    Icons.expand_more,
-                    size: 16,
-                    color: theme.colors.mutedForeground,
+                  SizedBox(width: theme.spacing.xs),
+                  Text(
+                    '思考过程',
+                    style: theme.typography.sm.copyWith(
+                      color: theme.colors.mutedForeground,
+                    ),
                   ),
-                ),
-              ],
-            ),
-            SizeTransition(
-              sizeFactor: _expandAnimation,
-              axisAlignment: -1.0,
-              child: Padding(
-                padding: EdgeInsets.only(top: theme.spacing.xs),
-                child: Text(
-                  widget.content,
-                  // 思考内容是真实信息，用正文前景色保证深浅主题均清晰；
-                  // 不再用 mutedForeground + 斜体（小字斜体叠加低对比度不可读）。
-                  style: theme.typography.bodySmall(
-                    color: theme.colors.foreground,
+                  const Spacer(),
+                  // 明确的折叠状态提示：收起时显示「展开」，展开时显示「收起」。
+                  Text(
+                    _expanded ? '收起' : '展开',
+                    style: theme.typography.sm.copyWith(
+                      fontSize: 12,
+                      color: theme.colors.mutedForeground,
+                    ),
+                  ),
+                  RotationTransition(
+                    turns: _rotationAnimation,
+                    child: Icon(
+                      Icons.expand_more,
+                      size: 16,
+                      color: theme.colors.mutedForeground,
+                    ),
+                  ),
+                ],
+              ),
+              SizeTransition(
+                sizeFactor: _expandAnimation,
+                axisAlignment: -1.0,
+                child: Padding(
+                  padding: EdgeInsets.only(top: theme.spacing.xs),
+                  child: Text(
+                    widget.content,
+                    // 思考内容是真实信息，用正文前景色保证深浅主题均清晰；
+                    // 不再用 mutedForeground + 斜体（小字斜体叠加低对比度不可读）。
+                    style: theme.typography.bodySmall(
+                      color: theme.colors.foreground,
+                    ),
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -695,54 +822,6 @@ class _BlinkingCursorState extends State<_BlinkingCursor>
 }
 
 
-class _RetryButton extends StatelessWidget {
-  final FlaiThemeData theme;
-  final VoidCallback onTap;
-
-  const _RetryButton({required this.theme, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () {
-        HapticFeedback.lightImpact();
-        onTap();
-      },
-      child: Container(
-        padding: EdgeInsets.symmetric(
-          horizontal: theme.spacing.sm,
-          vertical: theme.spacing.xs,
-        ),
-        decoration: BoxDecoration(
-          color: theme.colors.destructive.withValues(alpha: 0.1),
-          borderRadius: BorderRadius.circular(theme.radius.sm),
-          border: Border.all(
-            color: theme.colors.destructive.withValues(alpha: 0.3),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.refresh_rounded,
-              size: 14,
-              color: theme.colors.destructive,
-            ),
-            SizedBox(width: theme.spacing.xs),
-            Text(
-              '重试',
-              style: theme.typography.bodySmall(
-                color: theme.colors.destructive,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-
 class _CodeBlockBuilder extends MarkdownElementBuilder {
   final Color? codeColor;
 
@@ -792,44 +871,60 @@ class _CodeBlockWidget extends StatelessWidget {
             ),
             child: Row(
               children: [
-                if (language != null)
-                  Text(
-                    language!,
+                // 语言名占满剩余宽度并省略，复制入口始终固定在右上角。
+                Expanded(
+                  child: Text(
+                    language ?? '',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 11,
-                      color: codeColor?.withValues(alpha: 0.6),
+                      color: codeColor?.withValues(alpha: 0.7),
                       fontFamily: 'monospace',
                     ),
                   ),
-                const Spacer(),
-                GestureDetector(
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: code));
-                    HapticFeedback.lightImpact();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('已复制到剪贴板'),
-                        duration: Duration(seconds: 1),
-                      ),
-                    );
-                  },
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.copy_rounded,
-                        size: 13,
-                        color: codeColor?.withValues(alpha: 0.5),
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        '复制',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: codeColor?.withValues(alpha: 0.5),
+                ),
+                const SizedBox(width: 8),
+                Semantics(
+                  button: true,
+                  label: '复制代码',
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      Clipboard.setData(ClipboardData(text: code));
+                      HapticFeedback.lightImpact();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('已复制到剪贴板'),
+                          duration: Duration(seconds: 1),
                         ),
+                      );
+                    },
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        minWidth: 44,
+                        minHeight: 28,
                       ),
-                    ],
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.copy_rounded,
+                            size: 13,
+                            color: codeColor?.withValues(alpha: 0.7),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            '复制',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: codeColor?.withValues(alpha: 0.7),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ],
@@ -837,12 +932,16 @@ class _CodeBlockWidget extends StatelessWidget {
           ),
           Padding(
             padding: const EdgeInsets.all(12),
-            child: SelectableText(
-              code,
-              style: TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 13,
-                color: codeColor,
+            // 超长单行代码横向滚动，避免把气泡撑出屏幕。
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: SelectableText(
+                code,
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 13,
+                  color: codeColor,
+                ),
               ),
             ),
           ),

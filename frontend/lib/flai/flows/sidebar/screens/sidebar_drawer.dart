@@ -10,6 +10,44 @@ import '../../../../ui/pages/tga_settings_page.dart';
 import '../sidebar_config.dart';
 import '../widgets/chat_list_item.dart';
 
+/// 侧栏导航的业务分组。顺序即渲染顺序；未知 labelKey 回落到系统组，
+/// 保证以后新增入口不会因为没登记分组而消失。
+enum _NavGroup {
+  reports('sidebar.group.reports', '报告与真实'),
+  creation('sidebar.group.creation', '创作'),
+  collaboration('sidebar.group.collaboration', '协作'),
+  system('sidebar.group.system', '系统');
+
+  const _NavGroup(this.labelKey, this.zh);
+
+  final String labelKey;
+  final String zh;
+}
+
+/// 现有导航项 → 业务分组（以 labelKey 为准，顺序保持 workspace_sections 的声明顺序）。
+const Map<String, _NavGroup> _navGroupByLabelKey = <String, _NavGroup>{
+  'sidebar.knowledge': _NavGroup.reports,
+  'sidebar.graph': _NavGroup.reports,
+  'sidebar.snapshot': _NavGroup.reports,
+  'sidebar.experience': _NavGroup.reports,
+  'sidebar.workspace': _NavGroup.creation,
+  'sidebar.model3d': _NavGroup.creation,
+  'sidebar.store': _NavGroup.creation,
+  'sidebar.appMarket': _NavGroup.creation,
+  'sidebar.creator': _NavGroup.creation,
+  'sidebar.customize': _NavGroup.creation,
+  'sidebar.videoStudio': _NavGroup.creation,
+  'sidebar.groupChat': _NavGroup.collaboration,
+  'sidebar.team': _NavGroup.collaboration,
+  'sidebar.channels': _NavGroup.collaboration,
+  'sidebar.accountOps': _NavGroup.collaboration,
+  'sidebar.training': _NavGroup.system,
+  'sidebar.persona': _NavGroup.system,
+  'sidebar.sandbox': _NavGroup.system,
+  'sidebar.workflow': _NavGroup.system,
+  'sidebar.models': _NavGroup.system,
+};
+
 /// 侧栏：dsh 的会话抽屉 —— 品牌字标 · 新会话 · 导航 · 会话列表 · 底部设置。
 class FlaiSidebarDrawer extends StatefulWidget {
   final SidebarConfig config;
@@ -58,6 +96,83 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
         .toList();
   }
 
+  /// labelKey 未登记时按页面类型兜底，未来新增入口也能落到稳定分组。
+  _NavGroup _groupOf(NavItem item) {
+    final _NavGroup? mapped = _navGroupByLabelKey[item.labelKey];
+    if (mapped != null) return mapped;
+    final String type = item.page.runtimeType.toString().toLowerCase();
+    if (type.contains('knowledge') ||
+        type.contains('graph') ||
+        type.contains('snapshot') ||
+        type.contains('report')) {
+      return _NavGroup.reports;
+    }
+    if (type.contains('team') ||
+        type.contains('groupchat') ||
+        type.contains('channel') ||
+        type.contains('collab')) {
+      return _NavGroup.collaboration;
+    }
+    if (type.contains('studio') ||
+        type.contains('store') ||
+        type.contains('market') ||
+        type.contains('workspace') ||
+        type.contains('training') ||
+        type.contains('persona')) {
+      return _NavGroup.creation;
+    }
+    return _NavGroup.system;
+  }
+
+  /// 分组后仍保持原 navItems 的声明顺序（组内顺序不变）。
+  Map<_NavGroup, List<NavItem>> _groupedNavItems() {
+    final Map<_NavGroup, List<NavItem>> grouped =
+        <_NavGroup, List<NavItem>>{};
+    for (final NavItem item in widget.config.navItems) {
+      grouped.putIfAbsent(_groupOf(item), () => <NavItem>[]).add(item);
+    }
+    return grouped;
+  }
+
+  List<Widget> _buildNavGroups(BuildContext context, DshPalette c) {
+    final Map<_NavGroup, List<NavItem>> grouped = _groupedNavItems();
+    final List<Widget> children = <Widget>[];
+    for (final _NavGroup group in _NavGroup.values) {
+      final List<NavItem>? items = grouped[group];
+      if (items == null || items.isEmpty) continue;
+      children.add(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            DshSpace.x12,
+            DshSpace.x8,
+            DshSpace.x12,
+            DshSpace.x2,
+          ),
+          child: Semantics(
+            header: true,
+            child: Text(
+              context.t(group.labelKey, zh: group.zh),
+              style: DshType.xxxs11m.copyWith(
+                color: c.labelTertiary,
+                letterSpacing: 0.4,
+              ),
+            ),
+          ),
+        ),
+      );
+      children.addAll(
+        items.map(
+          (NavItem item) => _NavRow(
+            icon: item.icon,
+            label: context.t(item.labelKey),
+            onTap: () => _openNavItem(context, item),
+          ),
+        ),
+      );
+    }
+    return children;
+  }
+
   void _openSettings(BuildContext context) {
     // 用户实测反馈 2026-11-13：「设置」改整页 push 新版 TgaSettingsPage，
     // 不再打开旧版 showSettingsDrawer 抽屉。
@@ -94,48 +209,6 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                     onBack: () => Navigator.of(ctx).maybePop(),
                   ),
                   Expanded(child: page),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  void _openAllNav(BuildContext context) {
-    final List<NavItem> items = widget.config.navItems;
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (BuildContext ctx) {
-          final DshPalette c = DshPalette.of(ctx);
-          return Scaffold(
-            backgroundColor: c.bgBase,
-            body: SafeArea(
-              bottom: false,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  DshTopBar(
-                    title: ctx.t('sidebar.more', zh: '更多…'),
-                    onBack: () => Navigator.of(ctx).maybePop(),
-                  ),
-                  Expanded(
-                    child: ListView(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: DshSpace.x8,
-                      ),
-                      children: items
-                          .map(
-                            (NavItem item) => _NavRow(
-                              icon: item.icon,
-                              label: ctx.t(item.labelKey),
-                              onTap: () => _openNavItem(ctx, item),
-                            ),
-                          )
-                          .toList(),
-                    ),
-                  ),
                 ],
               ),
             ),
@@ -208,28 +281,26 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
               ),
             ),
 
-            // 导航项（最多 4 条，其余收进“全部工作台”，保证会话列表始终可见）
+            // 导航项按业务分组，限高滚动：小屏也不把会话列表挤掉，
+            // 同时保证 12+ 个入口全部可达（不再截断成「更多…」）。
             if (widget.config.navItems.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(top: DshSpace.x8),
-                child: Column(
-                  children: <Widget>[
-                    ...widget.config.navItems
-                        .take(4)
-                        .map(
-                          (NavItem item) => _NavRow(
-                            icon: item.icon,
-                            label: context.t(item.labelKey),
-                            onTap: () => _openNavItem(context, item),
-                          ),
-                        ),
-                    if (widget.config.navItems.length > 4)
-                      _NavRow(
-                        icon: Icons.apps_rounded,
-                        label: context.t('sidebar.more', zh: '更多…'),
-                        onTap: () => _openAllNav(context),
+                padding: const EdgeInsets.only(top: DshSpace.x4),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight:
+                        (MediaQuery.sizeOf(context).height * 0.32)
+                            .clamp(96.0, 240.0),
+                  ),
+                  child: Scrollbar(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.only(bottom: DshSpace.x4),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: _buildNavGroups(context, c),
                       ),
-                  ],
+                    ),
+                  ),
                 ),
               ),
 
@@ -254,7 +325,14 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                       size: 32,
                       iconSize: 17,
                       tint: c.labelTertiary,
-                      onTap: () => setState(() => _searching = !_searching),
+                      onTap: () => setState(() {
+                        _searching = !_searching;
+                        // 收起搜索时同步清空过滤词，避免列表被隐藏条件继续筛掉。
+                        if (!_searching) {
+                          _searchController.clear();
+                          _searchQuery = '';
+                        }
+                      }),
                       tooltip: context.t('sidebar.search', zh: '搜索会话'),
                     ),
                 ],
@@ -334,16 +412,67 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                   ...recents.map((ConversationItem item) => _item(item)),
                   if (starred.isEmpty && recents.isEmpty)
                     Padding(
-                      padding: const EdgeInsets.all(DshSpace.x16),
-                      child: Text(
-                        _searchQuery.isEmpty
-                            ? context.t('sidebar.empty', zh: '还没有会话')
-                            : context
-                                .t('sidebar.noMatch',
-                                    zh: '没有匹配“{q}”的会话')
-                                .replaceAll('{q}', _searchQuery),
-                        textAlign: TextAlign.center,
-                        style: DshType.xs13.copyWith(color: c.labelTertiary),
+                      padding: const EdgeInsets.fromLTRB(
+                        DshSpace.x16,
+                        DshSpace.x24,
+                        DshSpace.x16,
+                        DshSpace.x16,
+                      ),
+                      child: Column(
+                        children: <Widget>[
+                          Icon(
+                            _searchQuery.isEmpty
+                                ? Icons.forum_outlined
+                                : Icons.search_off_rounded,
+                            size: 28,
+                            color: c.labelCaption,
+                          ),
+                          const SizedBox(height: DshSpace.x8),
+                          Text(
+                            _searchQuery.isEmpty
+                                ? context.t('sidebar.empty', zh: '还没有会话')
+                                : context
+                                    .t('sidebar.noMatch',
+                                        zh: '没有匹配“{q}”的会话')
+                                    .replaceAll('{q}', _searchQuery),
+                            textAlign: TextAlign.center,
+                            style: DshType.xs13.copyWith(
+                              color: c.labelTertiary,
+                            ),
+                          ),
+                          if (_searchQuery.isNotEmpty) ...<Widget>[
+                            const SizedBox(height: DshSpace.x4),
+                            Semantics(
+                              button: true,
+                              label: context.t(
+                                'sidebar.clearSearch',
+                                zh: '清除搜索',
+                              ),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(DshR.sm),
+                                onTap: () {
+                                  _searchController.clear();
+                                  setState(() => _searchQuery = '');
+                                },
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: DshSpace.x10,
+                                    vertical: DshSpace.x6,
+                                  ),
+                                  child: Text(
+                                    context.t(
+                                      'sidebar.clearSearch',
+                                      zh: '清除搜索',
+                                    ),
+                                    style: DshType.xs13m.copyWith(
+                                      color: c.link,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                     ),
                 ],
@@ -465,28 +594,32 @@ class _DrawerButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final DshPalette c = DshPalette.of(context);
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(DshR.md),
-        child: Container(
-          height: 44,
-          decoration: BoxDecoration(
-            color: c.brandDimmed,
-            borderRadius: BorderRadius.circular(DshR.md),
-          ),
-          alignment: Alignment.center,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: <Widget>[
-              Icon(icon, size: 16, color: c.labelPrimary),
-              const SizedBox(width: DshSpace.x6),
-              Text(
-                label,
-                style: DshType.s14m.copyWith(color: c.labelPrimary),
-              ),
-            ],
+    return Semantics(
+      button: true,
+      label: label,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(DshR.md),
+          child: Container(
+            height: 44,
+            decoration: BoxDecoration(
+              color: c.brandDimmed,
+              borderRadius: BorderRadius.circular(DshR.md),
+            ),
+            alignment: Alignment.center,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: <Widget>[
+                Icon(icon, size: 16, color: c.labelPrimary),
+                const SizedBox(width: DshSpace.x6),
+                Text(
+                  label,
+                  style: DshType.s14m.copyWith(color: c.labelPrimary),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -508,33 +641,37 @@ class _NavRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final DshPalette c = DshPalette.of(context);
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(DshR.md),
-        child: Container(
-          height: 42,
-          margin: const EdgeInsets.symmetric(horizontal: DshSpace.x6),
-          padding: const EdgeInsets.symmetric(horizontal: DshSpace.x10),
-          child: Row(
-            children: <Widget>[
-              Icon(icon, size: 18, color: c.labelSecondary),
-              const SizedBox(width: DshSpace.x10),
-              Expanded(
-                child: Text(
-                  label,
-                  style: DshType.s14.copyWith(color: c.labelPrimary),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+    return Semantics(
+      button: true,
+      label: label,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(DshR.md),
+          child: Container(
+            height: 42,
+            margin: const EdgeInsets.symmetric(horizontal: DshSpace.x6),
+            padding: const EdgeInsets.symmetric(horizontal: DshSpace.x10),
+            child: Row(
+              children: <Widget>[
+                Icon(icon, size: 18, color: c.labelSecondary),
+                const SizedBox(width: DshSpace.x10),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: DshType.s14.copyWith(color: c.labelPrimary),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
-              ),
-              Icon(
-                Icons.chevron_right_rounded,
-                size: 16,
-                color: c.labelCaption,
-              ),
-            ],
+                Icon(
+                  Icons.chevron_right_rounded,
+                  size: 16,
+                  color: c.labelCaption,
+                ),
+              ],
+            ),
           ),
         ),
       ),
