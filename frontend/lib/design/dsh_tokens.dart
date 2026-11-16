@@ -110,6 +110,11 @@ class DshPalette {
   final Color kindTools;
   final Color kindMessages;
 
+  /// 对话正文专用前景色：深色模式纯白、浅色模式纯黑。
+  /// 输入框与输出区直接使用该令牌，避免半透明/灰阶在特定背景上发灰。
+  Color get chatText =>
+      isDark ? const Color(0xFFFFFFFF) : const Color(0xFF000000);
+
   // ---- 满分配色方案（2026-11-13，见 .trae/skills/unslop/SKILL.md 附表）----
   // 浅色：bg-base 云雾白 #F7F9F7（67%）/ bg-surface 纯白 #FFFFFF（25%，极浅阴影）
   //       / brand-primary 深星蓝 #4A90D9（8%，只上主按钮与选中态）

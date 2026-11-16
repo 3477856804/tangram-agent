@@ -48,6 +48,7 @@ def _traces():
 
 
 def test_training_real_torch_loss_decreases_and_artifact_loadable(tmp_path):
+    pytest.importorskip("torch")
     from training.pipeline import QLoRAConfig, QLoRAJob, load_adapter
 
     result = QLoRAJob(tmp_path, QLoRAConfig(epochs=6, lr=2e-4)).run(traces=_traces())

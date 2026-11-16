@@ -1,13 +1,19 @@
 import 'package:flutter/material.dart';
 
 import 'package:tangram/ui/pages/tga_3d_page.dart';
+import 'package:tangram/ui/pages/tga_app_market_page.dart';
 import 'package:tangram/ui/pages/tga_channels_page.dart';
+import 'package:tangram/ui/pages/tga_group_chat_page.dart';
+import 'package:tangram/ui/pages/tga_knowledge_page.dart';
 import 'package:tangram/ui/pages/tga_models_page.dart';
 import 'package:tangram/ui/pages/tga_persona_page.dart';
 import 'package:tangram/ui/pages/tga_sandbox_page.dart';
+import 'package:tangram/ui/pages/tga_snapshot_page.dart';
 import 'package:tangram/ui/pages/tga_sphere_graph_page.dart';
 import 'package:tangram/ui/pages/tga_store_page.dart';
+import 'package:tangram/ui/pages/tga_team_page.dart';
 import 'package:tangram/ui/pages/tga_training_page.dart';
+import 'package:tangram/ui/pages/tga_workflow_page.dart';
 import 'package:tangram/ui/pages/tga_workspace_page.dart';
 
 import '../sidebar/sidebar_config.dart';
@@ -55,6 +61,30 @@ List<NavItem> buildWorkspaceNavItems() => <NavItem>[
         fullPage: true,
       ),
       NavItem(
+        icon: Icons.menu_book_outlined,
+        labelKey: 'sidebar.knowledge',
+        page: const TgaKnowledgePage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.account_tree_outlined,
+        labelKey: 'sidebar.workflow',
+        page: const TgaWorkflowPage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.inventory_2_outlined,
+        labelKey: 'sidebar.snapshot',
+        page: const TgaSnapshotPage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.storefront_rounded,
+        labelKey: 'sidebar.appMarket',
+        page: const TgaAppMarketPage(),
+        fullPage: true,
+      ),
+      NavItem(
         icon: Icons.view_in_ar_outlined,
         labelKey: 'sidebar.model3d',
         page: const Tga3DPage(),
@@ -70,6 +100,18 @@ List<NavItem> buildWorkspaceNavItems() => <NavItem>[
         icon: Icons.memory_outlined,
         labelKey: 'sidebar.models',
         page: const TgaModelsPage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.forum_rounded,
+        labelKey: 'sidebar.groupChat',
+        page: const TgaGroupChatPage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.groups_2_outlined,
+        labelKey: 'sidebar.team',
+        page: const TgaTeamPage(),
         fullPage: true,
       ),
       NavItem(

@@ -114,6 +114,32 @@ class TaskScheduler extends ChangeNotifier {
         }
         await _runTask(id: id, task: task, dayKey: today);
       }
+      // 自动化工作流的每日定时触发：由 workflow.due 真实判定到点且今天未跑，
+      // 逐个调用 run；执行结果与状态由工作流引擎落盘。
+      final env2 = await backend.sendControl(
+          'workflow', <String, dynamic>{'action': 'due'});
+      final dynamic wp = env2.payload;
+      if (wp is Map && wp['ok'] == true) {
+        final List<dynamic> due =
+            (wp['due'] as List?) ?? const <dynamic>[];
+        for (final dynamic raw in due) {
+          if (raw is! Map) continue;
+          final String id = '${raw['id'] ?? ''}';
+          if (id.isEmpty) continue;
+          await backend.sendControl('workflow', <String, dynamic>{
+            'action': 'run',
+            'id': id,
+          });
+          notifyListeners();
+        }
+      }
+      // Super Agent：周期性触发一次队列调度，让延后到点的工单按时开始。
+      try {
+        await backend.sendControl(
+            'super_agent', <String, dynamic>{'action': 'queue'});
+      } on Object {
+        // Super Agent 未就绪不影响定时任务。
+      }
     } on Object {
       // 后端未连接等异常：本轮静默跳过，下个周期再试（不谎报执行）。
     } finally {

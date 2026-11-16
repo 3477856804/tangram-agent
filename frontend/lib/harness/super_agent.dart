@@ -21,6 +21,7 @@
 /// 并如实标注 engine，绝不编造"已完成"；Mandate 越界一律拒绝。
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:tangram/harness/plugin_kernel.dart';
 import 'package:tangram/harness/store.dart';
@@ -112,7 +113,7 @@ class Mandate {
       );
 }
 
-enum TicketStatus { queued, running, done, failed, stopped, stalled }
+enum TicketStatus { queued, running, done, failed, stopped, stalled, paused }
 
 /// 任务工单：独立上下文、订阅、授权、进度、隔离工作目录。
 class SuperTicket {
@@ -123,6 +124,8 @@ class SuperTicket {
     required this.thread,
     required this.mandate,
     this.parentId,
+    this.priority = 5,
+    this.notBefore,
     this.status = TicketStatus.queued,
     String? createdAt,
     String? updatedAt,
@@ -135,12 +138,24 @@ class SuperTicket {
   final String thread;
   final Mandate mandate;
   final String? parentId;
+
+  /// 用户可协商的工单优先级（0 最低、9 最高，默认 5）。
+  /// 只影响排队顺序，不放大授权范围。
+  int priority = 5;
+
+  /// 延后执行的最早时间（ISO8601）；为空表示立即可调度。
+  String? notBefore;
   TicketStatus status;
   final String createdAt;
   String updatedAt;
   final List<String> history = <String>[];
   final List<String> subscriptions = <String>[];
   final List<String> watchdogNotes = <String>[];
+  final List<Map<String, dynamic>> reviews = <Map<String, dynamic>>[];
+  /// Inline/Spill 分级存储：活跃上下文留在 [history]，低频历史压成
+  /// [contextSummary] 并保留事件引用 [spillRefs]，避免上下文无限膨胀。
+  String contextSummary = '';
+  final List<int> spillRefs = <int>[];
   String result = '';
   String engine = '';
   int steps = 0;
@@ -154,6 +169,8 @@ class SuperTicket {
         'source': source,
         'thread': thread,
         'parent': parentId,
+        'priority': priority,
+        'not_before': notBefore,
         'status': status.name,
         'mandate': mandate.toJson(),
         'created_at': createdAt,
@@ -161,6 +178,9 @@ class SuperTicket {
         'history': List<String>.of(history),
         'subscriptions': List<String>.of(subscriptions),
         'watchdog_notes': List<String>.of(watchdogNotes),
+        'reviews': reviews.map((Map<String, dynamic> r) => Map<String, dynamic>.of(r)).toList(),
+        'context_summary': contextSummary,
+        'spill_refs': List<int>.of(spillRefs),
         'result': result,
         'engine': engine,
         'steps': steps,
@@ -176,6 +196,8 @@ class SuperTicket {
       source: (m['source'] ?? '').toString(),
       thread: (m['thread'] ?? '').toString(),
       parentId: m['parent']?.toString(),
+      priority: (m['priority'] is num) ? (m['priority'] as num).toInt().clamp(0, 9) : 5,
+      notBefore: m['not_before']?.toString(),
       mandate: Mandate.fromJson(m['mandate'] is Map
           ? Map<String, dynamic>.from(m['mandate'] as Map)
           : <String, dynamic>{}),
@@ -195,6 +217,16 @@ class SuperTicket {
     t.watchdogNotes.addAll((m['watchdog_notes'] is List)
         ? (m['watchdog_notes'] as List).map((dynamic e) => e.toString())
         : <String>[]);
+    t.reviews.addAll((m['reviews'] is List)
+        ? (m['reviews'] as List).whereType<Map>().map(
+            (Map e) => Map<String, dynamic>.from(e))
+        : <Map<String, dynamic>>[]);
+    t.contextSummary = (m['context_summary'] ?? '').toString();
+    t.spillRefs.addAll((m['spill_refs'] is List)
+        ? (m['spill_refs'] as List)
+            .whereType<num>()
+            .map((num e) => e.toInt())
+        : <int>[]);
     t.result = (m['result'] ?? '').toString();
     t.engine = (m['engine'] ?? '').toString();
     t.steps = (m['steps'] is num) ? (m['steps'] as num).toInt() : 0;
@@ -287,6 +319,9 @@ class SuperAgent {
   int maxWorkers = 3;
   int defaultMaxSteps = 3;
   int defaultDeadlineSeconds = 180;
+
+  /// 长任务收尾时自动做一次阶段复盘（真实推理，失败不影响交付）。
+  bool autoReview = true;
   int _seq = 0;
 
   final Map<String, SuperTicket> _tickets = <String, SuperTicket>{};
@@ -324,6 +359,7 @@ class SuperAgent {
     defaultDeadlineSeconds = (cfg['default_deadline_seconds'] is num)
         ? (cfg['default_deadline_seconds'] as num).toInt()
         : 180;
+    autoReview = cfg.containsKey('auto_review') ? cfg['auto_review'] == true : true;
     if (cfg['rules'] is Map) {
       _rules = Map<String, dynamic>.from(cfg['rules'] as Map);
     }
@@ -424,6 +460,7 @@ class SuperAgent {
           'max_workers': maxWorkers,
           'default_max_steps': defaultMaxSteps,
           'default_deadline_seconds': defaultDeadlineSeconds,
+          'auto_review': autoReview,
           'rules': _rules,
           'seq': _seq,
           'updated_at': DateTime.now().toIso8601String(),
@@ -619,6 +656,9 @@ class SuperAgent {
       goal: t.text,
       source: t.source,
       thread: t.thread.isEmpty ? 'thread-${t.id}' : t.thread,
+      priority: t.meta['priority'] is num
+          ? (t.meta['priority'] as num).toInt().clamp(0, 9)
+          : 5,
       mandate: Mandate(
         scope: 'source=${t.source};kind=${t.kind}（不可自我扩张）',
         maxSteps: defaultMaxSteps,
@@ -646,6 +686,8 @@ class SuperAgent {
     required String source,
     required String thread,
     Map<String, dynamic>? mandate,
+    int priority = 5,
+    String? notBefore,
   }) async {
     final String id = 'ticket-${++_seq}';
     int maxSteps = defaultMaxSteps;
@@ -675,6 +717,8 @@ class SuperAgent {
       goal: goal,
       source: source,
       thread: thread.isEmpty ? 'direct-$id' : thread,
+      priority: priority.clamp(0, 9),
+      notBefore: notBefore,
       mandate: Mandate(
         scope: scope,
         maxSteps: maxSteps,
@@ -711,7 +755,10 @@ class SuperAgent {
     int repeated = 0;
     try {
       for (int step = 0; step < ticket.mandate.maxSteps; step++) {
-        if (ticket.status == TicketStatus.stopped) break;
+        if (ticket.status == TicketStatus.stopped ||
+            ticket.status == TicketStatus.paused) {
+          break;
+        }
         // Mandate 不可自我扩张：步数与方法都受签发范围约束。
         if (!ticket.mandate.allowedTools.contains('chat')) {
           ticket.watchdogNotes.add('Mandate 拒绝：chat 不在允许工具内');
@@ -736,10 +783,14 @@ class SuperAgent {
         ticket.history.add('[step ${step + 1}·${ticket.engine}] $reply');
         ticket.result = reply;
         ticket.updatedAt = DateTime.now().toIso8601String();
+        // Inline/Spill：每步后把低频历史归档为摘要 + 事件引用，抑制上下文膨胀。
+        _compactHistory(ticket);
         _log('super.worker.step', <String, dynamic>{
           'ticket': ticketId,
           'step': ticket.steps,
           'engine': ticket.engine,
+          'inline_history': ticket.history.length,
+          'spill_refs': ticket.spillRefs.length,
         });
         await _persistTickets();
 
@@ -754,6 +805,13 @@ class SuperAgent {
           final bool recovered = await _watchdog(ticket, '重复输出');
           if (!recovered) break;
         }
+      }
+      // 阶段复盘检查点：长任务（≥2 步）收尾时自动做一次自检纠偏。
+      // 复盘失败只记录，不影响已完成的交付；判定目标偏离才触发 Watchdog。
+      if (autoReview &&
+          ticket.status == TicketStatus.running &&
+          ticket.steps >= 2) {
+        await _reviewTicket(ticket, automatic: true);
       }
     } finally {
       if (ticket.status == TicketStatus.running) {
@@ -773,6 +831,36 @@ class SuperAgent {
     }
   }
 
+  /// Inline/Spill 分级存储：活跃历史留在会话内（Inline），低频历史压成
+  /// 摘要并保留事件流引用（Spill）。摘要按条数截断，永远不会无限增长。
+  void _compactHistory(SuperTicket t) {
+    const int inlineLimit = 14;
+    const int spillThreshold = 18;
+    if (t.history.length <= spillThreshold) return;
+    final int spillCount = t.history.length - inlineLimit;
+    final List<String> spilled = t.history.sublist(0, spillCount);
+    t.history.removeRange(0, spillCount);
+    final StringBuffer buf = StringBuffer(t.contextSummary);
+    for (final String line in spilled) {
+      final String one = line.replaceAll('\n', ' ').trim();
+      buf.writeln('· ${one.length > 180 ? '${one.substring(0, 180)}…' : one}');
+    }
+    String summary = buf.toString();
+    if (summary.length > 4000) {
+      summary = summary.substring(summary.length - 4000);
+    }
+    t.contextSummary = summary;
+    _log('super.context.spill', <String, dynamic>{
+      'ticket': t.id,
+      'spilled': spilled.length,
+      'inline': t.history.length,
+    });
+    // 引用刚落盘的事件序号，供按线索链回溯原始上下文。
+    t.spillRefs.add(_seq);
+    t.watchdogNotes.add(
+        '上下文归档：${spilled.length} 条历史转入 Spill（ref #${t.spillRefs.last}）');
+  }
+
   String _workerPrompt(SuperTicket t, int step) {
     final StringBuffer b = StringBuffer();
     b.writeln('你是 Super Agent 的 Worker，处理一个隔离工单。');
@@ -780,11 +868,94 @@ class SuperAgent {
         '最多 ${t.mandate.maxSteps} 步，允许工具 ${t.mandate.allowedTools.join(",")}。');
     b.writeln('请针对目标给出本步真实的分析/处理结果；不要声称已完成未做的事。');
     b.writeln('--- 工单上下文（独立 session ${t.workerSession}）---');
-    for (final String line in t.history.take(12)) {
+    if (t.contextSummary.trim().isNotEmpty) {
+      final String s = t.contextSummary.trim();
+      b.writeln('【已归档历史摘要 · Spill refs '
+          '${t.spillRefs.isEmpty ? "-" : t.spillRefs.join(",")}】');
+      b.writeln(s.length > 1600 ? s.substring(s.length - 1600) : s);
+    }
+    for (final String line in t.history.skip(
+        t.history.length > 12 ? t.history.length - 12 : 0)) {
       b.writeln(line);
     }
     b.writeln('--- 第 ${step + 1} 步 ---');
     return b.toString();
+  }
+
+  /// 阶段复盘：读取目标与执行轨迹，检查是否偏离、是否遗漏约束、
+  /// 是否有更优路径。要求模型输出严格 JSON；解析失败如实标记 unstructured。
+  Future<Map<String, dynamic>> _reviewTicket(
+    SuperTicket t, {
+    bool automatic = false,
+  }) async {
+    final StringBuffer b = StringBuffer()
+      ..writeln('你是 Super Agent 的阶段复盘器，只输出一个 JSON 对象，不要解释。')
+      ..writeln('目标：${t.goal}')
+      ..writeln('授权范围：${t.mandate.scope}')
+      ..writeln('已执行 ${t.steps} 步，最近结果：${t.result}');
+    if (t.contextSummary.trim().isNotEmpty) {
+      b.writeln('历史摘要：${t.contextSummary.trim()}');
+    }
+    for (final String line in t.history.skip(
+        t.history.length > 8 ? t.history.length - 8 : 0)) {
+      b.writeln(line);
+    }
+    b.writeln('JSON 字段：goal_match(bool), drift(bool), constraint_violation(bool),'
+        ' errors(string[]), better_path(string), confidence(0-1)。');
+    Map<String, dynamic> r = <String, dynamic>{};
+    try {
+      r = await chat(<String, dynamic>{
+        'text': b.toString(),
+        'session_id': '${t.workerSession}-review',
+      });
+    } on Object catch (e) {
+      r = <String, dynamic>{'ok': false, 'error': '$e'};
+    }
+    final String engine = (r['engine'] ?? '').toString();
+    final String reply = (r['reply'] ?? r['error'] ?? '').toString();
+    Map<String, dynamic> parsed = <String, dynamic>{};
+    final RegExpMatch? m = RegExp(r'\{[\s\S]*\}').firstMatch(reply);
+    if (m != null) {
+      try {
+        final dynamic decoded = jsonDecode(m.group(0)!);
+        if (decoded is Map) {
+          parsed = decoded.map(
+              (dynamic k, dynamic v) => MapEntry(k.toString(), v));
+        }
+      } on Object {
+        parsed = <String, dynamic>{};
+      }
+    }
+    final bool structured = parsed.isNotEmpty;
+    final bool drift = parsed['drift'] == true ||
+        parsed['goal_match'] == false ||
+        parsed['constraint_violation'] == true;
+    final Map<String, dynamic> review = <String, dynamic>{
+      'ts': DateTime.now().toIso8601String(),
+      'automatic': automatic,
+      'engine': engine,
+      'structured': structured,
+      'verdict': structured ? (drift ? 'drift' : 'ok') : 'unstructured',
+      'detail': parsed,
+      'raw': reply.length > 1200 ? '${reply.substring(0, 1200)}…' : reply,
+      'step': t.steps,
+    };
+    t.reviews.add(review);
+    _log('super.ticket.review', <String, dynamic>{
+      'ticket': t.id,
+      'verdict': review['verdict'],
+      'automatic': automatic,
+    });
+    if (structured && drift && !t.replanned) {
+      await _watchdog(t, '阶段复盘判定目标偏离');
+    }
+    await _persistTickets();
+    return <String, dynamic>{
+      'ok': true,
+      'review': review,
+      'ticket_status': t.status.name,
+      'replanned': t.replanned,
+    };
   }
 
   /// Watchdog：判定 stalled，尝试一次 re-plan（真实追加跟进），否则如实失败。
@@ -807,11 +978,25 @@ class SuperAgent {
 
   Future<void> _drainQueue() async {
     if (_runningWorkers.length >= maxWorkers) return;
-    for (final SuperTicket t in _tickets.values) {
-      if (t.status == TicketStatus.queued && !_runningWorkers.contains(t.id)) {
-        unawaited(_runWorker(t.id));
-        if (_runningWorkers.length >= maxWorkers) break;
-      }
+    // 优先级协商：高优先级先跑；同优先级按创建时间先来先服务。
+    // 延后（notBefore 未到）的工单保持 queued，不占用 Worker。
+    final double now = DateTime.now().millisecondsSinceEpoch / 1000.0;
+    final List<SuperTicket> queued = _tickets.values
+        .where((SuperTicket t) =>
+            t.status == TicketStatus.queued && !_runningWorkers.contains(t.id))
+        .toList()
+      ..sort((SuperTicket a, SuperTicket b) {
+        final int byPriority = b.priority.compareTo(a.priority);
+        if (byPriority != 0) return byPriority;
+        return a.createdAt.compareTo(b.createdAt);
+      });
+    for (final SuperTicket t in queued) {
+      final double? notBefore = DateTime.tryParse(t.notBefore ?? '')
+          ?.millisecondsSinceEpoch
+          .toDouble();
+      if (notBefore != null && notBefore / 1000.0 > now) continue;
+      unawaited(_runWorker(t.id));
+      if (_runningWorkers.length >= maxWorkers) break;
     }
   }
 
@@ -829,6 +1014,13 @@ class SuperAgent {
           'observe': observe,
           'running_workers': _runningWorkers.length,
           'max_workers': maxWorkers,
+          'queued': _tickets.values
+              .where((SuperTicket t) => t.status == TicketStatus.queued)
+              .length,
+          'paused': _tickets.values
+              .where((SuperTicket t) => t.status == TicketStatus.paused)
+              .length,
+          'auto_review': autoReview,
           'tickets': _tickets.length,
           'triggers': _triggers.length,
           'decisions': _decisions.length,
@@ -841,6 +1033,9 @@ class SuperAgent {
             'filter': '两级：程序规则 + 真实推理判断（缺模型如实降级）',
             'ticket': 'Mandate 不可扩张 + Subscription 按 thread 回原工单',
             'watchdog': '检测重复/超时/无进展，re-plan 一次后如实失败',
+            'context': 'Inline/Spill 分级：活跃留在会话，低频归档为摘要 + 事件引用',
+            'review': '长任务收尾阶段复盘，结构化判定偏离并触发纠偏',
+            'priority': '工单优先级 0-9 可协商，队列按优先级 + 先来先服务调度',
             'storage': '存算分离：执行在内存，状态落 HarnessStore，可恢复',
           },
         };
@@ -914,11 +1109,19 @@ class SuperAgent {
         final Map<String, dynamic>? mandate = p['mandate'] is Map
             ? Map<String, dynamic>.from(p['mandate'] as Map)
             : null;
+        final int priority = p['priority'] is num
+            ? (p['priority'] as num).toInt()
+            : 5;
+        final String? notBefore = (p['not_before'] ?? '').toString().trim().isEmpty
+            ? null
+            : (p['not_before']).toString();
         final SuperTicket directTicket = await _createTicketDirect(
           goal: goal,
           source: source.isEmpty ? 'manual' : source,
           thread: thread,
           mandate: mandate,
+          priority: priority,
+          notBefore: notBefore,
         );
         await _drainQueue();
         return <String, dynamic>{
@@ -1044,20 +1247,225 @@ class SuperAgent {
         if (p['rules'] is Map) {
           _rules = Map<String, dynamic>.from(p['rules'] as Map);
         }
+        if (p.containsKey('auto_review')) {
+          autoReview = p['auto_review'] == true;
+        }
         await _persistConfig();
         _log('super.config', <String, dynamic>{
           'max_workers': maxWorkers,
           'max_steps': defaultMaxSteps,
+          'auto_review': autoReview,
         });
         return <String, dynamic>{
           'ok': true,
           'observe': observe,
           'max_workers': maxWorkers,
           'default_max_steps': defaultMaxSteps,
+          'auto_review': autoReview,
           'rules': _rules,
         };
       case 'rules':
         return <String, dynamic>{'ok': true, 'rules': _rules};
+      case 'queue': {
+        // 队列协商视图：真实排队顺序、并发占用与影响预估。
+        // 顺带触发一次调度，让延后到点的工单无需等新事件即可开始。
+        await _drainQueue();
+        final List<SuperTicket> queued = _tickets.values
+            .where((SuperTicket t) => t.status == TicketStatus.queued)
+            .toList()
+          ..sort((SuperTicket a, SuperTicket b) {
+            final int byPriority = b.priority.compareTo(a.priority);
+            return byPriority != 0
+                ? byPriority
+                : a.createdAt.compareTo(b.createdAt);
+          });
+        return <String, dynamic>{
+          'ok': true,
+          'running': _runningWorkers.toList(),
+          'capacity': maxWorkers,
+          'queued': queued.asMap().entries.map((MapEntry<int, SuperTicket> e) {
+            final double? nb =
+                DateTime.tryParse(e.value.notBefore ?? '')?.millisecondsSinceEpoch
+                    .toDouble();
+            return <String, dynamic>{
+              'id': e.value.id,
+              'goal': e.value.goal,
+              'priority': e.value.priority,
+              'position': e.key + 1,
+              'not_before': e.value.notBefore,
+              'eligible': nb == null ||
+                  nb / 1000.0 <=
+                      DateTime.now().millisecondsSinceEpoch / 1000.0,
+            };
+          }).toList(),
+        };
+      }
+      case 'set_priority': {
+        final SuperTicket? t = _tickets[(p['id'] ?? '').toString()];
+        if (t == null) {
+          return <String, dynamic>{'ok': false, 'error': '工单不存在'};
+        }
+        if (p['priority'] is! num) {
+          return <String, dynamic>{'ok': false, 'error': 'priority 必须为 0-9 的数字'};
+        }
+        final int before = t.priority;
+        t.priority = (p['priority'] as num).toInt().clamp(0, 9);
+        t.updatedAt = DateTime.now().toIso8601String();
+        await _persistTickets();
+        _log('super.ticket.priority', <String, dynamic>{
+          'ticket': t.id,
+          'before': before,
+          'after': t.priority,
+        });
+        // 影响预估：排在该工单前面（更高优先级）的数量 + 当前并发占用。
+        int ahead = 0;
+        for (final SuperTicket other in _tickets.values) {
+          if (other.id == t.id || other.status != TicketStatus.queued) continue;
+          if (other.priority > t.priority ||
+              (other.priority == t.priority &&
+                  other.createdAt.compareTo(t.createdAt) < 0)) {
+            ahead += 1;
+          }
+        }
+        final String impact = t.status == TicketStatus.running
+            ? '运行中的工单不改步数，仅影响后续调度'
+            : (ahead + _runningWorkers.length >= maxWorkers
+                ? '需等待前面 ${ahead} 个工单完成，当前并发 ${_runningWorkers.length}/$maxWorkers'
+                : '预计下一轮调度即可开始（前方 $ahead 个，并发 '
+                    '${_runningWorkers.length}/$maxWorkers）');
+        await _drainQueue();
+        return <String, dynamic>{
+          'ok': true,
+          'id': t.id,
+          'priority': t.priority,
+          'queue_position': ahead + 1,
+          'impact': impact,
+          'ticket': t.toJson(),
+        };
+      }
+      case 'pause': {
+        final SuperTicket? t = _tickets[(p['id'] ?? '').toString()];
+        if (t == null) {
+          return <String, dynamic>{'ok': false, 'error': '工单不存在'};
+        }
+        if (t.status == TicketStatus.done ||
+            t.status == TicketStatus.failed ||
+            t.status == TicketStatus.stopped) {
+          return <String, dynamic>{
+            'ok': false,
+            'error': '已结束工单不可暂停（${t.status.name}）',
+          };
+        }
+        t.status = TicketStatus.paused;
+        t.updatedAt = DateTime.now().toIso8601String();
+        t.history.add('[人工暂停] 工单暂停，可在任意时间恢复');
+        await _persistTickets();
+        _log('super.ticket.pause', <String, dynamic>{'ticket': t.id});
+        return <String, dynamic>{'ok': true, 'id': t.id, 'status': t.status.name};
+      }
+      case 'resume': {
+        final SuperTicket? t = _tickets[(p['id'] ?? '').toString()];
+        if (t == null) {
+          return <String, dynamic>{'ok': false, 'error': '工单不存在'};
+        }
+        if (t.status != TicketStatus.paused &&
+            t.status != TicketStatus.stalled &&
+            !(t.status == TicketStatus.queued && t.notBefore != null)) {
+          return <String, dynamic>{
+            'ok': false,
+            'error': '仅 paused/stalled 或已延后的 queued 工单可恢复，当前 ${t.status.name}',
+          };
+        }
+        t.status = TicketStatus.queued;
+        t.notBefore = null;
+        t.replanned = false;
+        t.updatedAt = DateTime.now().toIso8601String();
+        t.history.add('[人工恢复] 重新入队');
+        await _persistTickets();
+        _log('super.ticket.resume', <String, dynamic>{'ticket': t.id});
+        await _drainQueue();
+        return <String, dynamic>{'ok': true, 'id': t.id, 'status': t.status.name};
+      }
+      case 'defer': {
+        final SuperTicket? t = _tickets[(p['id'] ?? '').toString()];
+        if (t == null) {
+          return <String, dynamic>{'ok': false, 'error': '工单不存在'};
+        }
+        if (t.status != TicketStatus.queued &&
+            t.status != TicketStatus.paused &&
+            t.status != TicketStatus.stalled) {
+          return <String, dynamic>{
+            'ok': false,
+            'error': '仅 queued/paused/stalled 工单可延后，运行中请先暂停',
+          };
+        }
+        final int seconds =
+            (p['seconds'] is num) ? (p['seconds'] as num).toInt().clamp(0, 604800) : 3600;
+        final DateTime at =
+            DateTime.now().add(Duration(seconds: seconds));
+        t.status = TicketStatus.queued;
+        t.notBefore = at.toIso8601String();
+        t.updatedAt = DateTime.now().toIso8601String();
+        t.history.add('[人工延后] $seconds 秒后（$at）再调度');
+        await _persistTickets();
+        _log('super.ticket.defer', <String, dynamic>{
+          'ticket': t.id,
+          'seconds': seconds,
+        });
+        return <String, dynamic>{
+          'ok': true,
+          'id': t.id,
+          'not_before': t.notBefore,
+          'status': t.status.name,
+        };
+      }
+      case 'context': {
+        final String id = (p['id'] ?? '').toString();
+        if (id.isNotEmpty) {
+          final SuperTicket? t = _tickets[id];
+          if (t == null) {
+            return <String, dynamic>{'ok': false, 'error': '工单不存在'};
+          }
+          return <String, dynamic>{
+            'ok': true,
+            'ticket': id,
+            'inline': t.history.length,
+            'summary_chars': t.contextSummary.length,
+            'spill_refs': t.spillRefs,
+            'summary': t.contextSummary,
+          };
+        }
+        int inline = 0;
+        int spill = 0;
+        for (final SuperTicket t in _tickets.values) {
+          inline += t.history.length;
+          spill += t.spillRefs.length;
+        }
+        return <String, dynamic>{
+          'ok': true,
+          'inline_total': inline,
+          'spill_total': spill,
+          'tickets': _tickets.length,
+        };
+      }
+      case 'review': {
+        final SuperTicket? t = _tickets[(p['id'] ?? '').toString()];
+        if (t == null) {
+          return <String, dynamic>{'ok': false, 'error': '工单不存在'};
+        }
+        return await _reviewTicket(t);
+      }
+      case 'reviews':
+        return <String, dynamic>{
+          'ok': true,
+          'reviews': _tickets.values
+              .expand((SuperTicket t) => t.reviews.map(
+                  (Map<String, dynamic> r) => <String, dynamic>{'ticket': t.id, ...r}))
+              .toList()
+              .reversed
+              .take(100)
+              .toList(),
+        };
       case 'watchdog':
         return await _scanWatchdog();
       case 'stop':
@@ -1131,13 +1539,14 @@ class SuperAgent {
       goal: goal,
       source: parent.source,
       thread: parent.thread,
+      parentId: parentId,
+      priority: parent.priority,
       mandate: Mandate(
         scope: '${parent.mandate.scope} / subagent（沿用不扩张）',
         maxSteps: parent.mandate.maxSteps > 1 ? parent.mandate.maxSteps - 1 : 1,
         deadlineSeconds: parent.mandate.deadlineSeconds,
         allowedTools: parent.mandate.allowedTools,
       ),
-      parentId: parentId,
     );
     child.workerSession = 'worker-$id';
     child.workDir = 'sandbox/super_agent/$id';

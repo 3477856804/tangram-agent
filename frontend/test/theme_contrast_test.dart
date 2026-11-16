@@ -4,6 +4,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:tangram/design/dsh_tokens.dart';
 import 'package:tangram/design/tga_design.dart';
 import 'package:tangram/flai/core/theme/tangram_palette.dart';
 
@@ -64,6 +65,23 @@ void main() {
     });
     test('浅色 textSub on card', () {
       expect(contrast(TgaTokens.light.textSub, TgaTokens.light.card),
+          greaterThanOrEqualTo(4.5));
+    });
+  });
+
+  group('对话输入/输出区前景：深色纯白、浅色纯黑', () {
+    test('浅色 chatText 为纯黑且对比度达标', () {
+      expect(DshPalette.light.chatText, const Color(0xFF000000));
+      expect(contrast(DshPalette.light.chatText, DshPalette.light.bgModule),
+          greaterThanOrEqualTo(4.5));
+      expect(contrast(DshPalette.light.chatText, DshPalette.light.inputMajor),
+          greaterThanOrEqualTo(4.5));
+    });
+    test('深色 chatText 为纯白且对比度达标', () {
+      expect(DshPalette.dark.chatText, const Color(0xFFFFFFFF));
+      expect(contrast(DshPalette.dark.chatText, DshPalette.dark.bgModule),
+          greaterThanOrEqualTo(4.5));
+      expect(contrast(DshPalette.dark.chatText, DshPalette.dark.bubble),
           greaterThanOrEqualTo(4.5));
     });
   });

@@ -71,6 +71,11 @@ class _ChatLayout extends StatelessWidget {
     final isUser = message.isUser;
 
     final isError = message.status == MessageStatus.error;
+    // 需求：深色模式输出区文字纯白、浅色模式纯黑。
+    // 统一取当前主题亮度，用户气泡与 AI 正文共用同一前景色。
+    final Color chatFg = Theme.of(context).brightness == Brightness.dark
+        ? Colors.white
+        : Colors.black;
 
     return Semantics(
       label: isError ? 'error_message_bubble' : null,
@@ -138,14 +143,8 @@ class _ChatLayout extends StatelessWidget {
                         _MessageContent(
                           content: message.content,
                           isStreaming: message.isStreaming,
-                          style: theme.typography.bodyBase(
-                            color: isUser
-                                ? theme.colors.userBubbleForeground
-                                : theme.colors.assistantBubbleForeground,
-                          ),
-                          cursorColor: isUser
-                              ? theme.colors.userBubbleForeground
-                              : theme.colors.assistantBubbleForeground,
+                          style: theme.typography.bodyBase(color: chatFg),
+                          cursorColor: chatFg,
                         ),
 
                         if (message.hasCitations) ...[

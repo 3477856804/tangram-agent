@@ -458,7 +458,9 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
                 textInputAction: TextInputAction.send,
                 cursorColor: c.business,
                 cursorWidth: 1.5,
-                style: DshType.s14.copyWith(color: c.labelPrimary),
+                // 需求：深色模式输入文字纯白、浅色模式纯黑。
+                // 使用专用对话前景令牌，不随次要文字色阶变化。
+                style: DshType.s14.copyWith(color: c.chatText),
                 decoration: InputDecoration(
                   isDense: true,
                   hintText: widget.isRecording

@@ -342,8 +342,10 @@ class ModelRegistry extends ChangeNotifier {
   ///   * 云端 → api_base / api_key / model，后端据此发起真实 HTTP 推理。
   ///   * 本地权重 → 带上真实权重路径与来源标记，后端如实记录，不冒充推理。
   ///   * 内置引擎 → 不带任何外部参数，走内置 AgentLoop。
-  Map<String, dynamic> chatParams() {
-    final e = selected;
+  Map<String, dynamic> chatParams() => paramsOf(selected);
+
+  /// 指定模型的真实聊天参数（多模型群聊按每个成员分别调用）。
+  Map<String, dynamic> paramsOf(ModelEntry e) {
     if (e.free) {
       return <String, dynamic>{
         'api_base': e.apiBase ?? '',

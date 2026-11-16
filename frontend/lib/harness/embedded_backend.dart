@@ -40,10 +40,12 @@ import 'package:http/http.dart' as http;
 
 import 'package:tangram/agent/sandbox/sandboxed_shell.dart';
 import 'package:tangram/app_version.dart';
+import 'package:tangram/harness/app_package.dart';
 import 'package:tangram/harness/builtin_plugins.dart';
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/downloader.dart';
 import 'package:tangram/harness/im_service.dart';
+import 'package:tangram/harness/knowledge_base.dart';
 import 'package:tangram/harness/local_inference.dart';
 import 'package:tangram/harness/mcp_client.dart';
 import 'package:tangram/harness/model3d.dart';
@@ -51,8 +53,11 @@ import 'package:tangram/harness/plugin_kernel.dart';
 import 'package:tangram/harness/prompt_kit.dart';
 import 'package:tangram/harness/proot_sandbox.dart';
 import 'package:tangram/harness/qq_sandbox.dart';
+import 'package:tangram/harness/snapshot_service.dart';
 import 'package:tangram/harness/store.dart';
 import 'package:tangram/harness/super_agent.dart';
+import 'package:tangram/harness/team_space.dart';
+import 'package:tangram/harness/workflow.dart';
 import 'package:tangram/services/model_registry.dart' show kBuiltinFreeModels;
 import 'package:tangram/services/ssh_sandbox.dart';
 import 'package:tangram/services/update_service.dart';
@@ -84,6 +89,28 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// 真实 IM 网关服务（配置落盘、连接状态可查、可热更新）。
   late final ImService im;
+
+  /// 私有知识库：多库隔离、本地 BM25 检索、引用溯源、版本快照。
+  late final KnowledgeBase knowledge = KnowledgeBase(store);
+
+  /// 可视化工作流 / 批量自动化：步骤真实调用对话、shell 与知识库。
+  late final WorkflowEngine workflows = WorkflowEngine(
+    store,
+    chat: _chat,
+    shell: (String command, String cwd) =>
+        _shellExec(<String, dynamic>{'command': command, 'cwd': cwd}),
+    knowledge: (String query) => knowledge.contextBlock(query),
+  );
+
+  /// 本地快照 / 备份 / 恢复（真实文件副本 + SHA256 校验）。
+  late final SnapshotService snapshots = SnapshotService(store);
+
+  /// Agent 应用市场：行业工作站模板安装 / 导入 / 导出。
+  late final AppPackageService appPackages =
+      AppPackageService(store, workflows, knowledge);
+
+  /// 团队协作沙箱：本机协作空间 + 角色权限 + 审计日志。
+  late final TeamSpaceService team = TeamSpaceService(store);
 
   // ---- 万物皆插件内核 + Super Agent（懒装配，绑定真实能力）----
   PluginKernel? _kernel;
@@ -127,7 +154,8 @@ class EmbeddedBackend implements QqShellRunner {
     'model_route', 'model_store', 'distill', 'device_file', 'memory_event',
     'proactive_task', 'security_approval', 'plugin_lifecycle',
     'plugin_community', 'plugin_kernel', 'super_agent', 'im_event',
-    'responsibility_trace', 'update_status',
+    'knowledge_base', 'workflow', 'snapshot', 'model_group', 'app_market',
+    'team_space', 'responsibility_trace', 'update_status',
     'dependency_event', 'perception_event', 'reload', 'status', 'ping', 'echo',
   ];
 
@@ -286,6 +314,13 @@ class EmbeddedBackend implements QqShellRunner {
         'plugin_community' => await _pluginCommunity(payload),
         'plugin_kernel' => await _onPluginKernel(payload),
         'super_agent' => await _onSuperAgent(payload),
+        'knowledge_base' => await knowledge.handle(
+            _action(payload, 'list'), payload),
+        'workflow' => await workflows.handle(_action(payload, 'list'), payload),
+        'snapshot' => await snapshots.handle(_action(payload, 'list'), payload),
+        'model_group' => await _modelGroup(payload),
+        'app_market' => await appPackages.handle(_action(payload, 'list'), payload),
+        'team_space' => await team.handle(_action(payload, 'list'), payload),
         'im_event' => await im.handle(_action(payload), payload),
         'responsibility_trace' => await _responsibilityTrace(),
         'update_status' => await _updateStatus(),
@@ -343,6 +378,32 @@ class EmbeddedBackend implements QqShellRunner {
           'architecture': 'router-worker + triggers + two-stage-filter + watchdog',
           'initialized': _superAgent?.initialized ?? false,
           'observe_default': true,
+        },
+        'knowledge_base': <String, dynamic>{
+          'architecture': 'multi-library + local-bm25 + citation + snapshot',
+          'storage': 'app-private-json',
+          'cloud_upload': false,
+        },
+        'workflow': <String, dynamic>{
+          'architecture': 'sequential prompt/shell/knowledge steps + batch + daily trigger',
+          'storage': 'app-private-json',
+        },
+        'snapshot': <String, dynamic>{
+          'architecture': 'local file copies + sha256 manifest + auto pre-restore backup',
+          'cloud_enabled': false,
+        },
+        'model_group': <String, dynamic>{
+          'architecture': 'parallel members + cross-compare + moderator synthesis',
+          'max_members': 6,
+          'key_isolation': true,
+        },
+        'app_market': <String, dynamic>{
+          'architecture': 'persona + workflows + knowledge + permission preset bundle',
+          'payment_enabled': false,
+        },
+        'team_space': <String, dynamic>{
+          'architecture': 'local shared dir + roles + append-only audit log',
+          'cross_device_sync': false,
         },
       };
 
@@ -700,6 +761,16 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     // 跨会话持久记忆：turns 表真实落盘，按最近性 + 词项相关度注入，
     // 新会话也能召回长期事实；按会话边界与当轮历史去重。
     effectiveSystem += await _persistentMemoryBlock(text, session, history);
+    // 私有知识库：仅注入真实命中的片段，并要求模型标注来源；无命中不注入。
+    try {
+      final String kbBlock = await knowledge.contextBlock(
+        text,
+        personaId: (p['persona_id'] ?? '').toString(),
+      );
+      if (kbBlock.isNotEmpty) effectiveSystem += '\n\n$kbBlock';
+    } on Object {
+      // 知识库文件损坏/不可读时不影响本轮对话，也不编造引用。
+    }
 
     String reply;
     String engine;
@@ -1116,6 +1187,147 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     if (v is num) return v.toInt();
     if (v is String) return int.tryParse(v) ?? fallback;
     return fallback;
+  }
+
+  // ---- 多模型群聊：并发提问 + 交叉比对 + 主持人裁决 ----
+
+  Future<Map<String, dynamic>> _modelGroup(Map<String, dynamic> p) async {
+    final String prompt = (p['text'] ?? p['prompt'] ?? '').toString().trim();
+    if (prompt.isEmpty) return _err('群聊问题为空');
+    final dynamic raw = p['models'];
+    if (raw is! List || raw.isEmpty) {
+      return _err('至少选择一个模型；每个成员需包含 name 与参数');
+    }
+    if (raw.length > 6) return _err('单次最多 6 个模型，避免并发过载');
+    final List<Map<String, dynamic>> members = raw
+        .whereType<Map>()
+        .map((Map e) => Map<String, dynamic>.from(e))
+        .toList();
+    final String groupSystem = '你是多模型群聊中的一员。独立回答用户问题，'
+        '先给结论再给依据；不确定的内容明确标注，不要编造事实。';
+    final List<Map<String, dynamic>> replies = await Future.wait(
+      members.map((Map<String, dynamic> m) async {
+        final String name = (m['name'] ?? '模型').toString();
+        final int t0 = DateTime.now().millisecondsSinceEpoch;
+        try {
+          final String apiBase = (m['api_base'] ?? '').toString();
+          final String apiKey = (m['api_key'] ?? '').toString();
+          final String model = (m['model'] ?? '').toString();
+          final bool free = m['free'] == true;
+          if (apiBase.isNotEmpty &&
+              model.isNotEmpty &&
+              (apiKey.isNotEmpty || free)) {
+            final r = await _remoteChat(
+              apiBase: apiBase,
+              apiKey: apiKey,
+              model: model,
+              text: prompt,
+              system: groupSystem,
+              temperature: 0.7,
+              maxTokens: 1024,
+              topP: 0.9,
+            );
+            return <String, dynamic>{
+              'name': name,
+              'ok': r.ok,
+              'reply': r.content,
+              'engine': 'remote-http',
+              'error': r.error,
+              'ms': DateTime.now().millisecondsSinceEpoch - t0,
+            };
+          }
+          final Map<String, dynamic> local = await _chat(<String, dynamic>{
+            'text': prompt,
+            'system': groupSystem,
+            'session_id': 'model-group',
+            'model_kind': (m['model_kind'] ?? 'builtin').toString(),
+            if ((m['local_model_path'] ?? '').toString().isNotEmpty)
+              'local_model_path': m['local_model_path'],
+          });
+          return <String, dynamic>{
+            'name': name,
+            'ok': local['ok'] != false,
+            'reply': (local['reply'] ?? local['error'] ?? '').toString(),
+            'engine': (local['engine'] ?? '').toString(),
+            'error': local['ok'] == false ? (local['error'] ?? '') : '',
+            'ms': DateTime.now().millisecondsSinceEpoch - t0,
+          };
+        } on Object catch (e) {
+          return <String, dynamic>{
+            'name': name,
+            'ok': false,
+            'reply': '',
+            'engine': '',
+            'error': '$e',
+            'ms': DateTime.now().millisecondsSinceEpoch - t0,
+          };
+        }
+      }),
+    );
+    final List<Map<String, dynamic>> good = replies
+        .where((Map<String, dynamic> r) =>
+            r['ok'] == true && (r['reply'] ?? '').toString().trim().isNotEmpty)
+        .toList();
+    if (good.isEmpty) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '所有模型均未能返回内容（详见 replies）',
+        'replies': replies,
+      };
+    }
+    final StringBuffer compare = StringBuffer()
+      ..writeln('用户问题：$prompt')
+      ..writeln('以下是 ${good.length} 个模型的独立回答：');
+    for (int i = 0; i < good.length; i++) {
+      final String reply = good[i]['reply'].toString();
+      compare.writeln('【${i + 1}. ${good[i]['name']}】');
+      compare.writeln(reply.length > 3000 ? '${reply.substring(0, 3000)}…' : reply);
+    }
+    compare.writeln('请作为主持人：先列出一致结论，再指出分歧与各自依据，'
+        '最后给出你的裁决与仍不确定的部分；不要编造任何模型没说过的内容。');
+
+    String synthesis = '';
+    String synthEngine = '';
+    final dynamic agg = p['aggregator'];
+    try {
+      if (agg is Map &&
+          (agg['api_base'] ?? '').toString().isNotEmpty &&
+          (agg['model'] ?? '').toString().isNotEmpty) {
+        final r = await _remoteChat(
+          apiBase: agg['api_base'].toString(),
+          apiKey: (agg['api_key'] ?? '').toString(),
+          model: agg['model'].toString(),
+          text: compare.toString(),
+          system: '你是冷静、严谨的多模型讨论主持人。',
+          temperature: 0.3,
+          maxTokens: 1200,
+          topP: 0.9,
+        );
+        synthesis = r.content;
+        synthEngine = 'remote-http';
+        if (!r.ok) synthesis = '主持模型失败：${r.error}';
+      } else {
+        final Map<String, dynamic> r = await _chat(<String, dynamic>{
+          'text': compare.toString(),
+          'session_id': 'model-group-synthesis',
+        });
+        synthesis = (r['reply'] ?? r['error'] ?? '').toString();
+        synthEngine = (r['engine'] ?? '').toString();
+      }
+    } on Object catch (e) {
+      synthesis = '汇总失败：$e';
+    }
+    _emit('model_group_result', <String, dynamic>{
+      'models': replies.length,
+      'succeeded': good.length,
+    });
+    return <String, dynamic>{
+      'ok': true,
+      'replies': replies,
+      'succeeded': good.length,
+      'synthesis': synthesis,
+      'synthesis_engine': synthEngine,
+    };
   }
 
   /// 云端 OpenAI 兼容推理：默认走 SSE 真流式，首字延迟从「整段生成完」

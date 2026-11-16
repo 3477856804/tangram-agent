@@ -307,6 +307,7 @@ def test_ws_frame_requires_mask_and_size_limit():
 # 5. torch 权重文件反序列化
 # --------------------------------------------------------------------------
 def test_adapter_loader_never_uses_unsafe_pickle(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
     import torch
     from training.pipeline import load_adapter
 
