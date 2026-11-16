@@ -203,12 +203,19 @@ class ProotSandbox {
         throw StateError('chmod 失败：$chmod');
       }
 
+      // JS 运行时预装：QQ 沙箱直连走腾讯官方 dsh-qqbot（npx dsh），
+      // 依赖 node/npm。在 Alpine 初始化阶段用 apk 真实预装，使「扫码登录
+      // 后直接出码」链路成立。apk 从 Alpine 官方源拉取，失败如实记录到
+      // READY.json 的 js 字段，由 ensureJs() 在扫码前再幂等补装，绝不伪造。
+      final Map<String, dynamic> js = await provisionJs();
+
       await readyFile.writeAsString(jsonEncode(<String, dynamic>{
         'installed_at': DateTime.now().toIso8601String(),
         'rootfs': 'alpine-minirootfs-3.20.3-aarch64',
         'proot_bytes': kProotBytes,
         'talloc_bytes': kTallocBytes,
         'rootfs_bytes': kRootfsBytes,
+        'js': js,
       }), flush: true);
       _step = 'ready';
     } on Object catch (e) {
@@ -314,8 +321,13 @@ class ProotSandbox {
 
   /// 已安装则用 proot 用户态真实执行；未安装返回 null（调用方回退
   /// toybox 真实 shell）。exec 被 ROM 拒绝时如实报错并给出原因与出路。
-  Future<Map<String, dynamic>?> run(String raw, String cwd) async {
-    if (!installed) return null;
+  Future<Map<String, dynamic>?> run(
+    String raw,
+    String cwd, {
+    bool requireInstalled = true,
+    Duration timeout = const Duration(seconds: 60),
+  }) async {
+    if (requireInstalled && !installed) return null;
     final String guestCwd = cwd == '.'
         ? '/root'
         : (cwd.startsWith('/') ? cwd : '/root/$cwd');
@@ -383,7 +395,7 @@ class ProotSandbox {
     final Future<String> errF = proc.stderr.transform(utf8.decoder).join();
     int exitCode = 124;
     try {
-      exitCode = await proc.exitCode.timeout(const Duration(seconds: 60));
+      exitCode = await proc.exitCode.timeout(timeout);
     } on TimeoutException {
       proc.kill(ProcessSignal.sigkill);
     }
@@ -419,6 +431,74 @@ class ProotSandbox {
   }
 
   static String _shellQuote(String s) => "'${s.replaceAll("'", r"'\''")}'";
+
+  // ---- JS 运行时（nodejs/npm）：QQ 沙箱直连 dsh-qqbot 的真实前置依赖 ----
+
+  /// 在 Alpine 用户态里真实执行 `apk add nodejs npm`，返回结构化结果。
+  /// 安装阶段调用（此时 READY 未落盘，故 requireInstalled=false）；
+  /// 失败如实返回 ok:false + error，绝不伪造成功。
+  Future<Map<String, dynamic>> provisionJs() async {
+    // apk 需要 DNS/源可达，安装阶段 resolv.conf 已写好；给足超时。
+    final Map<String, dynamic>? r = await run(
+      'if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then '
+      'echo "already: \$(node --version) / \$(npm --version)"; exit 0; fi; '
+      'apk add --no-cache nodejs npm 2>&1; '
+      'if command -v node >/dev/null 2>&1; then echo "js-ready: \$(node --version)"; '
+      'else echo "js-missing"; exit 1; fi',
+      '.',
+      requireInstalled: false,
+      timeout: const Duration(seconds: 300),
+    );
+    if (r == null) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': 'proot 用户态无法启动，JS 运行时未安装',
+      };
+    }
+    final String out = (r['stdout'] ?? '').toString();
+    final bool ok = r['ok'] == true &&
+        out.contains('js-ready:') &&
+        !out.contains('js-missing');
+    return <String, dynamic>{
+      'ok': ok,
+      'detail': out.trim(),
+      if (!ok) 'error': out.trim().isEmpty ? (r['error'] ?? '未知错误') : out.trim(),
+    };
+  }
+
+  /// 幂等确保 node/npm 可用：查询 READY.json 的安装结果，缺失则补装。
+  /// 供 QQ 扫码 start() 在启动 dsh 前调用；返回真实状态。
+  Future<Map<String, dynamic>> ensureJs() async {
+    if (!installed) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': 'Linux 沙箱尚未就绪，无法准备 JS 运行时',
+      };
+    }
+    // 先真实探测一次，避免重复 apk add。
+    final Map<String, dynamic>? probe = await run('command -v node && node --version', '.');
+    if (probe != null && probe['ok'] == true &&
+        (probe['stdout'] ?? '').toString().trim().isNotEmpty) {
+      return <String, dynamic>{
+        'ok': true,
+        'node': (probe['stdout'] ?? '').toString().trim(),
+        'note': 'JS 运行时已在沙箱中就绪',
+      };
+    }
+    final Map<String, dynamic> r = await provisionJs();
+    if (r['ok'] == true) {
+      return <String, dynamic>{
+        'ok': true,
+        'note': 'JS 运行时已补装完成',
+        'node': r['detail'],
+      };
+    }
+    return <String, dynamic>{
+      'ok': false,
+      'error': 'JS 运行时安装失败：${r['error'] ?? '未知错误'}。'
+          '本应用不会伪造二维码或假装已连接。',
+    };
+  }
 
   // ---- 纯 Dart tar(ustar/GNU/PAX) 解包 ----
 

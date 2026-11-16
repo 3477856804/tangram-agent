@@ -14,6 +14,7 @@
 /// real-shell 与 isolate-cube 两个真实 provider，切换 active 后 invoke('exec')
 /// 真的走两条不同的执行链；core/model 的 auto 与 builtin-loop 亦然。
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:tangram/harness/core.dart';
@@ -465,13 +466,76 @@ class BuiltinPlugins {
         requires: const <String>['core/storage'],
         consumers: const <String>['shell', 'terminal', 'code-task', 'super-agent'],
         build: (PluginContext ctx) {
+          // 沙箱参数可自定义且真实生效：env 注入命令（转义防注入），
+          // timeout_ms > 0 时 Future.timeout 真实终止等待并如实报错。
+          // 两个 provider 共用同一份参数，切换 provider 后配置仍在。
+          final Map<String, dynamic> sandboxParams = <String, dynamic>{
+            'env': <String, String>{},
+            'timeout_ms': 0,
+          };
+          Map<String, String> currentEnv() {
+            final Object? raw = sandboxParams['env'];
+            if (raw is! Map) return <String, String>{};
+            return raw.map((dynamic k, dynamic v) =>
+                MapEntry<String, String>(k.toString(), v.toString()));
+          }
+          String shellEnvPrefix() {
+            final StringBuffer buf = StringBuffer();
+            currentEnv().forEach((String k, String v) {
+              if (!RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(k)) return;
+              final String safe = v.replaceAll(r"'", r"'\''");
+              buf.write("export $k='$safe'; ");
+            });
+            return buf.toString();
+          }
+          Future<Map<String, dynamic>> withTimeout(
+              Future<Map<String, dynamic>> Function() work) async {
+            final Object? raw = sandboxParams['timeout_ms'];
+            final int ms = raw is num ? raw.toInt() : 0;
+            if (ms <= 0) return work();
+            try {
+              return await work().timeout(Duration(milliseconds: ms));
+            } on TimeoutException {
+              return <String, dynamic>{
+                'ok': false,
+                'error': '沙箱执行超时（$ms ms），如实终止等待',
+                'timeout_ms': ms,
+              };
+            }
+          }
+          Map<String, dynamic> configureSandbox(Map<String, dynamic> args) {
+            if (args['env'] is Map) {
+              sandboxParams['env'] =
+                  Map<String, dynamic>.from(args['env'] as Map);
+            }
+            if (args['timeout_ms'] is num) {
+              final int ms = (args['timeout_ms'] as num).toInt();
+              if (ms < 0) {
+                return <String, dynamic>{'ok': false, 'error': 'timeout_ms 不能为负'};
+              }
+              sandboxParams['timeout_ms'] = ms;
+            }
+            return <String, dynamic>{
+              'ok': true,
+              'params': Map<String, dynamic>.from(sandboxParams),
+            };
+          }
+          Map<String, dynamic> sandboxConfig() => <String, dynamic>{
+                'ok': true,
+                'params': Map<String, dynamic>.from(sandboxParams),
+              };
+
           ctx.provideSeamProvider('core/sandbox', 'real-shell',
               '系统 bash/sh（含 SSH/proot/内置解释器兜底，全部真实）',
               (String method, Map<String, dynamic> args) async {
+            if (method == 'configure') return configureSandbox(args);
+            if (method == 'config') return sandboxConfig();
             if (method == 'exec') {
-              final Map<String, dynamic> r = await host.shell(
-                  (args['command'] ?? '').toString(),
-                  (args['cwd'] ?? '.').toString());
+              final String prefix = shellEnvPrefix();
+              final String command = (args['command'] ?? '').toString();
+              final String effective = prefix.isEmpty ? command : prefix + command;
+              final Map<String, dynamic> r = await withTimeout(
+                  () => host.shell(effective, (args['cwd'] ?? '.').toString()));
               ctx.kernel.emit('sandbox.exec', 'core.sandbox',
                   <String, dynamic>{'provider': 'real-shell', 'ok': r['ok'] == true});
               return r;
@@ -479,6 +543,7 @@ class BuiltinPlugins {
             if (method == 'describe') {
               return <String, dynamic>{
                 'ok': true,
+                'params': Map<String, dynamic>.from(sandboxParams),
                 'environment': await host.sandboxEnvironment(),
                 'chain': 'bash/sh → SSH → proot → 内置解释器（如实降级）',
               };
@@ -488,12 +553,16 @@ class BuiltinPlugins {
           ctx.provideSeamProvider('core/sandbox', 'isolate-cube',
               '受限 Isolate + cube 能力契约（缺失能力即 REFUSE，5s 看门狗）',
               (String method, Map<String, dynamic> args) async {
+            if (method == 'configure') return configureSandbox(args);
+            if (method == 'config') return sandboxConfig();
             if (method == 'exec') {
-              final Map<String, dynamic> r = await host.cube(
-                  (args['cube'] ?? 'eval_expression').toString(),
-                  args['args'] is Map
-                      ? Map<String, dynamic>.from(args['args'] as Map)
-                      : <String, dynamic>{});
+              final Map<String, dynamic> cubeArgs = args['args'] is Map
+                  ? Map<String, dynamic>.from(args['args'] as Map)
+                  : <String, dynamic>{};
+              final Map<String, String> env = currentEnv();
+              if (env.isNotEmpty) cubeArgs['env'] = env;
+              final Map<String, dynamic> r = await withTimeout(() => host.cube(
+                  (args['cube'] ?? 'eval_expression').toString(), cubeArgs));
               ctx.kernel.emit('sandbox.exec', 'core.sandbox',
                   <String, dynamic>{'provider': 'isolate-cube', 'ok': r['ok'] == true});
               return r;
@@ -501,6 +570,7 @@ class BuiltinPlugins {
             if (method == 'describe') {
               return <String, dynamic>{
                 'ok': true,
+                'params': Map<String, dynamic>.from(sandboxParams),
                 'chain': 'SandboxedShell → Isolate → CubeContract.capability 校验',
               };
             }
@@ -703,23 +773,58 @@ class BuiltinPlugins {
         },
       ),
 
-      // ---- ui/pages（"UI 也是插件树上的节点"）----
+      // ---- ui/pages（UI 也是插件树上的节点；内核/管理页不进导航）----
       _CapabilityPlugin(
         id: 'ui.pages',
         name: '界面贡献',
         version: v,
-        description: '工作台页面清单作为可查服务（对齐 dsh "UI 也参与组合"）',
+        description: '真实导航基线只读 + 内核自定义页面注册表可增删改排序',
         seam: 'ui/pages',
-        definition: '列出当前真实注册的界面页',
+        definition: '列出真实导航基线，并对内核自定义页面注册表增删改排序',
         consumers: const <String>['creator'],
         build: (PluginContext ctx) {
           ctx.provideSeamProvider('ui/pages', 'workspace-nav',
-              '真实侧边栏导航页清单',
+              '真实侧边栏导航基线（只读）+ 内核自定义页注册表（可增删改排序）',
               (String method, Map<String, dynamic> args) async {
-            if (method == 'list') {
-              return <String, dynamic>{'ok': true, 'pages': host.uiPages()};
+            switch (method) {
+              case 'list':
+                // nav_pages 是后端真实导航基线，这里的增删绝不新增导航入口。
+                final List<String> nav = host.uiPages();
+                final List<Map<String, dynamic>> custom = ctx.kernel.listPages();
+                final Set<String> seen = nav.toSet();
+                final List<String> merged = <String>[...nav];
+                for (final Map<String, dynamic> p in custom) {
+                  final String id = (p['id'] ?? '').toString();
+                  if (id.isNotEmpty && !seen.contains(id)) {
+                    seen.add(id);
+                    merged.add(id);
+                  }
+                }
+                return <String, dynamic>{
+                  'ok': true,
+                  'nav_pages': nav,
+                  'pages': custom,
+                  'all': merged,
+                  'note': 'nav_pages 为只读真实导航基线；pages 为可自定义注册表',
+                };
+              case 'add':
+                return ctx.kernel.addPage(
+                  (args['id'] ?? '').toString(),
+                  args['meta'] is Map
+                      ? Map<String, dynamic>.from(args['meta'] as Map)
+                      : <String, dynamic>{},
+                );
+              case 'remove':
+                return ctx.kernel.removePage((args['id'] ?? '').toString());
+              case 'reorder':
+                return ctx.kernel.reorderPages(args['ids'] is List
+                    ? (args['ids'] as List)
+                        .map((dynamic e) => e.toString())
+                        .toList()
+                    : <String>[]);
+              default:
+                return _unknown(method);
             }
-            return _unknown(method);
           });
         },
       ),

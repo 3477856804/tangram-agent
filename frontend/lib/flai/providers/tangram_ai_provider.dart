@@ -234,14 +234,20 @@ class TangramAiProvider implements AiProvider {
           // 按 Unicode codepoint 边界分片，避免切断 emoji 代理对；
           // 每片带短延迟，呈现真实的逐字输出观感。
           final runes = reply.runes.toList();
-          const int chunk = 12;
+          // 提速：仅在后端完全没发流式 token 时走此兜底。把分片加大、
+          // 间隔缩短，把「逐字观感」的额外开销从约 0.4s 压到 <0.1s；
+          // 真流式路径（emitted=true）完全不经过这里，零人为延迟。
+          const int chunk = 24;
+          const int delayMs = 3;
           for (var i = 0; i < runes.length; i += chunk) {
             if (closed || _cancelled) break;
             final end = (i + chunk > runes.length) ? runes.length : i + chunk;
             final piece = String.fromCharCodes(runes.sublist(i, end));
             buffer.write(piece);
             emit(TextDelta(piece));
-            await Future<void>.delayed(const Duration(milliseconds: 9));
+            if (delayMs > 0) {
+              await Future<void>.delayed(Duration(milliseconds: delayMs));
+            }
           }
         }
         emit(TextDone(buffer.toString()));

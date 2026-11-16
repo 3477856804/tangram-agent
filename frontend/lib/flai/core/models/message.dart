@@ -78,6 +78,23 @@ class ToolCall {
   }
 }
 
+/// 可持久化的真实过程状态（联网检索 / 深度推理）。
+/// 与 chat_event.SearchStatus 字段一致，但不继承 ChatEvent，避免
+/// message.dart ↔ chat_event.dart 循环依赖；供历史消息回看推理路径。
+class ProcessStatus {
+  final String phase;
+  final String? query;
+  final List<Map<String, String>> results;
+  final String? points;
+
+  const ProcessStatus({
+    required this.phase,
+    this.query,
+    this.results = const <Map<String, String>>[],
+    this.points,
+  });
+}
+
 class Message {
   final String id;
   final MessageRole role;
@@ -90,6 +107,9 @@ class Message {
   final MessageStatus status;
   final UsageInfo? usage;
 
+  /// 该条消息真实的检索/推理过程，随消息落盘，历史里也能展开查看。
+  final List<ProcessStatus>? processStatuses;
+
   const Message({
     required this.id,
     required this.role,
@@ -101,6 +121,7 @@ class Message {
     this.citations,
     this.status = MessageStatus.complete,
     this.usage,
+    this.processStatuses,
   });
 
   Message copyWith({
@@ -114,6 +135,7 @@ class Message {
     List<Citation>? citations,
     MessageStatus? status,
     UsageInfo? usage,
+    List<ProcessStatus>? processStatuses,
   }) {
     return Message(
       id: id ?? this.id,
@@ -126,6 +148,7 @@ class Message {
       citations: citations ?? this.citations,
       status: status ?? this.status,
       usage: usage ?? this.usage,
+      processStatuses: processStatuses ?? this.processStatuses,
     );
   }
 

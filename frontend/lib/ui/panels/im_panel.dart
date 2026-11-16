@@ -8,7 +8,9 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:tangram/services/audio_transcribe_service.dart';
 import 'package:tangram/bridge/backend_client.dart';
 import 'package:tangram/bridge/bridge_protocol.dart';
 import 'package:tangram/harness/im_service.dart';
@@ -87,7 +89,15 @@ class _PersonalIMPanelState extends State<PersonalIMPanel>
   /// 由调用方明确提示用户先启动并填写网关，不拿死链冒充内置网关）。
   String _effectiveUrl() {
     final String v = _urlCtrl.text.trim();
-    return v.isEmpty ? kDefaultGatewayUrl : v;
+    final String url = v.isEmpty ? kDefaultGatewayUrl : v;
+    // 让同一网关地址供「录音文件转文字」等其它功能复用；失败不影响本面板。
+    if (url.isNotEmpty) {
+      SharedPreferences.getInstance().then(
+        (prefs) => prefs.setString(AudioTranscribeService.gatewayPrefKey, url),
+        onError: (_) {},
+      );
+    }
+    return url;
   }
 
   static const String _noGatewayHint =

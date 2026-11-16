@@ -343,7 +343,7 @@ class _Tga3DPageState extends State<Tga3DPage> {
                   icon: Icons.pets_outlined,
                   iconBg: Tga.iconGoldBg,
                   iconColor: Tga.iconGold,
-                  title: '低模鹿（桌宠形象）',
+                  title: '低模鹿（品牌形象）',
                   subtitle: '按项目鹿 logo 程序化生成的真实网格，可导出继续加工',
                   onTap: _busy ? () {} : () => _loadPrimitive('deer'),
                 ),

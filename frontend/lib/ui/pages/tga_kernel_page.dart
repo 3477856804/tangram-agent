@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -26,6 +27,7 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
     '插件树',
     '能力接缝',
     '配置与事件',
+    '自定义能力',
   ];
 
   String _tab = '概览';
@@ -41,12 +43,29 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
   String _activeMode = '';
   Map<String, dynamic> _config = <String, dynamic>{};
   List<Map<String, dynamic>> _events = <Map<String, dynamic>>[];
+  // 自定义能力：全部来自内核真实返回，不伪造任何条目。
+  List<Map<String, dynamic>> _pages = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _textOverrides = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _permissionPolicies = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _widgetSlots = <Map<String, dynamic>>[];
 
   String _selectedSeam = '';
   final TextEditingController _invokeMethod = TextEditingController(text: 'status');
+  final TextEditingController _invokeArgs = TextEditingController(text: '{}');
   final TextEditingController _patchKey = TextEditingController();
   final TextEditingController _patchValue = TextEditingController();
+  final TextEditingController _bundleId = TextEditingController();
   final TextEditingController _searchCtrl = TextEditingController();
+  final TextEditingController _forkSeq = TextEditingController(text: '1');
+  String _patchLayer = 'runtime';
+  // 自定义能力编辑输入。
+  final TextEditingController _pageId = TextEditingController();
+  final TextEditingController _pageMeta = TextEditingController(text: '{}');
+  final TextEditingController _textLocale = TextEditingController(text: 'zh');
+  final TextEditingController _textKey = TextEditingController();
+  final TextEditingController _textValue = TextEditingController();
+  final TextEditingController _permId = TextEditingController();
+  final TextEditingController _permPolicy = TextEditingController(text: '{}');
 
   @override
   void initState() {
@@ -57,9 +76,19 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
   @override
   void dispose() {
     _invokeMethod.dispose();
+    _invokeArgs.dispose();
     _patchKey.dispose();
     _patchValue.dispose();
+    _bundleId.dispose();
     _searchCtrl.dispose();
+    _forkSeq.dispose();
+    _pageId.dispose();
+    _pageMeta.dispose();
+    _textLocale.dispose();
+    _textKey.dispose();
+    _textValue.dispose();
+    _permId.dispose();
+    _permPolicy.dispose();
     super.dispose();
   }
 
@@ -93,6 +122,35 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
   String _brief(Map<String, dynamic> p) {
     final String s = p.toString();
     return s.length > 260 ? '${s.substring(0, 260)}…' : s;
+  }
+
+  /// 解析用户填写的 JSON 对象；空串按空对象处理。失败时明确报错并返回 null，
+  /// 绝不把非法输入伪装成空参数偷偷调用。
+  Map<String, dynamic>? _parseJsonObject(String raw, String label) {
+    final String s = raw.trim();
+    if (s.isEmpty) return <String, dynamic>{};
+    try {
+      final dynamic decoded = jsonDecode(s);
+      if (decoded is! Map) {
+        _toast('$label 必须是 JSON 对象（形如 {"key":"value"}），实际为 ${decoded.runtimeType}');
+        return null;
+      }
+      return _asMap(decoded);
+    } on Object catch (e) {
+      _toast('$label 不是合法 JSON：$e');
+      return null;
+    }
+  }
+
+  /// 经当前激活 provider 真实调用；args 来自 JSON 文本框。
+  Future<void> _invoke() async {
+    final Map<String, dynamic>? args = _parseJsonObject(_invokeArgs.text, 'args');
+    if (args == null) return;
+    await _act('invoke $_selectedSeam', 'invoke', <String, dynamic>{
+      'seam': _selectedSeam,
+      'method': _invokeMethod.text.trim(),
+      'args': args,
+    });
   }
 
   void _toast(String msg) {
@@ -142,6 +200,15 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
         (Map<String, dynamic> p) => _config = p);
     await load('事件流', 'events',
         (Map<String, dynamic> p) => _events = _mapList(p['events']));
+    await load('自定义页面', 'pages',
+        (Map<String, dynamic> p) => _pages = _mapList(p['pages']));
+    await load('文案覆盖', 'text_overrides',
+        (Map<String, dynamic> p) => _textOverrides = _mapList(p['overrides']));
+    await load('权限策略', 'permission_policies',
+        (Map<String, dynamic> p) =>
+            _permissionPolicies = _mapList(p['policies']));
+    await load('组件槽', 'widget_slots',
+        (Map<String, dynamic> p) => _widgetSlots = _mapList(p['slots']));
 
     if (!mounted) return;
     setState(() {
@@ -316,12 +383,7 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
         child: _nodes.isEmpty
             ? const TgaEmpty('插件树为空或加载失败', icon: Icons.account_tree_outlined)
             : Column(
-                children: <Widget>[
-                  for (int i = 0; i < _nodes.length; i++) ...<Widget>[
-                    if (i > 0) const TgaTileDivider(),
-                    _nodeTile(_nodes[i]),
-                  ],
-                ],
+                children: _treeTiles(),
               ),
       ),
       if (notMounted.isNotEmpty) ...<Widget>[
@@ -355,17 +417,68 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
     ];
   }
 
-  Widget _nodeTile(Map<String, dynamic> n) {
+  /// 按 parent/children 真实关系渲染缩进层级树。环或缺失 parent 的节点兜底展示，
+  /// 绝不因为数据异常而让节点凭空消失。
+  List<Widget> _treeTiles() {
+    final Map<String, Map<String, dynamic>> byId =
+        <String, Map<String, dynamic>>{
+      for (final Map<String, dynamic> n in _nodes)
+        (n['id'] ?? '').toString(): n,
+    };
+    final Set<String> ids = byId.keys.toSet();
+    final List<Widget> out = <Widget>[];
+    final Set<String> walked = <String>{};
+
+    void walk(String id, int depth, Set<String> visiting) {
+      final Map<String, dynamic>? node = byId[id];
+      if (node == null || visiting.contains(id) || walked.contains(id)) return;
+      walked.add(id);
+      out.add(Padding(
+        padding: EdgeInsets.only(left: depth * 16.0),
+        child: _nodeTile(node, depth: depth),
+      ));
+      final List<String> children = node['children'] is List
+          ? (node['children'] as List)
+              .map((dynamic c) => c.toString())
+              .where((String c) => ids.contains(c))
+              .toList()
+          : <String>[];
+      final Set<String> nextVisiting = Set<String>.from(visiting)..add(id);
+      for (final String c in children) {
+        walk(c, depth + 1, nextVisiting);
+      }
+    }
+
+    for (final Map<String, dynamic> n in _nodes) {
+      final String id = (n['id'] ?? '').toString();
+      final String parent = (n['parent'] ?? '').toString();
+      if (parent.isEmpty || !ids.contains(parent)) {
+        walk(id, 0, <String>{});
+      }
+    }
+    // 兜底：不成根、又未被父节点递归到的节点（例如 parent 指向环）也要真实显示。
+    for (final Map<String, dynamic> n in _nodes) {
+      final String id = (n['id'] ?? '').toString();
+      if (!walked.contains(id)) walk(id, 0, <String>{});
+    }
+    return out;
+  }
+
+  Widget _nodeTile(Map<String, dynamic> n, {int depth = 0}) {
     final String state = (n['state'] ?? '').toString();
     final String err = (n['error'] ?? '').toString();
     final bool failed = state == 'failed';
+    final List<String> children = n['children'] is List
+        ? (n['children'] as List).map((dynamic c) => c.toString()).toList()
+        : <String>[];
     return TgaIconTile(
       icon: failed ? Icons.error_outline_rounded : Icons.extension_outlined,
       iconBg: failed ? Tga.iconRedBg : Tga.iconPurpleBg,
       iconColor: failed ? Tga.iconRed : Tga.iconPurple,
       title: '${n['name'] ?? n['id'] ?? ''} · v${n['version'] ?? '—'}',
-      subtitle: '${n['id'] ?? ''} · ${state} · 来源 ${n['source'] ?? '—'} · '
-          '层 ${n['config_layer'] ?? '—'} · 效果 ${n['effects'] ?? 0}'
+      subtitle: '${depth > 0 ? 'L$depth ' : ''}${n['id'] ?? ''} · ${state} · '
+          '来源 ${n['source'] ?? '—'} · 层 ${n['config_layer'] ?? '—'} · '
+          '效果 ${n['effects'] ?? 0} · children ${children.join(',')}'
           '${err.isEmpty ? '' : ' · $err'}',
       showArrow: false,
       trailing: TgaButton(
@@ -419,14 +532,21 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
               ],
             ),
             const SizedBox(height: 10),
+            TextField(
+              controller: _invokeArgs,
+              style: TextStyle(
+                  fontSize: 12, fontFamily: 'monospace', color: Tga.text),
+              maxLines: 3,
+              decoration: const InputDecoration(
+                isDense: true,
+                labelText: 'args（JSON 对象；留空按空对象处理）',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 10),
             TgaButton(
               label: '调用',
-              onTap: () => unawaited(_act('invoke $_selectedSeam', 'invoke',
-                  <String, dynamic>{
-                    'seam': _selectedSeam,
-                    'method': _invokeMethod.text.trim(),
-                    'args': <String, dynamic>{},
-                  })),
+              onTap: () => unawaited(_invoke()),
             ),
           ],
         ),
@@ -560,10 +680,33 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
           ],
         ),
       ),
-      TgaGroupTitle('写入 runtime patch（最高优先级覆盖层）'),
+      TgaGroupTitle('写入配置 patch（bundle / profile / home / runtime）'),
       TgaCard(
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
+            Text('后层覆盖前层；bundle 层需填写真实 bundle id（如 core / ext）。',
+                style: Tga.caption),
+            const SizedBox(height: 10),
+            TgaSegmented<String>(
+              items: const <String>['bundle', 'profile', 'home', 'runtime'],
+              value: _patchLayer,
+              labelOf: (String s) => s,
+              onChanged: (String v) => setState(() => _patchLayer = v),
+            ),
+            if (_patchLayer == 'bundle') ...<Widget>[
+              const SizedBox(height: 10),
+              TextField(
+                controller: _bundleId,
+                style: TextStyle(fontSize: 13, color: Tga.text),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  labelText: 'bundle id',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+            const SizedBox(height: 10),
             Row(
               children: <Widget>[
                 Expanded(
@@ -595,18 +738,27 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
             Align(
               alignment: Alignment.centerLeft,
               child: TgaButton(
-                label: '写入 runtime 层',
+                label: '写入 $_patchLayer 层',
                 onTap: () {
                   final String k = _patchKey.text.trim();
                   if (k.isEmpty) {
                     _toast('key 不能为空');
                     return;
                   }
-                  unawaited(_act('写入配置 $k', 'set_patch', <String, dynamic>{
-                    'layer': 'runtime',
+                  final Map<String, dynamic> extra = <String, dynamic>{
+                    'layer': _patchLayer,
                     'key': k,
                     'value': _patchValue.text,
-                  }));
+                  };
+                  if (_patchLayer == 'bundle') {
+                    final String bid = _bundleId.text.trim();
+                    if (bid.isEmpty) {
+                      _toast('bundle 层需填写 bundle id');
+                      return;
+                    }
+                    extra['bundle'] = bid;
+                  }
+                  unawaited(_act('写入配置 $k', 'set_patch', extra));
                 },
               ),
             ),
@@ -650,13 +802,367 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
               ),
       ),
       const SizedBox(height: 10),
-      Align(
-        alignment: Alignment.centerLeft,
-        child: TgaButton(
-          label: '从 seq=1 分叉（fork）',
-          filled: false,
-          onTap: () => unawaited(_act('分叉事件流', 'fork',
-              const <String, dynamic>{'from_seq': 1})),
+      TgaGroupTitle('事件流分叉（fork，可选起点）'),
+      TgaCard(
+        child: Row(
+          children: <Widget>[
+            SizedBox(
+              width: 150,
+              child: TextField(
+                controller: _forkSeq,
+                style: TextStyle(fontSize: 13, color: Tga.text),
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  isDense: true,
+                  labelText: 'from_seq',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            TgaButton(
+              label: '分叉',
+              filled: false,
+              onTap: () {
+                final int? seq = int.tryParse(_forkSeq.text.trim());
+                if (seq == null || seq < 0) {
+                  _toast('from_seq 必须是非负整数');
+                  return;
+                }
+                unawaited(_act('分叉事件流', 'fork',
+                    <String, dynamic>{'from_seq': seq}));
+              },
+            ),
+          ],
+        ),
+      ),
+    ];
+  }
+
+  // ---------------------------------------------------------------- 自定义能力
+
+  Future<void> _addPageFromInput() async {
+    final String id = _pageId.text.trim();
+    if (id.isEmpty) {
+      _toast('页面 id 不能为空');
+      return;
+    }
+    final Map<String, dynamic>? meta = _parseJsonObject(_pageMeta.text, 'meta');
+    if (meta == null) return;
+    await _act('添加页面 $id', 'pages', <String, dynamic>{
+      'op': 'add',
+      'id': id,
+      'meta': meta,
+    });
+  }
+
+  Future<void> _reorderPage(String id, int delta) async {
+    final List<String> ids = _pages
+        .map((Map<String, dynamic> p) => (p['id'] ?? '').toString())
+        .toList();
+    final int i = ids.indexOf(id);
+    final int j = i + delta;
+    if (i < 0 || j < 0 || j >= ids.length) {
+      _toast('该页面已在边界，无法继续移动');
+      return;
+    }
+    final List<String> next = List<String>.of(ids);
+    final String tmp = next[i];
+    next[i] = next[j];
+    next[j] = tmp;
+    await _act('重排页面 $id', 'pages', <String, dynamic>{
+      'op': 'reorder',
+      'ids': next,
+    });
+  }
+
+  Future<void> _setTextOverrideFromInput() async {
+    final String locale = _textLocale.text.trim();
+    final String key = _textKey.text.trim();
+    if (locale.isEmpty || key.isEmpty) {
+      _toast('locale 与 key 不能为空');
+      return;
+    }
+    await _act('设置文案 $locale/$key', 'text_overrides', <String, dynamic>{
+      'op': 'set',
+      'locale': locale,
+      'key': key,
+      'value': _textValue.text,
+    });
+  }
+
+  Future<void> _getTextOverrideFromInput() async {
+    final String locale = _textLocale.text.trim();
+    final String key = _textKey.text.trim();
+    if (locale.isEmpty || key.isEmpty) {
+      _toast('locale 与 key 不能为空');
+      return;
+    }
+    await _act('查询文案 $locale/$key', 'text_overrides', <String, dynamic>{
+      'op': 'get',
+      'locale': locale,
+      'key': key,
+    });
+  }
+
+  Future<void> _setPermissionPolicyFromInput() async {
+    final String id = _permId.text.trim();
+    if (id.isEmpty) {
+      _toast('权限策略 id 不能为空');
+      return;
+    }
+    final Map<String, dynamic>? policy =
+        _parseJsonObject(_permPolicy.text, 'policy');
+    if (policy == null) return;
+    await _act('设置权限策略 $id', 'permission_policies', <String, dynamic>{
+      'op': 'set',
+      'id': id,
+      'policy': policy,
+    });
+  }
+
+  List<Widget> _customTab() {
+    return <Widget>[
+      TgaGroupTitle('自定义页面注册表（pages）',
+          trailing: TgaTag('${_pages.length} 条', color: Tga.textSub)),
+      TgaCard(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('经 ui/pages 接缝真实读写内核注册表；真实导航基线不受影响。',
+                style: Tga.caption),
+            const SizedBox(height: 8),
+            if (_pages.isEmpty) Text('当前无自定义页面', style: Tga.sub),
+            for (final Map<String, dynamic> pg in _pages) ...<Widget>[
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: Text(
+                        '${pg['id'] ?? ''} · ${pg['meta'] ?? ''} · owner '
+                        '${pg['owner'] ?? ''}',
+                        style: Tga.sub,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    TgaButton(
+                      label: '↑',
+                      filled: false,
+                      onTap: () =>
+                          unawaited(_reorderPage((pg['id'] ?? '').toString(), -1)),
+                    ),
+                    const SizedBox(width: 4),
+                    TgaButton(
+                      label: '↓',
+                      filled: false,
+                      onTap: () =>
+                          unawaited(_reorderPage((pg['id'] ?? '').toString(), 1)),
+                    ),
+                    const SizedBox(width: 4),
+                    TgaButton(
+                      label: '移除',
+                      filled: false,
+                      color: Tga.red,
+                      onTap: () => unawaited(_act(
+                          '移除页面 ${pg['id']}', 'pages', <String, dynamic>{
+                        'op': 'remove',
+                        'id': (pg['id'] ?? '').toString(),
+                      })),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 10),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    controller: _pageId,
+                    style: TextStyle(fontSize: 13, color: Tga.text),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: 'page id',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: TextField(
+                    controller: _pageMeta,
+                    style: TextStyle(fontSize: 13, color: Tga.text),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: 'meta（JSON 对象）',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TgaButton(
+                label: '添加页面',
+                onTap: () => unawaited(_addPageFromInput()),
+              ),
+            ),
+          ],
+        ),
+      ),
+      TgaGroupTitle('文案覆盖（text_overrides）',
+          trailing: TgaTag('${_textOverrides.length} 条', color: Tga.textSub)),
+      TgaCard(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('内核级覆盖存储；查询 get 返回真实覆盖值与 found。',
+                style: Tga.caption),
+            const SizedBox(height: 8),
+            if (_textOverrides.isEmpty) Text('当前无文案覆盖', style: Tga.sub),
+            for (final Map<String, dynamic> o in _textOverrides)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Text(
+                  '${o['locale'] ?? ''} / ${o['key'] ?? ''} = ${o['value'] ?? ''}',
+                  style: Tga.sub,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            const SizedBox(height: 10),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    controller: _textLocale,
+                    style: TextStyle(fontSize: 13, color: Tga.text),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: 'locale',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: TextField(
+                    controller: _textKey,
+                    style: TextStyle(fontSize: 13, color: Tga.text),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: 'key',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _textValue,
+              style: TextStyle(fontSize: 13, color: Tga.text),
+              decoration: const InputDecoration(
+                isDense: true,
+                labelText: 'value',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: <Widget>[
+                TgaButton(
+                  label: '设置 set',
+                  onTap: () => unawaited(_setTextOverrideFromInput()),
+                ),
+                const SizedBox(width: 10),
+                TgaButton(
+                  label: '查询 get',
+                  filled: false,
+                  onTap: () => unawaited(_getTextOverrideFromInput()),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+      TgaGroupTitle('权限策略（permission_policies）',
+          trailing: TgaTag('${_permissionPolicies.length} 条',
+              color: Tga.textSub)),
+      TgaCard(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('策略为纯数据规则，由调用方真实判定，内核不在此假装放行。',
+                style: Tga.caption),
+            const SizedBox(height: 8),
+            if (_permissionPolicies.isEmpty)
+              Text('当前无权限策略', style: Tga.sub),
+            for (final Map<String, dynamic> pol in _permissionPolicies)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Text(
+                  '${pol['id'] ?? ''} · ${pol['policy'] ?? ''}',
+                  style: Tga.sub,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _permId,
+              style: TextStyle(fontSize: 13, color: Tga.text),
+              decoration: const InputDecoration(
+                isDense: true,
+                labelText: 'policy id',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _permPolicy,
+              style: TextStyle(
+                  fontSize: 12, fontFamily: 'monospace', color: Tga.text),
+              maxLines: 2,
+              decoration: const InputDecoration(
+                isDense: true,
+                labelText: 'policy（JSON 对象）',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TgaButton(
+                label: '设置策略',
+                onTap: () => unawaited(_setPermissionPolicyFromInput()),
+              ),
+            ),
+          ],
+        ),
+      ),
+      TgaGroupTitle('UI 组件槽（widget_slots，只读）',
+          trailing: TgaTag('${_widgetSlots.length} 条', color: Tga.textSub)),
+      TgaCard(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            if (_widgetSlots.isEmpty) Text('当前无组件槽', style: Tga.sub),
+            for (final Map<String, dynamic> s in _widgetSlots)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Text(
+                  '${s['id'] ?? ''} · ${s['meta'] ?? ''}',
+                  style: Tga.sub,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
         ),
       ),
     ];
@@ -750,6 +1256,7 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
             '插件树' => _treeTab(),
             '能力接缝' => _seamsTab(),
             '配置与事件' => _configTab(),
+            '自定义能力' => _customTab(),
             _ => _overviewTab(),
           },
           ..._lastResultCard(),

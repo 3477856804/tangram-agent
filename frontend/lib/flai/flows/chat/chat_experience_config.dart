@@ -26,6 +26,10 @@ class AttachItem {
   const AttachItem.files({this.onTap})
       : icon = Icons.upload_file_rounded,
         label = '文件';
+
+  const AttachItem.audio({this.onTap})
+      : icon = Icons.audiotrack_rounded,
+        label = '录音文件';
 }
 
 class ChipItem {
@@ -100,6 +104,7 @@ class ComposerConfig {
     AttachSection(items: [
       AttachItem.camera(),
       AttachItem.photos(),
+      AttachItem.audio(),
       AttachItem.files(),
     ]),
   ];

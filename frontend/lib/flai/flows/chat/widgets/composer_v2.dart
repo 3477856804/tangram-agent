@@ -11,6 +11,7 @@ import '../../../../design/dsh_tokens.dart';
 import '../../../../design/dsh_widgets.dart';
 import '../../../../services/model_registry.dart';
 import '../../../../services/persona_store.dart';
+import '../../../../services/audio_transcribe_service.dart';
 import '../../../../ui/i18n/tga_strings.dart';
 import '../chat_experience_config.dart';
 import 'attachment_menu.dart';
@@ -68,6 +69,11 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   final TextEditingController _textController = TextEditingController();
   final List<PickedAttachment> _pendingAttachments = <PickedAttachment>[];
   bool _hasText = false;
+
+  // 录音文件转文字：真实上传网关 ASR，状态与结果如实呈现。
+  final AudioTranscribeService _asr = AudioTranscribeService();
+  bool _audioTranscribing = false;
+  String? _audioNotice;
 
   // 设计稿 2026-11-12 主页底部功能开关：深度思考 / 智能搜索。
   // 模型切换的唯一入口是底部「TGA 引擎」下拉（_openModelSelector），
@@ -139,6 +145,7 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   @override
   void dispose() {
     _textController.dispose();
+    _asr.dispose();
     super.dispose();
   }
 
@@ -221,7 +228,46 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
       onAttachmentPicked: (PickedAttachment picked) {
         setState(() => _pendingAttachments.add(picked));
       },
+      onAudioPicked: _handleAudioForTranscription,
     );
+  }
+
+  /// 录音文件 → 真实 ASR 转写 → 文字填入输入框展示。
+  /// 全程不伪造：转写中显示进度，失败如实展示可读原因。
+  Future<void> _handleAudioForTranscription(PickedAttachment audio) async {
+    setState(() {
+      _audioTranscribing = true;
+      _audioNotice = '正在转写「${audio.name}」…';
+    });
+    try {
+      final TranscriptionResult result = await _asr.transcribeFile(audio.path);
+      if (!mounted) return;
+      // 转写文字填入输入框：用户可见、可编辑、可继续发送给模型。
+      final String existing = _textController.text.trim();
+      _textController.text = existing.isEmpty
+          ? result.text
+          : '$existing\n${result.text}';
+      _textController.selection = TextSelection.collapsed(
+        offset: _textController.text.length,
+      );
+      setState(() {
+        _hasText = true;
+        _audioTranscribing = false;
+        _audioNotice = '已从录音提取文字，可编辑后发送。';
+      });
+    } on TranscriptionException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _audioTranscribing = false;
+        _audioNotice = '转写失败：${e.message}';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _audioTranscribing = false;
+        _audioNotice = '转写失败：$e';
+      });
+    }
   }
 
   /// 把真实注册表转换成选择器选项：带（本地）/（云端）标记、分组、来源副标题。
@@ -327,6 +373,8 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
                     setState(() => _pendingAttachments.removeAt(index));
                   },
                 ),
+              if (_audioNotice != null)
+                _buildAudioNotice(c),
               if (widget.isRecording || widget.isTranscribing)
                 _buildRecordingRow(c)
               else ...<Widget>[
@@ -337,6 +385,49 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  /// 录音转文字状态条：转写中显示进度，成功/失败如实呈现，
+  /// 颜色全部取自语义调色板，深浅主题均清晰可读。
+  Widget _buildAudioNotice(DshPalette c) {
+    final bool isError = _audioNotice!.startsWith('转写失败');
+    final Color fg = isError ? c.link : c.labelSecondary;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: DshSpace.x8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: <Widget>[
+          if (_audioTranscribing)
+            SizedBox(
+              width: 13,
+              height: 13,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: c.brandPrimary,
+              ),
+            )
+          else
+            Icon(
+              isError ? Icons.error_outline : Icons.audiotrack_rounded,
+              size: 15,
+              color: fg,
+            ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _audioNotice!,
+              style: TextStyle(fontSize: 12, color: fg),
+            ),
+          ),
+          if (!_audioTranscribing)
+            GestureDetector(
+              onTap: () => setState(() => _audioNotice = null),
+              behavior: HitTestBehavior.opaque,
+              child: Icon(Icons.close, size: 14, color: c.labelTertiary),
+            ),
+        ],
       ),
     );
   }

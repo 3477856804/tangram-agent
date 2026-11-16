@@ -255,6 +255,21 @@ class _Sub {
 /// 撤销一个注册动作的闭包（Cordis reversible effect）。
 typedef Disposable = void Function();
 
+/// 一条可自定义的界面页注册项。owner = 插件 id 或 'runtime'（用户经 action 写入）。
+/// 顺序即渲染顺序，reorder 真实改写这个列表，不是改一个排序标记。
+class KernelPage {
+  KernelPage(this.id, this.meta, this.owner);
+  final String id;
+  final Map<String, dynamic> meta;
+  final String owner;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'id': id,
+        'meta': Map<String, dynamic>.from(meta),
+        'owner': owner,
+      };
+}
+
 // ---------------------------------------------------------------------------
 // 共享上下文 ctx：插件与内核之间唯一的协作面
 // ---------------------------------------------------------------------------
@@ -383,6 +398,92 @@ class PluginContext {
   /// 发布一个内核事件（记入 append-only 会话日志）。
   void emit(String topic, Map<String, dynamic> data) =>
       _kernel.emit(topic, pluginId, data);
+
+  // ---- 自定义能力接缝：页面 / 组件槽 / 文案覆盖 / 权限策略 ----
+  // 每个注册都既真实写入内核容器，又登记一个幂等 Disposable：
+  // 挂载生效，卸载逆序恢复注册前状态；调用方也可直接使用返回值。
+
+  /// 注册一条自定义界面页。顺序即渲染顺序，reorder 真实改写列表。
+  Disposable registerPage(String id, Map<String, dynamic> meta) {
+    final int idx = _kernel._pages.indexWhere((KernelPage p) => p.id == id);
+    final KernelPage? previous = idx >= 0 ? _kernel._pages[idx] : null;
+    final KernelPage next =
+        KernelPage(id, Map<String, dynamic>.from(meta), pluginId);
+    if (idx >= 0) {
+      _kernel._pages[idx] = next;
+    } else {
+      _kernel._pages.add(next);
+    }
+    void undo() {
+      final int cur = _kernel._pages.indexWhere((KernelPage p) => p.id == id);
+      if (cur < 0 || !identical(_kernel._pages[cur], next)) return;
+      if (previous == null) {
+        _kernel._pages.removeAt(cur);
+      } else {
+        _kernel._pages[cur] = previous;
+      }
+    }
+
+    _track(undo);
+    return undo;
+  }
+
+  /// 注册一个可替换的 UI 组件槽（widget slot）元数据。
+  Disposable registerWidgetSlot(String id, Map<String, dynamic> meta) {
+    final Map<String, dynamic>? previous = _kernel._widgetSlots[id];
+    final Map<String, dynamic> next = Map<String, dynamic>.from(meta);
+    _kernel._widgetSlots[id] = next;
+    void undo() {
+      if (!identical(_kernel._widgetSlots[id], next)) return;
+      if (previous == null) {
+        _kernel._widgetSlots.remove(id);
+      } else {
+        _kernel._widgetSlots[id] = previous;
+      }
+    }
+
+    _track(undo);
+    return undo;
+  }
+
+  /// 按语言注册一条文案覆盖。resolveText 真实返回覆盖值，未覆盖返回 null。
+  Disposable registerTextOverride(String locale, String key, String value) {
+    final Map<String, String> byKey = _kernel._textOverrides.putIfAbsent(
+        locale, () => <String, String>{});
+    final String? previous = byKey[key];
+    byKey[key] = value;
+    void undo() {
+      final Map<String, String>? cur = _kernel._textOverrides[locale];
+      if (cur == null || !identical(cur, byKey)) return;
+      if (previous == null) {
+        cur.remove(key);
+        if (cur.isEmpty) _kernel._textOverrides.remove(locale);
+      } else {
+        cur[key] = previous;
+      }
+    }
+
+    _track(undo);
+    return undo;
+  }
+
+  /// 注册一条权限策略。策略是纯数据规则，由调用方真实判定，不在此假装放行。
+  Disposable registerPermissionPolicy(String id, Map<String, dynamic> policy) {
+    final Map<String, dynamic>? previous = _kernel._permissionPolicies[id];
+    final Map<String, dynamic> next = Map<String, dynamic>.from(policy);
+    _kernel._permissionPolicies[id] = next;
+    void undo() {
+      if (!identical(_kernel._permissionPolicies[id], next)) return;
+      if (previous == null) {
+        _kernel._permissionPolicies.remove(id);
+      } else {
+        _kernel._permissionPolicies[id] = previous;
+      }
+    }
+
+    _track(undo);
+    return undo;
+  }
 }
 
 class _ServiceEntry {
@@ -561,6 +662,15 @@ class PluginKernel {
   final Map<String, PluginNode> _nodes = <String, PluginNode>{};
   final KernelEventBus _bus = KernelEventBus();
   final Map<String, Plugin> _registry = <String, Plugin>{};
+
+  // ---- 自定义能力容器（与插件注册共用，action 与 ctx.register* 真实读写同一份）----
+  final List<KernelPage> _pages = <KernelPage>[];
+  final Map<String, Map<String, dynamic>> _widgetSlots =
+      <String, Map<String, dynamic>>{};
+  final Map<String, Map<String, String>> _textOverrides =
+      <String, Map<String, String>>{};
+  final Map<String, Map<String, dynamic>> _permissionPolicies =
+      <String, Map<String, dynamic>>{};
 
   int _seq = 0;
   bool _booted = false;
@@ -946,6 +1056,117 @@ class PluginKernel {
     return ev.seq;
   }
 
+  // ---- 自定义能力：查询与真实写入（action 与 ctx.register* 共用同一份容器）----
+
+  List<Map<String, dynamic>> listPages() =>
+      _pages.map((KernelPage p) => p.toJson()).toList();
+
+  Map<String, dynamic> addPage(String id, Map<String, dynamic> meta,
+      {String owner = 'runtime'}) {
+    if (id.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': '页面 id 不能为空'};
+    }
+    if (_pages.any((KernelPage p) => p.id == id)) {
+      return <String, dynamic>{'ok': false, 'error': '页面 $id 已存在'};
+    }
+    final KernelPage page =
+        KernelPage(id, Map<String, dynamic>.from(meta), owner);
+    _pages.add(page);
+    emit('kernel.page_added', 'kernel', <String, dynamic>{'page': id});
+    return <String, dynamic>{'ok': true, 'page': page.toJson()};
+  }
+
+  Map<String, dynamic> removePage(String id) {
+    final int idx = _pages.indexWhere((KernelPage p) => p.id == id);
+    if (idx < 0) {
+      return <String, dynamic>{'ok': false, 'error': '页面 $id 不存在'};
+    }
+    final KernelPage removed = _pages.removeAt(idx);
+    emit('kernel.page_removed', 'kernel', <String, dynamic>{'page': id});
+    return <String, dynamic>{'ok': true, 'page': removed.toJson()};
+  }
+
+  /// ids 必须是当前页面 id 的一个无重复排列；真实改写顺序，不是改排序标记。
+  Map<String, dynamic> reorderPages(List<String> ids) {
+    final Set<String> current = _pages.map((KernelPage p) => p.id).toSet();
+    if (ids.length != _pages.length ||
+        ids.toSet().length != ids.length ||
+        !ids.every(current.contains)) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': 'reorder 的 ids 必须是当前页面 id 的一个无重复排列',
+        'current': current.toList(),
+      };
+    }
+    final Map<String, KernelPage> byId = <String, KernelPage>{
+      for (final KernelPage p in _pages) p.id: p,
+    };
+    _pages.setAll(0, ids.map((String id) => byId[id]!).toList());
+    emit('kernel.page_reordered', 'kernel', <String, dynamic>{'order': ids});
+    return <String, dynamic>{'ok': true, 'order': listPages()};
+  }
+
+  List<Map<String, dynamic>> listWidgetSlots() => _widgetSlots.entries
+      .map((MapEntry<String, Map<String, dynamic>> e) => <String, dynamic>{
+            'id': e.key,
+            'meta': Map<String, dynamic>.from(e.value),
+          })
+      .toList();
+
+  Map<String, dynamic> setTextOverride(
+      String locale, String key, String value) {
+    if (locale.isEmpty || key.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': 'locale 与 key 不能为空'};
+    }
+    _textOverrides.putIfAbsent(locale, () => <String, String>{})[key] = value;
+    emit('kernel.text_override_set', 'kernel', <String, dynamic>{
+      'locale': locale,
+      'key': key,
+    });
+    return <String, dynamic>{
+      'ok': true,
+      'entry': <String, dynamic>{'locale': locale, 'key': key, 'value': value},
+    };
+  }
+
+  /// 真实返回覆盖值；未覆盖返回 null，绝不编造默认文案。
+  String? getTextOverride(String locale, String key) =>
+      _textOverrides[locale]?[key];
+
+  List<Map<String, dynamic>> listTextOverrides() {
+    final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
+    _textOverrides.forEach((String locale, Map<String, String> byKey) {
+      byKey.forEach((String key, String value) {
+        out.add(<String, dynamic>{'locale': locale, 'key': key, 'value': value});
+      });
+    });
+    return out;
+  }
+
+  Map<String, dynamic> setPermissionPolicy(
+      String id, Map<String, dynamic> policy) {
+    if (id.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': '权限策略 id 不能为空'};
+    }
+    _permissionPolicies[id] = Map<String, dynamic>.from(policy);
+    emit('kernel.permission_policy_set', 'kernel', <String, dynamic>{'id': id});
+    return <String, dynamic>{
+      'ok': true,
+      'entry': <String, dynamic>{
+        'id': id,
+        'policy': Map<String, dynamic>.from(_permissionPolicies[id]!),
+      },
+    };
+  }
+
+  List<Map<String, dynamic>> listPermissionPolicies() =>
+      _permissionPolicies.entries
+          .map((MapEntry<String, Map<String, dynamic>> e) => <String, dynamic>{
+                'id': e.key,
+                'policy': Map<String, dynamic>.from(e.value),
+              })
+          .toList();
+
   // ---- 控制域动作分发（plugin_kernel）----
 
   Future<Map<String, dynamic>> handle(String action, Map<String, dynamic> p) async {
@@ -1001,9 +1222,19 @@ class PluginKernel {
         return await _setMode((p['mode'] ?? '').toString());
       case 'set_patch':
         return await _setPatch(
-            (p['layer'] ?? 'runtime').toString(),
-            p['key']?.toString() ?? '',
-            p['value']);
+          (p['layer'] ?? 'runtime').toString(),
+          p['key']?.toString() ?? '',
+          p['value'],
+          bundleId: p['bundle']?.toString(),
+        );
+      case 'pages':
+        return _pagesAction(p);
+      case 'text_overrides':
+        return _textOverridesAction(p);
+      case 'permission_policies':
+        return _permissionPoliciesAction(p);
+      case 'widget_slots':
+        return <String, dynamic>{'ok': true, 'slots': listWidgetSlots()};
       case 'compose_prompt':
         return <String, dynamic>{'ok': true, 'prompt': composeSystemPrompt()};
       case 'events':
@@ -1063,35 +1294,142 @@ class PluginKernel {
     };
   }
 
-  Future<Map<String, dynamic>> _setPatch(
-      String layer, String key, Object? value) async {
-    if (key.isEmpty) {
-      return <String, dynamic>{'ok': false, 'error': '缺少配置 key'};
-    }
-    switch (layer) {
-      case 'home':
-        _homePatch[key] = value;
-        await _persistConfig();
-      case 'runtime':
-        _runtimePatch[key] = value;
-      case 'profile':
-        _profile.patch[key] = value;
-        await _persistConfig();
+  Map<String, dynamic> _pagesAction(Map<String, dynamic> p) {
+    final String op = (p['op'] ?? 'list').toString();
+    switch (op) {
+      case 'list':
+        return <String, dynamic>{'ok': true, 'pages': listPages()};
+      case 'add':
+        return addPage(
+          (p['id'] ?? '').toString(),
+          p['meta'] is Map
+              ? Map<String, dynamic>.from(p['meta'] as Map)
+              : <String, dynamic>{},
+        );
+      case 'remove':
+        return removePage((p['id'] ?? '').toString());
+      case 'reorder':
+        return reorderPages(p['ids'] is List
+            ? (p['ids'] as List).map((dynamic e) => e.toString()).toList()
+            : <String>[]);
       default:
         return <String, dynamic>{
           'ok': false,
-          'error': '未知配置层：$layer（home/runtime/profile）',
+          'error': '未知 pages 操作：$op（list/add/remove/reorder）',
         };
     }
+  }
+
+  Map<String, dynamic> _textOverridesAction(Map<String, dynamic> p) {
+    final String op = (p['op'] ?? 'list').toString();
+    final String locale = (p['locale'] ?? '').toString();
+    final String key = (p['key'] ?? '').toString();
+    switch (op) {
+      case 'list':
+        return <String, dynamic>{'ok': true, 'overrides': listTextOverrides()};
+      case 'get':
+        final String? v = getTextOverride(locale, key);
+        return <String, dynamic>{
+          'ok': true,
+          'locale': locale,
+          'key': key,
+          'value': v,
+          'found': v != null,
+        };
+      case 'set':
+        return setTextOverride(locale, key, (p['value'] ?? '').toString());
+      default:
+        return <String, dynamic>{
+          'ok': false,
+          'error': '未知 text_overrides 操作：$op（set/get/list）',
+        };
+    }
+  }
+
+  Map<String, dynamic> _permissionPoliciesAction(Map<String, dynamic> p) {
+    final String op = (p['op'] ?? 'list').toString();
+    switch (op) {
+      case 'list':
+        return <String, dynamic>{
+          'ok': true,
+          'policies': listPermissionPolicies(),
+        };
+      case 'set':
+        return setPermissionPolicy(
+          (p['id'] ?? '').toString(),
+          p['policy'] is Map
+              ? Map<String, dynamic>.from(p['policy'] as Map)
+              : <String, dynamic>{},
+        );
+      default:
+        return <String, dynamic>{
+          'ok': false,
+          'error': '未知 permission_policies 操作：$op（set/list）',
+        };
+    }
+  }
+
+  /// 写入配置层。bundle 层可指定 bundleId（也接受 layer='bundle:<id>'），
+  /// 真实写入对应 bundle.patch 并随 profile 落盘，绝不伪造来源层。
+  Future<Map<String, dynamic>> _setPatch(
+    String layer,
+    String key,
+    Object? value, {
+    String? bundleId,
+  }) async {
+    if (key.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': '缺少配置 key'};
+    }
+    String effectiveLayer = layer;
+    if (layer == 'bundle' || layer.startsWith('bundle:')) {
+      final String bid = bundleId ??
+          (layer.contains(':') ? layer.substring(layer.indexOf(':') + 1) : '');
+      Bundle? target;
+      for (final Bundle b in _profile.bundles) {
+        if (b.id == bid) {
+          target = b;
+          break;
+        }
+      }
+      if (target == null) {
+        return <String, dynamic>{
+          'ok': false,
+          'error': '未知 bundle：$bid（当前 bundles: '
+              '${_profile.bundles.map((Bundle b) => b.id).join(', ')}）',
+        };
+      }
+      target.patch[key] = value;
+      effectiveLayer = 'bundle:${target.id}';
+      await _persistConfig();
+    } else {
+      switch (layer) {
+        case 'home':
+          _homePatch[key] = value;
+          await _persistConfig();
+          break;
+        case 'runtime':
+          _runtimePatch[key] = value;
+          break;
+        case 'profile':
+          _profile.patch[key] = value;
+          await _persistConfig();
+          break;
+        default:
+          return <String, dynamic>{
+            'ok': false,
+            'error': '未知配置层：$layer（bundle/bundle:<id>/home/runtime/profile）',
+          };
+      }
+    }
     emit('kernel.patch', 'kernel', <String, dynamic>{
-      'layer': layer,
+      'layer': effectiveLayer,
       'key': key,
     });
     return <String, dynamic>{
       'ok': true,
       'entry': composeConfig()
           .firstWhere((ConfigEntry e) => e.key == key,
-              orElse: () => ConfigEntry(key, value, layer))
+              orElse: () => ConfigEntry(key, value, effectiveLayer))
           .toJson(),
     };
   }

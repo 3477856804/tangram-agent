@@ -69,6 +69,41 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
   bool _loading = true;
   String _error = '';
 
+  // ---- 搜索高亮：输入实体名片段，定位并选中匹配节点 ----
+  final TextEditingController _searchCtl = TextEditingController();
+  String _searchTerm = '';
+
+  /// 按名称搜索节点：优先精确匹配，其次包含匹配；找到后把球体旋转到
+  /// 该节点朝向观察者并选中（白描边 + 详情可选），找不到如实返回 false。
+  bool _searchNode(String term) {
+    final String q = term.trim();
+    if (q.isEmpty) return false;
+    int? exact;
+    int? partial;
+    for (int i = 0; i < _names.length; i++) {
+      if (_names[i] == q) {
+        exact = i;
+        break;
+      }
+      if (partial == null && _names[i].contains(q)) partial = i;
+    }
+    final int? hit = exact ?? partial;
+    if (hit == null) return false;
+    final _V3 v = _pos[hit];
+    // 令该节点旋转后 z 接近 1（正对镜头）：ry=atan2(x,z), rx=-asin(y)。
+    setState(() {
+      _searchTerm = q;
+      _selected = hit;
+      _selT = 0;
+      _rotY = math.atan2(v.x, v.z);
+      _rotX = -math.asin(v.y.clamp(-1.0, 1.0));
+      _velY = 0;
+      _velX = 0;
+    });
+    _syncTicker();
+    return true;
+  }
+
   /// 投影缓存：paint 时填充，供点击命中测试。
   final List<Offset> _screen = <Offset>[];
   final List<double> _zs = <double>[];
@@ -85,6 +120,7 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _searchCtl.dispose();
     _ticker.dispose();
     super.dispose();
   }
@@ -324,6 +360,43 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
                   style: Tga.sub),
             ),
           ),
+          if (!_loading && _names.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: TextField(
+                controller: _searchCtl,
+                style: TextStyle(color: Tga.text, fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: '搜索实体节点，回车定位高亮',
+                  hintStyle: TextStyle(color: Tga.textDim, fontSize: 13),
+                  prefixIcon: Icon(Icons.search_rounded,
+                      size: 18, color: Tga.textSub),
+                  isDense: true,
+                  filled: true,
+                  fillColor: Tga.card,
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Tga.divider),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Tga.divider),
+                  ),
+                ),
+                onSubmitted: (String value) {
+                  if (!_searchNode(value)) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                          content: Text('未找到匹配“${value.trim()}”的节点')),
+                    );
+                  } else {
+                    _showDetails(_selected);
+                  }
+                },
+              ),
+            ),
           Expanded(
             child: _loading
                 ? Center(
@@ -460,6 +533,7 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
                     zs: _zs,
                     selected: _selected,
                     selT: _selT,
+                    searchTerm: _searchTerm,
                   ),
                   size: Size(size, size),
                 ),
@@ -494,8 +568,10 @@ class _SpherePainter extends CustomPainter {
     required this.zs,
     required this.selected,
     required this.selT,
+    this.searchTerm = '',
   });
 
+  final String searchTerm;
   final double rotX, rotY, zoom;
   final List<_V3> pos;
   final List<int> degrees;
@@ -575,6 +651,7 @@ class _SpherePainter extends CustomPainter {
   /// 连线：沿球面微弯的贝塞尔曲线；颜色为两端节点色的线性渐变，
   /// 线宽随共现权重，透明度随深度平方渐隐，背面（平均 z<0）统一降透明度。
   void _drawEdges(Canvas canvas, Offset center, double radius, List<_V3> rot) {
+    final double viewR = radius * 1.6;
     final List<_Edge> sortedEdges = List<_Edge>.from(edges)
       ..sort((_Edge a, _Edge b) {
         final double za = (zs[a.a] + zs[a.b]) / 2;
@@ -583,6 +660,14 @@ class _SpherePainter extends CustomPainter {
       });
     final double invMax = 1.0 / math.max(1, maxWeight);
     for (final _Edge e in sortedEdges) {
+      // 视口裁剪：两端点都远在可视球体外时整条边不可见，跳过昂贵计算。
+      final Offset sea = screen[e.a], seb = screen[e.b];
+      if ((sea.dx - center.dx).abs() > viewR &&
+          (seb.dx - center.dx).abs() > viewR &&
+          (sea.dy - center.dy).abs() > viewR &&
+          (seb.dy - center.dy).abs() > viewR) {
+        continue;
+      }
       final double avgZ = (zs[e.a] + zs[e.b]) / 2;
       final double depth = (avgZ + 1) / 2; // 0 远 → 1 近
       final double w = (e.weight * invMax).clamp(0.0, 1.0);
@@ -699,6 +784,17 @@ class _SpherePainter extends CustomPainter {
             ..strokeWidth = 1.6,
         );
       }
+      // 搜索命中：名称包含关键词的节点画青色外环，批量高亮。
+      if (searchTerm.isNotEmpty && names[i].contains(searchTerm)) {
+        canvas.drawCircle(
+          screen[i],
+          nodeR + (isSel ? 4.2 : 2.6),
+          Paint()
+            ..color = Tga.cyan.withValues(alpha: 0.9)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.8,
+        );
+      }
     }
     return nodeRs;
   }
@@ -720,7 +816,10 @@ class _SpherePainter extends CustomPainter {
     }
 
     const double padX = 4.5, padY = 2.0;
-    final List<Rect> placed = <Rect>[];
+    // 标签避让从 O(n²) 线性扫描改为空间哈希网格：每个标签只与落在
+    // 相邻网格单元里的已放置标签比较，节点规模上百时显著减少 overlaps。
+    const double cell = 96.0;
+    final Map<int, List<Rect>> grid = <int, List<Rect>>{};
     for (final int i in cands) {
       final bool isSel = i == selected;
       final double alpha =
@@ -749,16 +848,33 @@ class _SpherePainter extends CustomPainter {
       final Rect pill =
           Rect.fromLTWH(dx, dy, tp.width + padX * 2, tp.height + padY * 2);
       if (!isSel) {
+        // 只检查 pill 覆盖到的网格单元（最多 2×2），而非全部已放置标签。
         bool hit = false;
-        for (final Rect r in placed) {
-          if (r.overlaps(pill)) {
-            hit = true;
-            break;
+        final int x0 = (pill.left ~/ cell), x1 = (pill.right ~/ cell);
+        final int y0 = (pill.top ~/ cell), y1 = (pill.bottom ~/ cell);
+        for (int gx = x0; gx <= x1 && !hit; gx++) {
+          for (int gy = y0; gy <= y1 && !hit; gy++) {
+            final List<Rect>? bucket = grid[gx * 100003 + gy];
+            if (bucket == null) continue;
+            for (final Rect r in bucket) {
+              if (r.overlaps(pill)) {
+                hit = true;
+                break;
+              }
+            }
           }
         }
         if (hit) continue;
       }
-      placed.add(pill);
+      // 写入覆盖到的所有网格单元（标签可能跨单元边界）。
+      final int px0 = (pill.left ~/ cell), px1 = (pill.right ~/ cell);
+      final int py0 = (pill.top ~/ cell), py1 = (pill.bottom ~/ cell);
+      for (int gx = px0; gx <= px1; gx++) {
+        for (int gy = py0; gy <= py1; gy++) {
+          final int k = gx * 100003 + gy;
+          (grid[k] ??= <Rect>[]).add(pill);
+        }
+      }
 
       final RRect bg = RRect.fromRectAndRadius(pill, const Radius.circular(5));
       canvas.drawRRect(
@@ -866,7 +982,8 @@ class _SpherePainter extends CustomPainter {
       old.zoom != zoom ||
       old.revision != revision ||
       old.selected != selected ||
-      old.selT != selT;
+      old.selT != selT ||
+      old.searchTerm != searchTerm;
 }
 
 class _V3 {

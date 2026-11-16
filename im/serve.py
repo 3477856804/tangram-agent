@@ -119,6 +119,9 @@ def _wx_ctx_restore() -> None:
 # --------------------------------------------------------------------------
 _WEBHOOK_MAX_SKEW = 300.0
 _WEBHOOK_MAX_BODY = 1 << 20  # 1 MiB，防超大请求体耗尽内存
+# 录音上传：base64 后体积膨胀约 4/3，25 MiB 上限对应约 18 MiB 原始音频，
+# 足够数分钟通话录音；仍设硬上限防止内存耗尽。
+_ASR_MAX_BODY = 25 << 20
 _WEBHOOK_NONCES: dict[str, float] = {}
 _WEBHOOK_NONCE_LOCK = threading.Lock()
 
@@ -281,6 +284,8 @@ _CLOUD_SYSTEM = (
     "remember_note（把重要事项记入长期记忆）。"
     "需要计算、验证、执行代码或在沙箱里干活时必须调用 sandbox，不要心算或猜测；"
     "涉及当前时间先调 current_time；用户让你记住事情时调 remember_note。"
+    "用户问股票/量化分析时调 quant_research 做真实计算，只做研究解读，"
+    "严禁推荐买卖或承诺收益，回答末尾必须保留工具返回的风险提示。"
     "工具返回的是真实执行结果，据实转述，失败就如实说失败原因。"
 )
 
@@ -375,6 +380,27 @@ _AGENT_TOOLS: list[dict] = [
                 "type": "object",
                 "properties": {"text": {"type": "string", "description": "要记住的事项"}},
                 "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "quant_research",
+            "description": "AI 量化研究助手：对用户给出的历史收盘价序列做真实的技术指标（MA/EMA/RSI/MACD/布林带）"
+                           "与风险度量（年化波动率/最大回撤/夏普比率）计算，返回结构化结果并强制附带合规风险提示。"
+                           "仅供研究学习：不推荐买卖、不给目标价、不承诺收益、不代客交易；数据不足时如实报错，绝不编造。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prices": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "历史收盘价数值数组（按时间顺序，至少 34 个点）",
+                    },
+                    "symbol": {"type": "string", "description": "可选标的代码，如 600000.SH"},
+                },
+                "required": ["prices"],
             },
         },
     },
@@ -557,6 +583,20 @@ def _exec_agent_tool(name: str, args: dict, svc) -> str:
                 return "工具执行失败：text 为空"
             core_id = svc.memory.core_commit(note)
             return f"已记入长期核心记忆（id={core_id}）：{note}"
+        if name == "quant_research":
+            # AI 量化研究助手：纯函数式真实计算，绝不接交易/下单 API。
+            from app.runtime.quant_research import (  # noqa: PLC0415 - 按需导入
+                InsufficientDataError, analyze,
+            )
+
+            prices = args.get("prices") or []
+            symbol = str(args.get("symbol") or "UNKNOWN")
+            if not isinstance(prices, list) or not prices:
+                return "工具执行失败：prices 必须是非空的历史收盘价数组"
+            try:
+                return json.dumps(analyze(prices, symbol), ensure_ascii=False)
+            except (InsufficientDataError, ValueError) as exc:
+                return f"工具执行失败：{type(exc).__name__}: {exc}"
         return f"工具执行失败：未知工具 {name}"
     except Exception as exc:  # noqa: BLE001 - 工具失败如实回喂给模型
         return f"工具执行失败：{type(exc).__name__}: {exc}"
@@ -1037,11 +1077,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        is_asr = path == "/api/asr"
+        max_body = _ASR_MAX_BODY if is_asr else _WEBHOOK_MAX_BODY
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             n = 0
-        if n < 0 or n > _WEBHOOK_MAX_BODY:
+        if n < 0 or n > max_body:
             return self._json({"error": "payload-too-large-or-invalid"}, 413)
         raw = self.rfile.read(n) if n else b"{}"
         try:
@@ -1066,7 +1108,45 @@ class Handler(BaseHTTPRequestHandler):
             return self._webhook_wechat(body)
         if path == "/api/login/feishu/cancel":
             return self._feishu_cancel()
+        if is_asr:
+            return self._asr_transcribe(body)
         return self._json({"error": "not-found"}, 404)
+
+    def _asr_transcribe(self, body: dict) -> None:
+        """POST /api/asr —— base64 音频 -> 真实语音转文字。
+
+        载荷：{"audio_b64": "<base64>", "filename": "x.m4a"(可选),
+               "language": "zh"(可选)}
+        成功：{"ok": true, "text": "..."}；失败如实返回 {"ok": false,
+               "error": "...", "hint": "..."}，绝不伪造识别文字。
+        来源门禁与 webhook 一致：回环放行，非回环须 TANGRAM_WEBHOOK_SECRET HMAC。
+        """
+        ok, reason = _webhook_gate(self, json.dumps(body, ensure_ascii=False).encode(),
+                                   strict_local=True)
+        if not ok:
+            return self._json({"ok": False, "error": "unauthorized", "reason": reason}, 403)
+        audio_b64 = str(body.get("audio_b64") or body.get("audio") or "")
+        if not audio_b64:
+            return self._json({"ok": False, "error": "empty-audio"}, 400)
+        try:
+            import base64 as _b64
+            data = _b64.b64decode(audio_b64, validate=True)
+        except Exception:
+            return self._json({"ok": False, "error": "bad-base64"}, 400)
+        if not data:
+            return self._json({"ok": False, "error": "empty-audio"}, 400)
+        if len(data) > 18 << 20:
+            return self._json({"ok": False, "error": "audio-too-large"}, 413)
+        try:
+            from backend.voice.asr import AsrUnavailable, transcribe_audio
+            text = transcribe_audio(data)
+        except AsrUnavailable as exc:
+            return self._json({"ok": False, "error": "asr-unavailable", "hint": str(exc)}, 503)
+        except Exception as exc:  # 解码 / 模型 / 网络等真实失败
+            return self._json({"ok": False, "error": "asr-failed", "reason": str(exc)[:400]}, 500)
+        if not text or not text.strip():
+            return self._json({"ok": False, "error": "empty-transcript"}, 422)
+        return self._json({"ok": True, "text": text.strip()})
 
     # ---- 官方协议兼容取码端点（对齐 iLink get_bot_qrcode 契约）----
     def _get_bot_qrcode(self) -> None:

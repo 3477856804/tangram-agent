@@ -110,6 +110,19 @@ class PersistentStorageProvider implements StorageProvider {
         'timestamp': m.timestamp.toIso8601String(),
         'status': m.status.name,
         'thinkingContent': m.thinkingContent,
+        'processStatuses': m.processStatuses
+            ?.map((ProcessStatus s) => <String, dynamic>{
+                  'phase': s.phase,
+                  'query': s.query,
+                  'points': s.points,
+                  'results': s.results
+                      .map((Map<String, String> r) => <String, dynamic>{
+                            'title': r['title'] ?? '',
+                            'url': r['url'] ?? '',
+                          })
+                      .toList(),
+                })
+            .toList(),
         'attachments': m.attachments
             ?.map((Attachment a) => <String, dynamic>{
                   'id': a.id,
@@ -202,6 +215,26 @@ class PersistentStorageProvider implements StorageProvider {
                 cacheCreationTokens:
                     (m['usage']['cacheCreationTokens'] as num?)?.toInt(),
               )
+            : null,
+        processStatuses: m['processStatuses'] is List
+            ? (m['processStatuses'] as List)
+                .whereType<Map<dynamic, dynamic>>()
+                .map((Map<dynamic, dynamic> s) => ProcessStatus(
+                      phase: s['phase']?.toString() ?? '',
+                      query: s['query']?.toString(),
+                      points: s['points']?.toString(),
+                      results: s['results'] is List
+                          ? (s['results'] as List)
+                              .whereType<Map<dynamic, dynamic>>()
+                              .map((Map<dynamic, dynamic> r) =>
+                                  <String, String>{
+                                    'title': r['title']?.toString() ?? '',
+                                    'url': r['url']?.toString() ?? '',
+                                  })
+                              .toList()
+                          : const <Map<String, String>>[],
+                    ))
+                .toList()
             : null,
       );
 

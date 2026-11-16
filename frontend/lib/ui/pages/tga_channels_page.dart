@@ -11,8 +11,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../services/audio_transcribe_service.dart';
 import '../../bridge/backend_client.dart';
 import '../../bridge/bridge_protocol.dart';
 import '../../design/tga_design.dart';
@@ -404,6 +406,15 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
   }
 
   Future<void> _requestQr({String? gatewayUrl}) async {
+    // 记住用户填写的网关地址，供「录音文件转文字」等其它功能复用；
+    // 保存失败不影响扫码流程。
+    final String gw = gatewayUrl?.trim() ?? '';
+    if (gw.isNotEmpty) {
+      SharedPreferences.getInstance().then(
+        (prefs) => prefs.setString(AudioTranscribeService.gatewayPrefKey, gw),
+        onError: (_) {},
+      );
+    }
     _timer?.cancel();
     _cdTimer?.cancel();
     setState(() {
@@ -832,18 +843,15 @@ class _QrAuthSheetState extends State<_QrAuthSheet> {
 }
 
 // ---------------------------------------------------------------------------
-// QQ 授权弹窗：三条真实路径
-//  ① 官方机器人：填 AppID/AppSecret → 真实调用 QQ 官方
-//     bots.qq.com/app/getAppAccessToken 验证（成功=官方真实签发 token，
-//     落 App 私有目录 qq_official.json）→ 再真实连 api.sgroup.qq.com
-//     wss 网关（HELLO/IDENTIFY/READY+心跳）；收到 C2C/群@ 事件走真实
-//     推理并以 v2 被动回复 API 回发。协议对齐官方开源 SDK botpy。
-//  ② 沙箱网关（NapCat）：保留原 im_event{action:'login_qr'} 真码流程
-//     （内嵌 _QrAuthSheet，网关在跑时出 NapCat 真登录码）。
-//  ③ 沙箱直连（扫码）：走「我们的沙箱」真实执行腾讯官方
-//     @tencent-connect/dsh-qqbot（npx dsh），捕获其终端输出的扫码二维码，
-//     渲染方式与微信完全一致（内嵌 _QrAuthSheet(mode:'qq_sandbox')）。
-// 状态标签只认真实 token / 网关状态 / 沙箱进程输出，UI 绝不假绿。
+// QQ 授权弹窗：唯一路径 = 沙箱直连（扫码）。
+//   走「我们的 Linux 沙箱」真实执行腾讯官方 @tencent-connect/dsh-qqbot
+//   （npx dsh）；沙箱初始化时预装并配置 JS 运行时（nodejs/npm），保证
+//   dsh 能真实启动。捕获其终端输出的扫码二维码渲染给用户，扫码登录
+//   成功后由沙箱直连接收消息。渲染方式与微信完全一致（内嵌
+//   _QrAuthSheet(mode:'qq_sandbox')）。
+//   状态标签只认沙箱进程真实输出，UI 绝不假绿、绝不伪造二维码。
+//   说明：官方机器人（_QqOfficialBody）与 NapCat 网关的内核实现仍保留在
+//   控制域内可被调用，但不再作为用户可见的授权选项暴露。
 // ---------------------------------------------------------------------------
 class _QqAuthSheet extends StatefulWidget {
   const _QqAuthSheet(
@@ -857,8 +865,6 @@ class _QqAuthSheet extends StatefulWidget {
 }
 
 class _QqAuthSheetState extends State<_QqAuthSheet> {
-  int _tab = 0; // 0=官方机器人 1=沙箱网关(NapCat)
-
   @override
   Widget build(BuildContext context) {
     return Dialog(
@@ -883,67 +889,24 @@ class _QqAuthSheetState extends State<_QqAuthSheet> {
               ),
               const SizedBox(height: 10),
               Text('${widget.channel.name}授权', style: Tga.h2),
-              const SizedBox(height: 14),
-              // 三条路径切换
-              Container(
-                decoration: BoxDecoration(
-                  color: Tga.bgSoft,
-                  borderRadius: BorderRadius.circular(11),
-                ),
-                padding: const EdgeInsets.all(3),
-                child: Row(
-                  children: <Widget>[
-                    _tabChip(0, '官方机器人'),
-                    _tabChip(1, '沙箱网关'),
-                    _tabChip(2, '沙箱直连(扫码)'),
-                  ],
-                ),
+              const SizedBox(height: 6),
+              Text(
+                '在 Linux 沙箱内运行官方 dsh-qqbot，扫码登录后由沙箱直连。',
+                style: TextStyle(fontSize: 12, color: Tga.textSub),
+                textAlign: TextAlign.center,
               ),
               const SizedBox(height: 16),
-              if (_tab == 0)
-                _QqOfficialBody(
-                  client: widget.client,
-                  onConfirmed: widget.onConfirmed,
-                )
-              else if (_tab == 1)
-                _QrAuthSheet(
-                  client: widget.client,
-                  channel: widget.channel,
-                  onConfirmed: widget.onConfirmed,
-                  embedded: true,
-                )
-              else
-                _QrAuthSheet(
-                  client: widget.client,
-                  channel: widget.channel,
-                  onConfirmed: widget.onConfirmed,
-                  embedded: true,
-                  mode: 'qq_sandbox',
-                ),
+              // 唯一授权路径：沙箱直连（扫码）。沙箱会真实安装并配置 JS
+              // 运行时（nodejs/npm），登录二维码来自 dsh 的真实终端输出。
+              _QrAuthSheet(
+                client: widget.client,
+                channel: widget.channel,
+                onConfirmed: widget.onConfirmed,
+                embedded: true,
+                mode: 'qq_sandbox',
+              ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _tabChip(int idx, String label) {
-    final bool active = _tab == idx;
-    return Expanded(
-      child: GestureDetector(
-        onTap: () => setState(() => _tab = idx),
-        child: Container(
-          height: 34,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: active ? Tga.primary : Colors.transparent,
-            borderRadius: BorderRadius.circular(9),
-          ),
-          child: Text(label,
-              style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: active ? Tga.onPrimary : Tga.textSub)),
         ),
       ),
     );
@@ -951,6 +914,9 @@ class _QqAuthSheetState extends State<_QqAuthSheet> {
 }
 
 /// 官方机器人路径：真实验证 + 真实网关状态展示。
+/// 保留实现供控制域/未来复用；当前 QQ 授权 UI 只暴露沙箱直连，故此类
+/// 暂未从 UI 实例化（内核 qq_official.dart 的协议实现不受影响）。
+// ignore: unused_element
 class _QqOfficialBody extends StatefulWidget {
   const _QqOfficialBody(
       {required this.client, required this.onConfirmed});

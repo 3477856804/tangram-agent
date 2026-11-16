@@ -74,6 +74,11 @@ class EmbeddedBackend implements QqShellRunner {
   }
 
   static EmbeddedBackend? _instance;
+
+  /// 知识图谱可扩展上限：>200 节点场景由前端性能改造承载。
+  static const int _kGraphMaxNodes = 800;
+  static const int _kGraphMaxEdges = 2400;
+
   final HarnessStore store;
   final DownloadManager downloads;
 
@@ -487,9 +492,11 @@ class EmbeddedBackend implements QqShellRunner {
         .map((e) => <String, dynamic>{'name': e.key, 'degree': e.value})
         .toList()
       ..sort((a, b) => (b['degree'] as int).compareTo(a['degree'] as int));
+    // 可扩展上限：默认 800 节点 / 2400 边，支持 >200 节点场景。
+    // 前端图谱页已做视口裁剪、背面剔除、标签网格避让与分层，能承载该规模。
     return _ok(<String, dynamic>{
-      'nodes': nodes.take(200).toList(),
-      'edges': edges.take(500).toList(),
+      'nodes': nodes.take(_kGraphMaxNodes).toList(),
+      'edges': edges.take(_kGraphMaxEdges).toList(),
     });
   }
 
@@ -718,7 +725,22 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         if (plan.ok) {
           query = '参考以下推理要点，深入分析后作答：\n${plan.content}\n\n'
               '问题：$text';
-          // 问题 #4b：两遍推理的规划阶段真实完成，上报要点前 200 字。
+          // 把两遍推理的规划要点作为「思考过程」逐片真实发给 UI：
+          // 前端 tangram_ai_provider 收到 thinking:true 的 stream_token
+          // 会转成 ThinkingDelta，喂给可展开的思考块。内容是模型真实
+          // 产出的规划，绝不编造；按 runes 分片避免切断 emoji。
+          final Runes planRunes = plan.content.runes;
+          const int chunk = 24;
+          for (int i = 0; i < planRunes.length; i += chunk) {
+            final int end = (i + chunk < planRunes.length)
+                ? i + chunk
+                : planRunes.length;
+            _emit('stream_token', <String, dynamic>{
+              'token': String.fromCharCodes(planRunes.skip(i).take(end - i)),
+              'thinking': true,
+            });
+          }
+          // 状态条同样上报要点前 200 字（搜索/推理路径可视化）。
           _emit('chat_status', <String, dynamic>{
             'phase': 'thinking_done',
             'points': plan.content.length > 200
@@ -1076,9 +1098,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   }
 
   Iterable<String> _chunks(String s, int size) sync* {
-    for (var i = 0; i < s.length; i += size) {
-      final end = i + size > s.length ? s.length : i + size;
-      yield s.substring(i, end);
+    // 按 Unicode codepoint 分片，避免 substring 切断 emoji 代理对。
+    final List<int> runes = s.runes.toList();
+    for (var i = 0; i < runes.length; i += size) {
+      final end = i + size > runes.length ? runes.length : i + size;
+      yield String.fromCharCodes(runes.sublist(i, end));
     }
   }
 
@@ -1305,10 +1329,16 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   /// 智能搜索：真实抓取搜索结果页（必应 CN 优先 + DuckDuckGo 兜底），
   /// 解析标题+摘要+链接。失败或无结果返回空串，由调用方如实说明，绝不编造。
   Future<String> _webSearch(String query) async {
-    // 多源：必应 CN 优先（实测国内可达），DuckDuckGo 兜底（海外网络可用）。
-    final String bing = await _scrapeBing(query);
+    // 多源并行（提速）：必应 CN（国内可达）与 DuckDuckGo（海外可用）同时
+    // 发起，最坏延迟从串行 ~16s 压到单源超时 ~8s。两源都成功时优先必应，
+    // 保持原有优先级语义；任一失败/超时不影响另一源。绝不编造结果。
+    final List<String> results = await Future.wait<String>(<Future<String>>[
+      _scrapeBing(query),
+      _scrapeDdg(query),
+    ]);
+    final String bing = results[0];
     if (bing.isNotEmpty) return bing;
-    return _scrapeDdg(query);
+    return results[1];
   }
 
   Future<String> _scrapeBing(String query) async {
@@ -2452,6 +2482,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         'node': tool('node'),
         'gcc': tool('gcc'),
       },
+      'node_ready': tool('node').isNotEmpty,
+      if (tool('node').isEmpty)
+        'node_hint': '沙箱未检测到 Node.js；QQ 沙箱直连（dsh-qqbot）依赖 node/npm，'
+            '扫码前会尝试在 Linux 用户态用 apk 真实补装。',
       'writable': kv['writable'] == 'yes',
     };
   }
@@ -2593,39 +2627,87 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     String cwd = '.',
     Map<String, String>? env,
   }) async {
-    final String? shell = _pickShell();
-    if (shell == null) {
-      throw StateError('沙箱无可用 shell，无法启动 dsh-qqbot');
-    }
-    // 沙箱根目录必须先存在（store.sub 只拼路径不建目录）。
-    final Directory sandboxDir = store.sub('sandbox');
-    await sandboxDir.create(recursive: true);
-    final String root = sandboxDir.path;
-    final String cwdAbs =
-        cwd.startsWith('/') ? cwd : '$root/${cwd == '.' ? '' : cwd}';
-    if (!Directory(cwdAbs).existsSync()) {
-      await Directory(cwdAbs).create(recursive: true);
-    }
     final StringBuffer buf = StringBuffer();
     final Process proc;
-    try {
-      proc = await Process.start(
-        shell,
-        Platform.isWindows
-            ? <String>['/c', 'cd /d "$cwdAbs" && $command']
-            : <String>['-c', 'cd ${_shellQuote(cwdAbs)} 2>/dev/null; $command'],
-        workingDirectory: cwdAbs,
-        includeParentEnvironment: true,
-        environment: <String, String>{
-          'HOME': root,
-          'TERM': 'xterm-256color',
-          'LANG': 'C.UTF-8',
-          'PS1': 'tga@sandbox:\\w\$ ',
-          if (env != null) ...env,
-        },
-      );
-    } on Object catch (e) {
-      throw StateError('启动 shell 进程失败：$e');
+
+    // 安卓：dsh-qqbot 依赖的 node/npm 只存在于 proot 用户态里，宿主
+    // /system/bin/sh（toybox）既无 node 也无 npm。旧实现在这里误用宿主
+    // shell，导致「沙箱里装了 node，dsh 却永远起不来、拿不到二维码」。
+    // 现在安卓分支必须与 proot.run 同一套参数启动长驻进程。
+    if (Platform.isAndroid) {
+      if (!proot.installed) {
+        throw StateError('Linux 沙箱尚未就绪，无法启动 dsh-qqbot；请先在「沙箱」页安装 Linux 环境。');
+      }
+      // 启动前幂等确保 JS 运行时可用（缺失即真实补装，失败如实抛错）。
+      final Map<String, dynamic> js = await proot.ensureJs();
+      if (js['ok'] != true) {
+        throw StateError('${js['error'] ?? 'JS 运行时不可用'}，无法启动 dsh-qqbot。');
+      }
+      final Directory prootTmp = Directory('${proot.extDir.path}/proot_tmp');
+      if (!prootTmp.existsSync()) prootTmp.createSync(recursive: true);
+      final Directory appSandbox = store.sub('sandbox');
+      if (!appSandbox.existsSync()) appSandbox.createSync(recursive: true);
+      final String guestCwd =
+          cwd == '.' ? '/root' : (cwd.startsWith('/') ? cwd : '/root/$cwd');
+      final String script = 'cd ${_shellQuote(guestCwd)} 2>/dev/null; $command';
+      try {
+        proc = await Process.start(
+          proot.prootBin.path,
+          <String>[
+            '-0', '-l', '-r', proot.rootfsDir.path,
+            '-b', '/dev', '-b', '/proc', '-b', '/sys',
+            '-b', '${appSandbox.path}:/workspace',
+            '/bin/sh', '-c', script,
+          ],
+          workingDirectory: proot.extDir.path,
+          includeParentEnvironment: false,
+          environment: <String, String>{
+            'LD_LIBRARY_PATH': proot.extDir.path,
+            'PROOT_TMP_DIR': '${proot.extDir.path}/proot_tmp',
+            'HOME': '/root',
+            'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+            'TERM': 'xterm-256color',
+            'LANG': 'C.UTF-8',
+            'PROOT_NO_SECCOMP': '1',
+            if (env != null) ...env,
+          },
+        );
+      } on Object catch (e) {
+        throw StateError('在 proot 用户态启动 dsh-qqbot 失败：$e');
+      }
+    } else {
+      final String? shell = _pickShell();
+      if (shell == null) {
+        throw StateError('沙箱无可用 shell，无法启动 dsh-qqbot');
+      }
+      // 沙箱根目录必须先存在（store.sub 只拼路径不建目录）。
+      final Directory sandboxDir = store.sub('sandbox');
+      await sandboxDir.create(recursive: true);
+      final String root = sandboxDir.path;
+      final String cwdAbs =
+          cwd.startsWith('/') ? cwd : '$root/${cwd == '.' ? '' : cwd}';
+      if (!Directory(cwdAbs).existsSync()) {
+        await Directory(cwdAbs).create(recursive: true);
+      }
+      try {
+        proc = await Process.start(
+          shell,
+          Platform.isWindows
+              ? <String>['/c', 'cd /d "$cwdAbs" && $command']
+              : <String>['-c', 'cd ${_shellQuote(cwdAbs)} 2>/dev/null; $command'],
+          workingDirectory: cwdAbs,
+          includeParentEnvironment: true,
+          environment: <String, String>{
+            'HOME': root,
+            'TERM': 'xterm-256color',
+            'LANG': 'C.UTF-8',
+            'PS1': 'tga@sandbox:\\w\$ ',
+            if (env != null) ...env,
+          },
+        );
+      } on Object catch (e) {
+        throw StateError('启动 shell 进程失败：$e');
+      }
     }
     proc.stdout.transform(utf8.decoder).listen((String s) => buf.write(s));
     proc.stderr.transform(utf8.decoder).listen((String s) => buf.write(s));

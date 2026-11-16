@@ -87,4 +87,12 @@ class SearchStatus extends ChatEvent {
     this.results = const <Map<String, String>>[],
     this.points,
   });
+
+  /// 转成可持久化的纯数据，随消息落盘供历史回看。
+  ProcessStatus toProcessStatus() => ProcessStatus(
+        phase: phase,
+        query: query,
+        results: results,
+        points: points,
+      );
 }

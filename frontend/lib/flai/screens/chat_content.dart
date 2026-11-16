@@ -159,7 +159,11 @@ class _FlaiChatContentState extends State<FlaiChatContent> {
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        _ChatStatusStrip(statuses: widget.streamingStatus),
+                        _ChatStatusStrip(
+                          statuses: widget.streamingStatus
+                              .map((SearchStatus s) => s.toProcessStatus())
+                              .toList(),
+                        ),
                         indicator,
                       ],
                     );
@@ -178,6 +182,10 @@ class _FlaiChatContentState extends State<FlaiChatContent> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          // 历史消息仍可展开查看当时的检索/推理路径。
+                          if (msg.processStatuses != null &&
+                              msg.processStatuses!.isNotEmpty)
+                            _ChatStatusStrip(statuses: msg.processStatuses!),
                           MessageBubble(
                             message: msg,
                             onRetry: widget.onRetry,
@@ -222,7 +230,11 @@ class _FlaiChatContentState extends State<FlaiChatContent> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          _ChatStatusStrip(statuses: widget.streamingStatus),
+                          _ChatStatusStrip(
+                            statuses: widget.streamingStatus
+                                .map((SearchStatus s) => s.toProcessStatus())
+                                .toList(),
+                          ),
                           bubble,
                         ],
                       ),
@@ -307,7 +319,8 @@ class _FlaiChatContentState extends State<FlaiChatContent> {
 class _ChatStatusStrip extends StatefulWidget {
   const _ChatStatusStrip({required this.statuses});
 
-  final List<SearchStatus> statuses;
+  /// 用可持久化的 ProcessStatus，流式与历史消息统一渲染。
+  final List<ProcessStatus> statuses;
 
   @override
   State<_ChatStatusStrip> createState() => _ChatStatusStripState();
@@ -345,9 +358,9 @@ class _ChatStatusStripState extends State<_ChatStatusStrip> {
     final TgaTokens t = Tga.tokens;
 
     String? searchingQuery;
-    SearchStatus? searchDone;
-    SearchStatus? thinkingDone;
-    for (final SearchStatus s in widget.statuses) {
+    ProcessStatus? searchDone;
+    ProcessStatus? thinkingDone;
+    for (final ProcessStatus s in widget.statuses) {
       switch (s.phase) {
         case 'searching':
           searchingQuery = s.query ?? '';
@@ -417,7 +430,7 @@ class _ChatStatusStripState extends State<_ChatStatusStrip> {
                             ? Icons.expand_less_rounded
                             : Icons.expand_more_rounded,
                         size: 16,
-                        color: t.textDim,
+                        color: t.textSub,
                       ),
                     ),
                   ),
@@ -431,7 +444,7 @@ class _ChatStatusStripState extends State<_ChatStatusStrip> {
                     padding: const EdgeInsets.symmetric(vertical: 1.5),
                     child: Text(
                       '· ${r['title'] ?? ''} — ${r['url'] ?? ''}',
-                      style: TextStyle(fontSize: 11, height: 1.4, color: t.textDim),
+                      style: TextStyle(fontSize: 11, height: 1.4, color: t.textSub),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -443,7 +456,7 @@ class _ChatStatusStripState extends State<_ChatStatusStrip> {
                   child: Text(
                     thinkingDone.points!,
                     style: TextStyle(
-                        fontSize: 11, height: 1.4, color: t.textDim),
+                        fontSize: 11, height: 1.4, color: t.textSub),
                     maxLines: 6,
                     overflow: TextOverflow.ellipsis,
                   ),

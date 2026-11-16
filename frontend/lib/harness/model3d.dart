@@ -173,8 +173,8 @@ class Mesh3D {
 
   /// 程序化低模鹿：项目鹿 logo 的 3D 化（身体/脖子/头/四肢/鹿角）。
   ///
-  /// 全部由立方体拼装并做刚体变换，顶点/面数可控，适合做桌宠的 3D 形象，
-  /// 也适合当 3D 页面的默认示例模型（真实网格，不是贴图占位）。
+  /// 全部由立方体拼装并做刚体变换，顶点/面数可控，
+  /// 作为 3D 页面的默认示例模型（真实网格，不是贴图占位）。
   static Mesh3D deer({double scale = 1}) {
     Mesh3D part(double w, double h, double d, Vec3 offset,
         {double rotX = 0, double rotZ = 0}) {

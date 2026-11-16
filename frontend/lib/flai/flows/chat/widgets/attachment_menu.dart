@@ -8,6 +8,7 @@ Future<void> showAttachmentMenu({
   required BuildContext context,
   required ComposerConfig config,
   ValueChanged<PickedAttachment>? onAttachmentPicked,
+  ValueChanged<PickedAttachment>? onAudioPicked,
 }) {
   final theme = FlaiTheme.of(context);
   return showModalBottomSheet<void>(
@@ -21,6 +22,7 @@ Future<void> showAttachmentMenu({
       child: _AttachmentMenuSheet(
         config: config,
         onAttachmentPicked: onAttachmentPicked,
+        onAudioPicked: onAudioPicked,
       ),
     ),
   );
@@ -29,10 +31,12 @@ Future<void> showAttachmentMenu({
 class _AttachmentMenuSheet extends StatefulWidget {
   final ComposerConfig config;
   final ValueChanged<PickedAttachment>? onAttachmentPicked;
+  final ValueChanged<PickedAttachment>? onAudioPicked;
 
   const _AttachmentMenuSheet({
     required this.config,
     this.onAttachmentPicked,
+    this.onAudioPicked,
   });
 
   @override
@@ -61,6 +65,20 @@ class _AttachmentMenuSheetState extends State<_AttachmentMenuSheet> {
 
     if (item.onTap != null) {
       item.onTap!.call();
+      return;
+    }
+
+    // 录音文件走独立回调：选择后由 composer 触发真实 ASR 转写，
+    // 而不是当作普通二进制附件登记元信息。
+    if (item.label == FlaiAttachmentPicker.audioLabel) {
+      final PickedAttachment? audio = await FlaiAttachmentPicker.openAudio();
+      if (audio != null) {
+        if (widget.onAudioPicked != null) {
+          widget.onAudioPicked!.call(audio);
+        } else {
+          widget.onAttachmentPicked?.call(audio);
+        }
+      }
       return;
     }
 

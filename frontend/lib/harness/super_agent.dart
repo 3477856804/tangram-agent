@@ -639,6 +639,62 @@ class SuperAgent {
     return ticket;
   }
 
+  /// 快捷建任务：直接用目标文本建单，不经过 Trigger 注入与两级过滤。
+  /// mandate 可选，缺省用默认策略；任何越界值按 clamp 收敛，绝不放大权限。
+  Future<SuperTicket> _createTicketDirect({
+    required String goal,
+    required String source,
+    required String thread,
+    Map<String, dynamic>? mandate,
+  }) async {
+    final String id = 'ticket-${++_seq}';
+    int maxSteps = defaultMaxSteps;
+    int deadline = defaultDeadlineSeconds;
+    String scope = 'source=$source;kind=direct（不可自我扩张）';
+    List<String> allowedTools = const <String>['chat'];
+    if (mandate != null) {
+      if (mandate['max_steps'] is num) {
+        maxSteps = (mandate['max_steps'] as num).toInt().clamp(1, 20);
+      }
+      if (mandate['deadline_seconds'] is num) {
+        deadline = (mandate['deadline_seconds'] as num).toInt().clamp(1, 86400);
+      }
+      if ((mandate['scope'] ?? '').toString().isNotEmpty) {
+        scope = '${mandate['scope']}（不可自我扩张）';
+      }
+      if (mandate['allowed_tools'] is List) {
+        final List<String> tools = (mandate['allowed_tools'] as List)
+            .map((dynamic e) => e.toString())
+            .where((String s) => s.isNotEmpty)
+            .toList();
+        if (tools.isNotEmpty) allowedTools = tools;
+      }
+    }
+    final SuperTicket ticket = SuperTicket(
+      id: id,
+      goal: goal,
+      source: source,
+      thread: thread.isEmpty ? 'direct-$id' : thread,
+      mandate: Mandate(
+        scope: scope,
+        maxSteps: maxSteps,
+        deadlineSeconds: deadline,
+        allowedTools: allowedTools,
+      ),
+    );
+    ticket.history.add('[快捷建任务·$source] $goal');
+    ticket.workerSession = 'worker-$id';
+    ticket.workDir = 'sandbox/super_agent/$id';
+    _tickets[id] = ticket;
+    await _persistTickets();
+    _log('super.ticket.created_direct', <String, dynamic>{
+      'ticket': id,
+      'source': source,
+      'max_steps': ticket.mandate.maxSteps,
+    });
+    return ticket;
+  }
+
   // ---- Worker：隔离上下文、异步执行、真实推理、有限步 ----
 
   Future<void> _runWorker(String ticketId) async {
@@ -809,16 +865,142 @@ class SuperAgent {
               .map((FilterDecision d) => d.toJson())
               .toList(),
         };
-      case 'tickets':
+      case 'tickets': {
+        // 可选过滤：query 模糊匹配 id/goal/source/thread/status/engine；
+        // status 精确匹配 TicketStatus.name。无过滤时返回全部（向后兼容）。
+        final String query = (p['query'] ?? '').toString().trim().toLowerCase();
+        final String statusFilter =
+            (p['status'] ?? '').toString().trim().toLowerCase();
+        final List<Map<String, dynamic>> all = _tickets.values
+            .map((SuperTicket t) => t.toJson())
+            .toList();
+        final List<Map<String, dynamic>> filtered =
+            all.where((Map<String, dynamic> t) {
+          if (statusFilter.isNotEmpty &&
+              (t['status'] ?? '').toString().toLowerCase() != statusFilter) {
+            return false;
+          }
+          if (query.isEmpty) return true;
+          return <String>[
+            (t['id'] ?? '').toString(),
+            (t['goal'] ?? '').toString(),
+            (t['source'] ?? '').toString(),
+            (t['thread'] ?? '').toString(),
+            (t['status'] ?? '').toString(),
+            (t['engine'] ?? '').toString(),
+          ].any((String v) => v.toLowerCase().contains(query));
+        }).toList();
         return <String, dynamic>{
           'ok': true,
-          'tickets': _tickets.values.map((SuperTicket t) => t.toJson()).toList(),
+          'tickets': filtered,
+          'total': all.length,
+          'filtered': filtered.length,
         };
+      }
       case 'ticket':
         final SuperTicket? t = _tickets[(p['id'] ?? '').toString()];
         return t == null
             ? <String, dynamic>{'ok': false, 'error': '工单不存在'}
             : <String, dynamic>{'ok': true, 'ticket': t.toJson()};
+      case 'create_direct': {
+        // 用户主动快捷建任务：绕过 Trigger 注入与两级过滤，直接建单并入队执行。
+        // 与 subagent 同语义，不检查 observe；返回真实 id 与真实状态。
+        final String goal = (p['goal'] ?? '').toString().trim();
+        if (goal.isEmpty) {
+          return <String, dynamic>{'ok': false, 'error': '目标内容为空'};
+        }
+        final String source = (p['source'] ?? '').toString().trim();
+        final String thread = (p['thread'] ?? '').toString().trim();
+        final Map<String, dynamic>? mandate = p['mandate'] is Map
+            ? Map<String, dynamic>.from(p['mandate'] as Map)
+            : null;
+        final SuperTicket directTicket = await _createTicketDirect(
+          goal: goal,
+          source: source.isEmpty ? 'manual' : source,
+          thread: thread,
+          mandate: mandate,
+        );
+        await _drainQueue();
+        return <String, dynamic>{
+          'ok': true,
+          'id': directTicket.id,
+          'ticket': directTicket.toJson(),
+        };
+      }
+      case 'retry': {
+        final String id = (p['id'] ?? '').toString();
+        final SuperTicket? retryTicket = _tickets[id];
+        if (retryTicket == null) {
+          return <String, dynamic>{'ok': false, 'error': '工单不存在'};
+        }
+        if (retryTicket.status != TicketStatus.failed &&
+            retryTicket.status != TicketStatus.stalled &&
+            retryTicket.status != TicketStatus.stopped) {
+          return <String, dynamic>{
+            'ok': false,
+            'error':
+                '仅 failed/stalled/stopped 工单可重试，当前状态 ${retryTicket.status.name}',
+          };
+        }
+        final TicketStatus before = retryTicket.status;
+        retryTicket.status = TicketStatus.queued;
+        retryTicket.replanned = false;
+        retryTicket.updatedAt = DateTime.now().toIso8601String();
+        retryTicket.history.add('[人工重试] 由 ${before.name} 重置为 queued 重新入队');
+        await _persistTickets();
+        _log('super.ticket.retry', <String, dynamic>{
+          'ticket': id,
+          'from': before.name,
+        });
+        await _drainQueue();
+        return <String, dynamic>{
+          'ok': true,
+          'id': id,
+          'status': retryTicket.status.name,
+          'ticket': retryTicket.toJson(),
+        };
+      }
+      case 'batch_stop': {
+        final dynamic idsRaw = p['ids'];
+        if (idsRaw is! List) {
+          return <String, dynamic>{'ok': false, 'error': 'ids 必须为列表'};
+        }
+        final List<Map<String, dynamic>> results = <Map<String, dynamic>>[];
+        int succeeded = 0;
+        int failed = 0;
+        bool changed = false;
+        for (final dynamic raw in idsRaw) {
+          final String id = raw.toString();
+          final SuperTicket? stopTicket = _tickets[id];
+          if (stopTicket == null) {
+            results.add(<String, dynamic>{
+              'id': id,
+              'ok': false,
+              'error': '工单不存在',
+            });
+            failed += 1;
+            continue;
+          }
+          stopTicket.status = TicketStatus.stopped;
+          stopTicket.updatedAt = DateTime.now().toIso8601String();
+          results.add(<String, dynamic>{
+            'id': id,
+            'ok': true,
+            'status': stopTicket.status.name,
+          });
+          succeeded += 1;
+          changed = true;
+          _log('super.ticket.stop', <String, dynamic>{'ticket': id});
+        }
+        if (changed) await _persistTickets();
+        return <String, dynamic>{
+          'ok': true,
+          'succeeded': succeeded,
+          'failed': failed,
+          'all_ok': failed == 0,
+          'results': results,
+        };
+      }
       case 'events':
         return <String, dynamic>{
           'ok': true,

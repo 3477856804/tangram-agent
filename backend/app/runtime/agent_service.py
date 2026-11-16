@@ -40,7 +40,9 @@ _SYSTEM = (
     "你是 TGA（Tangram），住在用户设备里的个人专属 AI Agent。"
     "用简洁、诚实的简体中文回答；能算准的精确计算，查不到就直说查不到，绝不编造。"
     "你有真实工具：sandbox（工作区 shell）、current_time（真实时钟）、"
-    "recall_memory（真实历史记忆）、remember_note（写入长期记忆）。"
+    "recall_memory（真实历史记忆）、remember_note（写入长期记忆）、"
+    "quant_research（量化研究助手：对历史收盘价做真实技术指标与风险度量计算，"
+    "仅供研究学习，不推荐买卖、不承诺收益、不代客交易，回答末尾必须保留风险提示）。"
 )
 
 
@@ -109,7 +111,13 @@ class RuntimeService:
 
     def _cloud_stream(self, cfg: tuple[str, str, str], prompt: str,
                       chunk_size: int = 8) -> Iterator[str]:
-        """真实 HTTP 调用 OpenAI 兼容端点；内容全部来自服务端响应。"""
+        """真实 HTTP 调用 OpenAI 兼容端点；优先 SSE 逐增量返回首 token。
+
+        旧实现用 urlopen().read() 读完整响应再按字符切片，是「伪流式」：
+        首 token 延迟等于整段生成时间。现在请求 stream=true，按 SSE data:
+        行增量解析 delta.content 并立即 yield；若端点不支持 SSE（返回普通
+        JSON），再回退一次性内容，绝不伪造数据。
+        """
         base, key, model = cfg
         parsed = urlsplit(base)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -122,14 +130,41 @@ class RuntimeService:
             ],
             "temperature": 0.7,
             "max_tokens": 2048,
+            "stream": True,
         }, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
             base + "/chat/completions", data=body,
             headers={"Content-Type": "application/json",
-                     "Authorization": "Bearer " + key},
+                     "Authorization": "Bearer " + key,
+                     "Accept": "text/event-stream, application/json"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310 - 地址来自配置
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            if "text/event-stream" in content_type:
+                produced = False
+                for raw in resp:  # 逐行增量读取，不 read() 整段
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:"):].strip()
+                    if not data_str or data_str == "[DONE]":
+                        continue
+                    try:
+                        obj = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    try:
+                        delta = obj["choices"][0].get("delta", {}).get("content") or ""
+                    except (KeyError, IndexError, TypeError):
+                        continue
+                    if delta:
+                        produced = True
+                        yield delta
+                if not produced:
+                    raise RuntimeNotConfigured("SSE 流未返回任何内容；不伪造回复")
+                return
+            # 端点不支持 SSE：回退一次性 JSON（内容仍来自真实响应）。
             data = json.loads(resp.read().decode("utf-8"))
         try:
             content = str(data["choices"][0]["message"]["content"] or "").strip()
@@ -149,33 +184,36 @@ class RuntimeService:
         self.memory.add_turn("user", text, session_id=session_id)
 
         direct = self._deterministic(text, session_id)
-        chunks: list[str] = []
         if direct:
-            chunks = [direct]
-        else:
-            recalled = self.memory.recall_text(text, k=4)
-            recent = self.memory.recent(session_id=session_id, k=6)
-            history = "\n".join(f"{e.role}: {e.text}" for e in recent)
-            prompt_parts = []
-            if recalled:
-                prompt_parts.append("【相关历史记忆（本机真实记录）】\n" + recalled)
-            if history:
-                prompt_parts.append("【最近对话】\n" + history)
-            prompt_parts.append("【当前用户消息】\n" + text)
-            prompt = "\n\n".join(prompt_parts)
-            chunks = list(self._model_stream(prompt))
+            # 确定性能力：内容短，直接落记忆后一次性返回。
+            self.memory.add_turn("assistant", direct.strip(), session_id=session_id)
+            yield from (direct[i:i + 12] for i in range(0, len(direct), 12))
+            return
 
-        answer = "".join(chunks).strip()
+        recalled = self.memory.recall_text(text, k=4)
+        recent = self.memory.recent(session_id=session_id, k=6)
+        history = "\n".join(f"{e.role}: {e.text}" for e in recent)
+        prompt_parts = []
+        if recalled:
+            prompt_parts.append("【相关历史记忆（本机真实记录）】\n" + recalled)
+        if history:
+            prompt_parts.append("【最近对话】\n" + history)
+        prompt_parts.append("【当前用户消息】\n" + text)
+        prompt = "\n\n".join(prompt_parts)
+
+        # 真流式：逐片 yield，首 token 一到就投递，不再 list() 整段缓冲
+        # （旧实现把整段生成 materialize 后才 yield，首 token 延迟=全程）。
+        # 同时累积真实内容，流结束后写入记忆，保证记账不丢。
+        pieces: list[str] = []
+        for piece in self._model_stream(prompt):
+            if not piece:
+                continue
+            pieces.append(piece)
+            yield piece
+        answer = "".join(pieces).strip()
         if not answer:
             raise RuntimeNotConfigured("本次没有拿到任何真实回复内容（不伪造）")
         self.memory.add_turn("assistant", answer, session_id=session_id)
-        if len(chunks) == 1 and len(chunks[0]) > 64:
-            # 把长回答按可见字符分片投递，内容仍是同一份真实文本
-            step = 12
-            for i in range(0, len(chunks[0]), step):
-                yield chunks[0][i:i + step]
-        else:
-            yield from chunks
 
     def chat(self, text: str, session_id: str = "default") -> str:
         return "".join(self.chat_stream(text, session_id=session_id)).strip()
@@ -232,6 +270,21 @@ class RuntimeService:
             if proc.returncode != 0:
                 out += f"\n[exit={proc.returncode}]"
             return (out or "(无输出)")[:max_out]
+        if name == "quant_research":
+            # AI 量化研究助手：纯函数式真实计算，绝不接交易/下单 API。
+            from .quant_research import (  # noqa: PLC0415 - 按需导入
+                InsufficientDataError, analyze,
+            )
+
+            prices = args.get("prices") or []
+            symbol = str(args.get("symbol") or "UNKNOWN")
+            if not isinstance(prices, list) or not prices:
+                return "工具执行失败：prices 必须是非空的历史收盘价数组"
+            try:
+                result = analyze(prices, symbol)
+            except (InsufficientDataError, ValueError) as exc:
+                return f"工具执行失败：{type(exc).__name__}: {exc}"
+            return json.dumps(result, ensure_ascii=False)
         return f"工具执行失败：未知工具 {name}"
 
     def status(self) -> dict:

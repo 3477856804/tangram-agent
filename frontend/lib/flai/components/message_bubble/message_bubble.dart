@@ -356,9 +356,11 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
       child: Container(
         padding: EdgeInsets.all(theme.spacing.sm),
         decoration: BoxDecoration(
-          color: theme.colors.muted.withValues(alpha: 0.5),
+          // 用不透明容器而非 0.5 透明：半透明容器会与深色底混合，把正文
+          // 对比度从 5:1 拉低到 3.6:1（截图里整段思考内容发暗的根因）。
+          color: theme.colors.muted,
           borderRadius: BorderRadius.circular(theme.radius.md),
-          border: Border.all(color: theme.colors.border.withValues(alpha: 0.5)),
+          border: Border.all(color: theme.colors.border),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -395,9 +397,10 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
                 padding: EdgeInsets.only(top: theme.spacing.xs),
                 child: Text(
                   widget.content,
-                  style: theme.typography.sm.copyWith(
-                    color: theme.colors.mutedForeground,
-                    fontStyle: FontStyle.italic,
+                  // 思考内容是真实信息，用正文前景色保证深浅主题均清晰；
+                  // 不再用 mutedForeground + 斜体（小字斜体叠加低对比度不可读）。
+                  style: theme.typography.bodySmall(
+                    color: theme.colors.foreground,
                   ),
                 ),
               ),
@@ -454,8 +457,10 @@ class _ToolCallChip extends StatelessWidget {
           Icon(
             isComplete ? Icons.check_circle : Icons.hourglass_top,
             size: 12,
+            // 完成态用正文前景色（主题感知，深浅均清晰）；不再硬编码
+            // #4ADE80——它在浅色 chip 上对比度偏低且完全不随主题切换。
             color: isComplete
-                ? const Color(0xFF4ADE80)
+                ? theme.colors.foreground
                 : theme.colors.mutedForeground,
           ),
           SizedBox(width: theme.spacing.xs),

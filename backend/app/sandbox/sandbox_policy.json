@@ -8,7 +8,8 @@
   "allow": [
     "pwd", "ls", "cat", "head", "tail", "wc", "date", "echo", "printf",
     "mkdir", "touch", "cp", "mv", "rm", "find", "grep", "sed", "awk",
-    "python3", "pip", "git", "curl", "wget", "tar", "unzip", "sha256sum"
+    "python3", "pip", "git", "curl", "wget", "tar", "unzip", "sha256sum",
+    "node", "npm", "npx"
   ],
   "deny": [
     "shutdown", "reboot", "mkfs", "dd", "chmod 777 /", "mount", "umount",

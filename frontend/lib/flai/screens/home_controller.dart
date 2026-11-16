@@ -352,6 +352,11 @@ class HomeController extends ChangeNotifier {
         citations: _pendingCitations.isNotEmpty
             ? _pendingCitations.toList()
             : null,
+        processStatuses: _streamingStatus.isNotEmpty
+            ? _streamingStatus
+                .map((SearchStatus s) => s.toProcessStatus())
+                .toList()
+            : null,
       ),
     ];
     notifyListeners();
@@ -372,6 +377,11 @@ class HomeController extends ChangeNotifier {
           : null,
       citations: _pendingCitations.isNotEmpty
           ? _pendingCitations.toList()
+          : null,
+      processStatuses: _streamingStatus.isNotEmpty
+          ? _streamingStatus
+              .map((SearchStatus s) => s.toProcessStatus())
+              .toList()
           : null,
       status: MessageStatus.complete,
     );

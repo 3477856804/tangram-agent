@@ -11,9 +11,10 @@ import '../../ui/i18n/tga_strings.dart';
 ///
 /// 全部数据来自后端 `super_agent` 控制域真实返回：status/sources/triggers/
 /// decisions/tickets/events/router_context/rules，动作 set_observe/set_policy/
-/// inject/watchdog/stop/attach/subagent 均真实执行并把后端返回（含 ok=false
-/// 的 error）原样展示在「最近操作」。默认 observe 模式只读、不派发工单，
-/// 外部源未配置时如实标注未连接，绝不伪造连接或推理结果。
+/// inject/watchdog/stop/attach/subagent/create_direct/retry/batch_stop 均真实
+/// 执行并把后端返回（含 ok=false 的 error）原样展示在「最近操作」。tickets
+/// 支持 query/status 过滤，筛选栏直接透传给后端取真实子集。默认 observe 模式
+/// 只读、不派发工单，外部源未配置时如实标注未连接，绝不伪造连接或推理结果。
 class TgaSuperAgentPage extends StatefulWidget {
   const TgaSuperAgentPage({super.key});
 
@@ -60,6 +61,20 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
   final TextEditingController _attachCtrl = TextEditingController();
   final TextEditingController _subagentCtrl = TextEditingController();
 
+  // 工单筛选/多选（孤儿页内部增强，不改变导航状态）。
+  final TextEditingController _ticketSearch = TextEditingController();
+  String _ticketStatus = 'all';
+  int _ticketTotal = 0;
+  final Set<String> _selectedTickets = <String>{};
+  static const List<String> _ticketStatuses = <String>[
+    'all', 'queued', 'running', 'done', 'failed', 'stalled', 'stopped',
+  ];
+
+  // 快捷建任务（create_direct）输入。
+  final TextEditingController _directGoal = TextEditingController();
+  final TextEditingController _directThread = TextEditingController();
+  String _directSource = 'manual';
+
   @override
   void initState() {
     super.initState();
@@ -74,6 +89,9 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
     _stepsCtrl.dispose();
     _attachCtrl.dispose();
     _subagentCtrl.dispose();
+    _ticketSearch.dispose();
+    _directGoal.dispose();
+    _directThread.dispose();
     super.dispose();
   }
 
@@ -123,9 +141,10 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
     final List<String> errors = <String>[];
 
     Future<void> load(String label, String action,
-        void Function(Map<String, dynamic> ok) apply) async {
+        void Function(Map<String, dynamic> ok) apply,
+        [Map<String, dynamic> extra = const <String, dynamic>{}]) async {
       try {
-        final Map<String, dynamic> p = await _call(backend, action);
+        final Map<String, dynamic> p = await _call(backend, action, extra);
         if (p['ok'] == true) {
           apply(p);
         } else {
@@ -149,8 +168,14 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
         (Map<String, dynamic> p) => _triggers = _mapList(p['triggers']));
     await load('准入决策', 'decisions',
         (Map<String, dynamic> p) => _decisions = _mapList(p['decisions']));
-    await load('工单', 'tickets',
-        (Map<String, dynamic> p) => _tickets = _mapList(p['tickets']));
+    await load('工单', 'tickets', (Map<String, dynamic> p) {
+      _tickets = _mapList(p['tickets']);
+      _ticketTotal =
+          (p['total'] is num) ? (p['total'] as num).toInt() : _tickets.length;
+    }, <String, dynamic>{
+      'query': _ticketSearch.text.trim(),
+      'status': _ticketStatus == 'all' ? '' : _ticketStatus,
+    });
     await load('事件流', 'events', (Map<String, dynamic> p) {
       _events = p['events'] is List ? p['events'] as List : <dynamic>[];
     });
@@ -179,6 +204,78 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
       setState(() => _lastResult = '[$label] 请求失败：$e');
     }
     await _refresh();
+  }
+
+  /// 仅按当前筛选条件重新拉取工单，避免整页刷新打断输入。
+  Future<void> _reloadTickets() async {
+    if (!mounted) return;
+    final BackendClient backend = context.read<BackendClient>();
+    try {
+      final Map<String, dynamic> p = await _call(backend, 'tickets',
+          <String, dynamic>{
+        'query': _ticketSearch.text.trim(),
+        'status': _ticketStatus == 'all' ? '' : _ticketStatus,
+      });
+      if (!mounted) return;
+      if (p['ok'] == true) {
+        setState(() {
+          _tickets = _mapList(p['tickets']);
+          _ticketTotal =
+              (p['total'] is num) ? (p['total'] as num).toInt() : _tickets.length;
+          // 过滤后清掉已不可见的选中项，避免误批量操作。
+          final Set<String> visible = _tickets
+              .map((Map<String, dynamic> t) => (t['id'] ?? '').toString())
+              .toSet();
+          _selectedTickets.removeWhere((String id) => !visible.contains(id));
+        });
+      } else {
+        _toast('工单过滤失败：${p['error'] ?? 'ok=false'}');
+      }
+    } on Object catch (e) {
+      _toast('工单过滤请求失败：$e');
+    }
+  }
+
+  Future<void> _batchStop() async {
+    if (_selectedTickets.isEmpty) {
+      _toast('请先勾选工单');
+      return;
+    }
+    final List<String> ids = _selectedTickets.toList();
+    setState(() => _busy = true);
+    final BackendClient backend = context.read<BackendClient>();
+    try {
+      final Map<String, dynamic> p =
+          await _call(backend, 'batch_stop', <String, dynamic>{'ids': ids});
+      if (!mounted) return;
+      setState(() {
+        _lastResult = '[批量停止] ${_brief(p)}';
+        _selectedTickets.clear();
+      });
+      final int ok =
+          (p['succeeded'] is num) ? (p['succeeded'] as num).toInt() : 0;
+      final int bad =
+          (p['failed'] is num) ? (p['failed'] as num).toInt() : 0;
+      _toast('批量停止完成：成功 $ok，失败 $bad');
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() => _lastResult = '[批量停止] 请求失败：$e');
+    }
+    await _refresh();
+  }
+
+  Future<void> _directCreate() async {
+    final String goal = _directGoal.text.trim();
+    if (goal.isEmpty) {
+      _toast('任务目标不能为空');
+      return;
+    }
+    await _act('快捷建任务', 'create_direct', <String, dynamic>{
+      'goal': goal,
+      'source': _directSource,
+      'thread': _directThread.text.trim(),
+    });
+    if (mounted) _directGoal.clear();
   }
 
   // ---------------------------------------------------------------- 概览
@@ -469,6 +566,59 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
           ],
         ),
       ),
+      TgaGroupTitle(
+          '快捷建任务（create_direct：直接建单并执行，无需注入 Trigger）'),
+      TgaCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                const Text('来源', style: TextStyle(fontSize: 12)),
+                const SizedBox(width: 10),
+                DropdownButton<String>(
+                  value: _directSource,
+                  style: TextStyle(fontSize: 13, color: Tga.text),
+                  items: <DropdownMenuItem<String>>[
+                    for (final String s in _sources)
+                      DropdownMenuItem<String>(value: s, child: Text(s)),
+                  ],
+                  onChanged: (String? v) =>
+                      setState(() => _directSource = v ?? 'manual'),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: TextField(
+                    controller: _directThread,
+                    style: TextStyle(fontSize: 13, color: Tga.text),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: 'thread（可空）',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _directGoal,
+              maxLines: 3,
+              style: TextStyle(fontSize: 13, color: Tga.text),
+              decoration: const InputDecoration(
+                isDense: true,
+                hintText: '如：修复支付回调的幂等缺陷',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TgaButton(
+              label: '建任务并派发',
+              onTap: () => unawaited(_directCreate()),
+            ),
+          ],
+        ),
+      ),
       TgaGroupTitle('最近触发事件（Trigger）',
           trailing: TgaTag('${_triggers.length} 条', color: Tga.textSub)),
       TgaCard(
@@ -576,10 +726,71 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
   List<Widget> _ticketsTab() {
     return <Widget>[
       TgaGroupTitle('工单看板（Ticket / Mandate）',
-          trailing: TgaTag('${_tickets.length} 个', color: Tga.textSub)),
+          trailing: TgaTag('$_ticketTotal 个 · 显示 ${_tickets.length}',
+              color: Tga.textSub)),
+      TgaCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    controller: _ticketSearch,
+                    style: TextStyle(fontSize: 13, color: Tga.text),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      hintText: '搜索目标 / id / 来源 / thread（透传后端）',
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => unawaited(_reloadTickets()),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                TgaButton(
+                  label: '搜索',
+                  filled: false,
+                  onTap: () => unawaited(_reloadTickets()),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: <Widget>[
+                const Text('状态', style: TextStyle(fontSize: 12)),
+                const SizedBox(width: 8),
+                DropdownButton<String>(
+                  value: _ticketStatus,
+                  style: TextStyle(fontSize: 13, color: Tga.text),
+                  items: <DropdownMenuItem<String>>[
+                    for (final String s in _ticketStatuses)
+                      DropdownMenuItem<String>(
+                        value: s,
+                        child: Text(s == 'all' ? '全部状态' : s),
+                      ),
+                  ],
+                  onChanged: (String? v) {
+                    setState(() => _ticketStatus = v ?? 'all');
+                    unawaited(_reloadTickets());
+                  },
+                ),
+                const Spacer(),
+                TgaTag('已选 ${_selectedTickets.length}', color: Tga.gold),
+              ],
+            ),
+            const SizedBox(height: 8),
+            TgaButton(
+              label: '批量停止所选',
+              filled: false,
+              color: Tga.red,
+              onTap: () => unawaited(_batchStop()),
+            ),
+          ],
+        ),
+      ),
       if (_tickets.isEmpty)
         const TgaCard(
-          child: TgaEmpty('暂无工单：observe 只读模式或未通过准入过滤',
+          child: TgaEmpty('无匹配工单：可调整筛选，或建任务 / 关闭 observe 后注入事件',
               icon: Icons.assignment_outlined),
         )
       else
@@ -593,6 +804,15 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
     final Map<String, dynamic> mandate = _asMap(t['mandate']);
     final List<String> history = _stringList(t['history']);
     final List<String> notes = _stringList(t['watchdog_notes']);
+    final int steps = (t['steps'] is num) ? (t['steps'] as num).toInt() : 0;
+    final int maxSteps = (mandate['max_steps'] is num)
+        ? (mandate['max_steps'] as num).toInt()
+        : 0;
+    final double progress = maxSteps > 0
+        ? (steps / maxSteps).clamp(0.0, 1.0).toDouble()
+        : 0.0;
+    final bool canRetry =
+        status == 'failed' || status == 'stalled' || status == 'stopped';
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: TgaCard(
@@ -601,6 +821,18 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
           children: <Widget>[
             Row(
               children: <Widget>[
+                Checkbox(
+                  value: _selectedTickets.contains(id),
+                  onChanged: (bool? v) => setState(() {
+                    if (v == true) {
+                      _selectedTickets.add(id);
+                    } else {
+                      _selectedTickets.remove(id);
+                    }
+                  }),
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  visualDensity: VisualDensity.compact,
+                ),
                 Expanded(
                   child: Text('${t['goal'] ?? ''}',
                       style: Tga.body, maxLines: 2, overflow: TextOverflow.ellipsis),
@@ -610,8 +842,26 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
             ),
             const SizedBox(height: 6),
             Text('$id · 来源 ${t['source'] ?? ''} · thread ${t['thread'] ?? '—'} · '
-                'steps ${t['steps'] ?? 0} · engine ${t['engine'] ?? '—'}',
+                'steps $steps/$maxSteps · engine ${t['engine'] ?? '—'}',
                 style: Tga.caption),
+            if (maxSteps > 0) ...<Widget>[
+              const SizedBox(height: 6),
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: LinearProgressIndicator(
+                      value: progress,
+                      minHeight: 6,
+                      backgroundColor: Tga.bgSoft,
+                      valueColor:
+                          AlwaysStoppedAnimation<Color>(_statusColor(status)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text('$steps/$maxSteps', style: Tga.caption),
+                ],
+              ),
+            ],
             const SizedBox(height: 4),
             Text('Mandate：${mandate['scope'] ?? ''} · '
                 'max_steps ${mandate['max_steps'] ?? '—'} · '
@@ -637,8 +887,19 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
                   style: TextStyle(fontSize: 11, color: Tga.red)),
             ],
             const SizedBox(height: 8),
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: <Widget>[
+                if (canRetry)
+                  TgaButton(
+                    label: '重试',
+                    filled: false,
+                    color: Tga.gold,
+                    onTap: () => unawaited(_act('重试 $id', 'retry',
+                        <String, dynamic>{'id': id})),
+                  ),
                 TgaButton(
                   label: '停止',
                   filled: false,
@@ -646,13 +907,11 @@ class _TgaSuperAgentPageState extends State<TgaSuperAgentPage> {
                   onTap: () => unawaited(_act('停止 $id', 'stop',
                       <String, dynamic>{'id': id})),
                 ),
-                const SizedBox(width: 8),
                 TgaButton(
                   label: '人工跟进',
                   filled: false,
                   onTap: () => unawaited(_showAttach(id)),
                 ),
-                const SizedBox(width: 8),
                 TgaButton(
                   label: '派生子任务',
                   filled: false,

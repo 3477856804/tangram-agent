@@ -25,7 +25,10 @@ class TangramColors {
   // 文本：墨黑 / 贝壳灰
   static const Color textPrimary = Color(0xFF111111);
   static const Color textSecondary = Color(0xFF64748B);
-  static const Color textMuted = Color(0xFF8A97A8);
+  // textMuted 原为 #8A97A8，白底对比度仅 2.97:1（低于 WCAG AA 4.5:1），
+  // 次要文字在浅色下偏淡。提到 #64748B（4.6:1），与 secondary 齐平以达标；
+  // caption 仍用更浅的 #A3AEBD 保留层次（仅用于极不重要的角标）。
+  static const Color textMuted = Color(0xFF64748B);
   static const Color textCaption = Color(0xFFA3AEBD);
 
   // 描边（海盐蓝 #B9DDD7 透明度阶梯）
@@ -78,7 +81,10 @@ class TangramColorsDark {
 
   static const Color textPrimary = Color(0xFFE2E8F0);
   static const Color textSecondary = Color(0xFF94A3B8);
-  static const Color textMuted = Color(0xFF7A8899);
+  // textMuted 原为 #7A8899，落在思考块容器上时对比度仅 3.66:1（截图里
+  // 深色模式整段文字发暗的根因）。提到 #94A3B8（7.07:1）达标；caption
+  // 保持 #64748B 仅作极次要角标。
+  static const Color textMuted = Color(0xFF94A3B8);
   static const Color textCaption = Color(0xFF64748B);
 
   static const Color borderL1 = Color(0xFF262E36);
