@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../design/dsh_tokens.dart';
+import '../../services/presence_store.dart';
 import '../../ui/i18n/tga_strings.dart';
+import '../../ui/panels/presence_sheet.dart';
 import '../flows/chat/chat_experience_config.dart';
 import '../flows/chat/screens/empty_chat_state.dart';
 import '../flows/chat/voice_controller.dart';
@@ -37,6 +39,13 @@ class FlaiHomeScreen extends StatefulWidget {
 
   final VoidCallback? onOpenSettings;
 
+  /// 打开「在场状态」底部弹窗的回调，由主流程注入。
+  /// 为空时不渲染模式按钮，页面本身不直接依赖 Provider。
+  final VoidCallback? onPresenceTap;
+
+  /// 当前场景模式，仅用于切换顶栏按钮图标；由主流程随 PresenceStore 更新。
+  final PresenceMode? presenceMode;
+
   const FlaiHomeScreen({
     super.key,
     required this.sidebarConfig,
@@ -51,6 +60,8 @@ class FlaiHomeScreen extends StatefulWidget {
     this.onNewChat,
     this.onConversationTap,
     this.onOpenSettings,
+    this.onPresenceTap,
+    this.presenceMode,
   });
 
   @override
@@ -192,6 +203,19 @@ class _FlaiHomeScreenState extends State<FlaiHomeScreen> {
                         ),
                       ),
                       ...effectiveConfig.topNavActions,
+                      if (widget.onPresenceTap != null) ...<Widget>[
+                        const SizedBox(width: DshSpace.x6),
+                        _CircleButton(
+                          icon: presenceModeIcon(
+                            widget.presenceMode ?? PresenceMode.chat,
+                          ),
+                          iconSize: 19,
+                          tooltip: context.t('presence.open', zh: '在场状态'),
+                          semanticsLabel:
+                              context.t('presence.open', zh: '在场状态'),
+                          onTap: widget.onPresenceTap!,
+                        ),
+                      ],
                       const SizedBox(width: DshSpace.x6),
                       if (widget.onNewChat != null)
                         _CircleButton(

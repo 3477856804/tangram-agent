@@ -28,7 +28,10 @@ class _TgaAccountOpsPageState extends State<TgaAccountOpsPage> {
   AccountOps? _ops;
   List<Map<String, dynamic>> _accounts = <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _drafts = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _interactions = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _orders = <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _audit = <Map<String, dynamic>>[];
+  String _lastPublishDue = '';
   bool _loading = true;
   bool _busy = false;
   String _error = '';
@@ -64,12 +67,16 @@ class _TgaAccountOpsPageState extends State<TgaAccountOpsPage> {
           );
       final List<Map<String, dynamic>> accounts = await ops.listAccounts();
       final List<Map<String, dynamic>> drafts = await ops.listDrafts();
+      final List<Map<String, dynamic>> interactions = await ops.listInteractions();
+      final List<Map<String, dynamic>> orders = await ops.listOrders();
       final List<Map<String, dynamic>> audit = await ops.audit(limit: 30);
       if (!mounted) return;
       setState(() {
         _ops = ops;
         _accounts = accounts;
         _drafts = drafts;
+        _interactions = interactions;
+        _orders = orders;
         _audit = audit;
         _loading = false;
       });
@@ -87,11 +94,15 @@ class _TgaAccountOpsPageState extends State<TgaAccountOpsPage> {
     if (ops == null) return;
     final List<Map<String, dynamic>> accounts = await ops.listAccounts();
     final List<Map<String, dynamic>> drafts = await ops.listDrafts();
+    final List<Map<String, dynamic>> interactions = await ops.listInteractions();
+    final List<Map<String, dynamic>> orders = await ops.listOrders();
     final List<Map<String, dynamic>> audit = await ops.audit(limit: 30);
     if (!mounted) return;
     setState(() {
       _accounts = accounts;
       _drafts = drafts;
+      _interactions = interactions;
+      _orders = orders;
       _audit = audit;
     });
   }
@@ -100,13 +111,24 @@ class _TgaAccountOpsPageState extends State<TgaAccountOpsPage> {
       {bool refresh = true}) async {
     if (_busy) return;
     setState(() => _busy = true);
-    final Map<String, dynamic> r = await action();
+    Map<String, dynamic> r;
+    try {
+      r = await action();
+    } on Object catch (e) {
+      r = <String, dynamic>{'ok': false, 'error': '操作异常：$e'};
+    }
     if (!mounted) return;
     setState(() => _busy = false);
     _toast(r['ok'] == true
         ? '操作完成'
         : (r['error'] ?? '操作失败').toString());
-    if (refresh) await _refresh();
+    if (refresh) {
+      try {
+        await _refresh();
+      } on Object catch (e) {
+        _toast('刷新失败：$e');
+      }
+    }
   }
 
   Future<void> _addAccount() async {
@@ -349,6 +371,306 @@ class _TgaAccountOpsPageState extends State<TgaAccountOpsPage> {
     await _run(() => ops.rejectDraft((draft['id'] ?? '').toString(), text));
   }
 
+  Future<void> _publishDue() async {
+    final AccountOps? ops = _ops;
+    if (ops == null) return;
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final Map<String, dynamic> r = await ops.publishDue();
+      if (!mounted) return;
+      final int published =
+          (r['published'] is num) ? (r['published'] as num).toInt() : 0;
+      final int failed =
+          (r['failed'] is num) ? (r['failed'] as num).toInt() : 0;
+      final int skipped =
+          (r['skipped'] is num) ? (r['skipped'] as num).toInt() : 0;
+      setState(() {
+        _busy = false;
+        _lastPublishDue = r['ok'] == true
+            ? '到期 ${r['due']} 条：成功 $published，失败 $failed，跳过 $skipped'
+            : '定时发布失败：${r['error'] ?? 'ok=false'}';
+      });
+      _toast(_lastPublishDue);
+      await _refresh();
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _lastPublishDue = '定时发布异常：$e';
+      });
+      _toast(_lastPublishDue);
+    }
+  }
+
+  Future<String?> _promptText(String title, String hint,
+      {String initial = ''}) async {
+    final TextEditingController ctrl =
+        TextEditingController(text: initial);
+    final String? value = await showDialog<String>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        backgroundColor: Tga.card,
+        title: Text(title, style: Tga.h2),
+        content: TextField(
+          controller: ctrl,
+          style: TextStyle(color: Tga.text),
+          decoration: InputDecoration(hintText: hint),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text('取消', style: TextStyle(color: Tga.textSub)),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(ctrl.text),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    return value;
+  }
+
+  Future<void> _addInteraction() async {
+    final AccountOps? ops = _ops;
+    if (ops == null) return;
+    final List<Map<String, dynamic>> accounts = _accounts;
+    String accountId = accounts.isEmpty
+        ? ''
+        : (accounts.first['id'] ?? '').toString();
+    final TextEditingController channel = TextEditingController();
+    final TextEditingController target = TextEditingController();
+    final TextEditingController summary = TextEditingController();
+    String direction = 'out';
+    String status = 'logged';
+    final TextEditingController statusCtrl = TextEditingController(text: status);
+    final bool? go = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => StatefulBuilder(
+        builder: (BuildContext ctx, StateSetter setLocal) => AlertDialog(
+          backgroundColor: Tga.card,
+          title: Text('新增互动记录', style: Tga.h2),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                DropdownButtonFormField<String>(
+                  value: accountId.isEmpty ? '' : accountId,
+                  dropdownColor: Tga.card,
+                  style: TextStyle(color: Tga.text),
+                  decoration: const InputDecoration(labelText: '关联账号（可选）'),
+                  items: <DropdownMenuItem<String>>[
+                    const DropdownMenuItem<String>(
+                        value: '', child: Text('不关联账号')),
+                    for (final Map<String, dynamic> a in accounts)
+                      DropdownMenuItem<String>(
+                        value: (a['id'] ?? '').toString(),
+                        child: Text('${a['name']} · ${a['channel']}'),
+                      ),
+                  ],
+                  onChanged: (String? v) => setLocal(() => accountId = v ?? ''),
+                ),
+                TextField(
+                  controller: channel,
+                  style: TextStyle(color: Tga.text),
+                  decoration: const InputDecoration(
+                      hintText: '渠道（关联账号时可留空）'),
+                ),
+                TextField(
+                  controller: target,
+                  style: TextStyle(color: Tga.text),
+                  decoration: const InputDecoration(hintText: '目标/会话/帖子'),
+                ),
+                DropdownButtonFormField<String>(
+                  value: direction,
+                  dropdownColor: Tga.card,
+                  style: TextStyle(color: Tga.text),
+                  decoration: const InputDecoration(labelText: '方向'),
+                  items: const <DropdownMenuItem<String>>[
+                    DropdownMenuItem<String>(value: 'out', child: Text('out 我方发出')),
+                    DropdownMenuItem<String>(value: 'in', child: Text('in 对方互动')),
+                  ],
+                  onChanged: (String? v) =>
+                      setLocal(() => direction = v ?? 'out'),
+                ),
+                TextField(
+                  controller: summary,
+                  minLines: 2,
+                  maxLines: 5,
+                  style: TextStyle(color: Tga.text),
+                  decoration: const InputDecoration(
+                      hintText: '互动摘要（只记业务元数据，不填密钥/隐私正文）'),
+                ),
+                TextField(
+                  controller: statusCtrl,
+                  style: TextStyle(color: Tga.text),
+                  decoration: const InputDecoration(hintText: '状态，默认 logged'),
+                  onChanged: (String v) => status = v,
+                ),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: Text('取消', style: TextStyle(color: Tga.textSub)),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    final String ch = channel.text;
+    final String tg = target.text;
+    final String sm = summary.text;
+    channel.dispose();
+    target.dispose();
+    summary.dispose();
+    statusCtrl.dispose();
+    if (go != true || !mounted) return;
+    await _run(() => ops.addInteraction(
+          channel: ch,
+          accountId: accountId,
+          target: tg,
+          direction: direction,
+          summary: sm,
+          status: status,
+        ));
+  }
+
+  Future<void> _addOrder() async {
+    final AccountOps? ops = _ops;
+    if (ops == null) return;
+    if (_accounts.isEmpty) {
+      _toast('请先添加一个账号');
+      return;
+    }
+    String accountId = (_accounts.first['id'] ?? '').toString();
+    final TextEditingController platformOrderId = TextEditingController();
+    final TextEditingController title = TextEditingController();
+    final TextEditingController amount = TextEditingController();
+    final TextEditingController status = TextEditingController(text: 'pending');
+    final bool? go = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => StatefulBuilder(
+        builder: (BuildContext ctx, StateSetter setLocal) => AlertDialog(
+          backgroundColor: Tga.card,
+          title: Text('新增/更新订单', style: Tga.h2),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                DropdownButtonFormField<String>(
+                  value: accountId,
+                  dropdownColor: Tga.card,
+                  style: TextStyle(color: Tga.text),
+                  decoration: const InputDecoration(labelText: '账号'),
+                  items: <DropdownMenuItem<String>>[
+                    for (final Map<String, dynamic> a in _accounts)
+                      DropdownMenuItem<String>(
+                        value: (a['id'] ?? '').toString(),
+                        child: Text('${a['name']} · ${a['channel']}'),
+                      ),
+                  ],
+                  onChanged: (String? v) =>
+                      setLocal(() => accountId = v ?? accountId),
+                ),
+                TextField(
+                  controller: platformOrderId,
+                  style: TextStyle(color: Tga.text),
+                  decoration: const InputDecoration(
+                      hintText: '平台订单号（同账号幂等更新）'),
+                ),
+                TextField(
+                  controller: title,
+                  style: TextStyle(color: Tga.text),
+                  decoration: const InputDecoration(hintText: '订单标题'),
+                ),
+                TextField(
+                  controller: amount,
+                  keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true),
+                  style: TextStyle(color: Tga.text),
+                  decoration: const InputDecoration(hintText: '金额，如 99.00'),
+                ),
+                TextField(
+                  controller: status,
+                  style: TextStyle(color: Tga.text),
+                  decoration: const InputDecoration(
+                      hintText: '状态，如 pending/paid/shipped'),
+                ),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: Text('取消', style: TextStyle(color: Tga.textSub)),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    final String orderId = platformOrderId.text;
+    final String orderTitle = title.text;
+    final String amountText = amount.text;
+    final String orderStatus = status.text;
+    platformOrderId.dispose();
+    title.dispose();
+    amount.dispose();
+    status.dispose();
+    if (go != true || !mounted) return;
+    final double? parsedAmount = double.tryParse(amountText.trim());
+    if (parsedAmount == null) {
+      _toast('金额必须是数字');
+      return;
+    }
+    await _run(() => ops.upsertOrder(
+          accountId: accountId,
+          platformOrderId: orderId,
+          title: orderTitle,
+          amount: parsedAmount,
+          status: orderStatus,
+        ));
+  }
+
+  Future<void> _updateInteractionStatus(Map<String, dynamic> record) async {
+    final AccountOps? ops = _ops;
+    if (ops == null) return;
+    final String? status = await _promptText(
+      '更新互动状态',
+      '如 logged/replied/closed',
+      initial: (record['status'] ?? '').toString(),
+    );
+    if (status == null || status.trim().isEmpty || !mounted) return;
+    final String next = status.trim();
+    await _run(() =>
+        ops.updateInteractionStatus((record['id'] ?? '').toString(), next));
+  }
+
+  Future<void> _updateOrderStatus(Map<String, dynamic> order) async {
+    final AccountOps? ops = _ops;
+    if (ops == null) return;
+    final String? status = await _promptText(
+      '更新订单状态',
+      '如 pending/paid/shipped/refunded',
+      initial: (order['status'] ?? '').toString(),
+    );
+    if (status == null || status.trim().isEmpty || !mounted) return;
+    final String next = status.trim();
+    await _run(() =>
+        ops.updateOrderStatus((order['id'] ?? '').toString(), next));
+  }
+
   Map<String, dynamic>? _accountOf(String id) {
     for (final Map<String, dynamic> a in _accounts) {
       if (a['id'] == id) return a;
@@ -357,10 +679,41 @@ class _TgaAccountOpsPageState extends State<TgaAccountOpsPage> {
   }
 
   String _accountName(String id) {
+    if (id.trim().isEmpty) return '未关联账号';
     final Map<String, dynamic>? account = _accountOf(id);
     final String name = (account?['name'] ?? '').toString().trim();
     return name.isEmpty ? '账号' : name;
   }
+
+  /// 所有带排期时间的草稿（含尚未审批），按时间升序展示。
+  List<Map<String, dynamic>> get _scheduledDrafts {
+    final List<Map<String, dynamic>> list = _drafts
+        .where((Map<String, dynamic> d) =>
+            (d['scheduled_at'] ?? '').toString().trim().isNotEmpty)
+        .toList()
+      ..sort((Map<String, dynamic> a, Map<String, dynamic> b) =>
+          (a['scheduled_at'] ?? '')
+              .toString()
+              .compareTo((b['scheduled_at'] ?? '').toString()));
+    return list;
+  }
+
+  bool _isDraftDue(Map<String, dynamic> draft) {
+    if ((draft['status'] ?? '') != 'approved') return false;
+    final DateTime? at =
+        DateTime.tryParse((draft['scheduled_at'] ?? '').toString());
+    if (at == null || at.isAfter(DateTime.now())) return false;
+    final Map<String, dynamic>? account =
+        _accountOf((draft['account_id'] ?? '').toString());
+    return account != null && account['enabled'] != false;
+  }
+
+  Color _orderStatusColor(String status) => switch (status) {
+        'paid' || 'shipped' || 'completed' || 'done' => Tga.green,
+        'pending' => Tga.orange,
+        'refunded' || 'cancelled' || 'failed' => Tga.red,
+        _ => Tga.textSub,
+      };
 
   Color _statusColor(String status) => switch (status) {
         'approved' => Tga.primary,
@@ -616,6 +969,233 @@ class _TgaAccountOpsPageState extends State<TgaAccountOpsPage> {
                         ),
                       ),
                     ),
+                TgaGroupTitle(
+                  '定时发布（${_scheduledDrafts.length}）',
+                  trailing: TgaButton(
+                    label: '发布到期草稿',
+                    icon: Icons.schedule_rounded,
+                    onTap: _busy ? () {} : () => _publishDue(),
+                  ),
+                ),
+                if (_lastPublishDue.isNotEmpty)
+                  TgaCard(
+                    child: Text(
+                      '$_lastPublishDue\n'
+                      '仅发布 approved + 已到点 + 账号启用的草稿；不会自动审批。',
+                      style: Tga.sub,
+                    ),
+                  ),
+                if (_scheduledDrafts.isEmpty)
+                  TgaCard(
+                    child: TgaEmpty('暂无定时草稿\n新建草稿时填写排期时间即可',
+                        icon: Icons.schedule_outlined),
+                  )
+                else
+                  for (final Map<String, dynamic> d in _scheduledDrafts)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: TgaCard(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Row(
+                              children: <Widget>[
+                                Expanded(
+                                  child: Text(
+                                    _accountName(
+                                        (d['account_id'] ?? '').toString()),
+                                    style: Tga.h2,
+                                  ),
+                                ),
+                                TgaTag(
+                                  _statusLabel((d['status'] ?? '').toString()),
+                                  color: _statusColor(
+                                      (d['status'] ?? '').toString()),
+                                ),
+                                if (_isDraftDue(d)) ...<Widget>[
+                                  const SizedBox(width: 6),
+                                  TgaTag('已到点', color: Tga.green),
+                                ],
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '排期 ${d['scheduled_at']} · 目标 ${d['target'] ?? ''}',
+                              style: Tga.caption,
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              (d['content'] ?? '').toString().isEmpty
+                                  ? '（仅素材）'
+                                  : (d['content'] ?? '').toString(),
+                              style: Tga.sub,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            if ((d['status'] ?? '') == 'approved')
+                              Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: TgaButton(
+                                  label: '立即发布此草稿',
+                                  color: Tga.green,
+                                  icon: Icons.publish_rounded,
+                                  onTap: _busy
+                                      ? () {}
+                                      : () => _run(() => _ops!.publishDraft(
+                                          (d['id'] ?? '').toString())),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                TgaGroupTitle(
+                  '互动记录（${_interactions.length}）',
+                  trailing: TgaButton(
+                    label: '新增互动',
+                    icon: Icons.add_rounded,
+                    onTap: _busy ? () {} : () => _addInteraction(),
+                  ),
+                ),
+                if (_interactions.isEmpty)
+                  TgaCard(
+                    child: TgaEmpty(
+                        '暂无互动记录\n只记录渠道/目标/方向/摘要等业务元数据',
+                        icon: Icons.forum_outlined),
+                  )
+                else
+                  for (final Map<String, dynamic> i in _interactions)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: TgaCard(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Row(
+                              children: <Widget>[
+                                TgaTag(
+                                  (i['direction'] ?? '').toString() == 'in'
+                                      ? '对方 in'
+                                      : '我方 out',
+                                  color: (i['direction'] ?? '') == 'in'
+                                      ? Tga.purple
+                                      : Tga.primary,
+                                ),
+                                const SizedBox(width: 6),
+                                TgaTag(
+                                    (i['channel'] ?? '').toString(),
+                                    color: Tga.textSub),
+                                const Spacer(),
+                                TgaTag(
+                                  (i['status'] ?? '').toString(),
+                                  color: Tga.textSub,
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '${_accountName((i['account_id'] ?? '').toString())}'
+                              ' · 目标 ${(i['target'] ?? '').toString().isEmpty ? '—' : i['target']}',
+                              style: Tga.caption,
+                            ),
+                            const SizedBox(height: 2),
+                            Text((i['summary'] ?? '').toString(),
+                                style: Tga.body,
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis),
+                            const SizedBox(height: 4),
+                            Row(
+                              children: <Widget>[
+                                Expanded(
+                                  child: Text(
+                                    '${i['at'] ?? ''}'.replaceFirst('T', ' '),
+                                    style: Tga.caption,
+                                  ),
+                                ),
+                                TgaButton(
+                                  label: '更新状态',
+                                  filled: false,
+                                  onTap: _busy
+                                      ? () {}
+                                      : () => _updateInteractionStatus(i),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                TgaGroupTitle(
+                  '订单记录（${_orders.length}）',
+                  trailing: TgaButton(
+                    label: '新增/更新订单',
+                    icon: Icons.receipt_long_outlined,
+                    onTap: _busy ? () {} : () => _addOrder(),
+                  ),
+                ),
+                if (_orders.isEmpty)
+                  TgaCard(
+                    child: TgaEmpty('暂无订单记录\n按平台订单号幂等写入，重复保存只更新',
+                        icon: Icons.receipt_long_outlined),
+                  )
+                else
+                  for (final Map<String, dynamic> o in _orders)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: TgaCard(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Row(
+                              children: <Widget>[
+                                Expanded(
+                                  child: Text(
+                                    (o['title'] ?? '').toString(),
+                                    style: Tga.h2,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                TgaTag(
+                                  (o['status'] ?? '').toString(),
+                                  color: _orderStatusColor(
+                                      (o['status'] ?? '').toString()),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              '${_accountName((o['account_id'] ?? '').toString())}'
+                              ' · 平台单号 ${o['platform_order_id'] ?? ''}'
+                              ' · 金额 ${o['amount'] ?? ''}',
+                              style: Tga.caption,
+                            ),
+                            const SizedBox(height: 4),
+                            Row(
+                              children: <Widget>[
+                                Expanded(
+                                  child: Text(
+                                    '更新于 ${(o['updated_at'] ?? '').toString().replaceFirst('T', ' ')}',
+                                    style: Tga.caption,
+                                  ),
+                                ),
+                                TgaButton(
+                                  label: '更新状态',
+                                  filled: false,
+                                  onTap: _busy
+                                      ? () {}
+                                      : () => _updateOrderStatus(o),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                 const TgaGroupTitle('平台规则（只读）'),
                 TgaCard(
                   child: Column(
@@ -636,7 +1216,8 @@ class _TgaAccountOpsPageState extends State<TgaAccountOpsPage> {
                         ),
                       const SizedBox(height: 4),
                       Text(
-                        '发布必须由人工 approve；本页没有自动发布 / 刷量开关。',
+                        '发布必须由人工 approve；定时发布只处理 approved 且已到点的草稿，'
+                        '不会自动审批；本页没有刷量 / 造假开关。',
                         style: Tga.caption,
                       ),
                     ],

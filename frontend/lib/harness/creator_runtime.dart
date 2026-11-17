@@ -31,11 +31,13 @@ typedef CreatorChatHandler = Future<Map<String, dynamic>> Function(
 /// shell 动作的注入回调：命令与工作目录由运行时给出，执行由宿主负责。
 typedef CreatorShellHandler = Future<Map<String, dynamic>> Function(
     String command, String cwd);
+typedef CreatorMcpHandler = Future<Map<String, dynamic>> Function(
+    String server, String tool, Map<String, dynamic> args);
 
 /// HTTP 客户端工厂（测试可注入，业务默认直接 new HttpClient）。
 typedef CreatorHttpClientFactory = HttpClient Function();
 
-const Set<String> _actionTypes = <String>{'prompt', 'http', 'shell'};
+const Set<String> _actionTypes = <String>{'prompt', 'http', 'shell', 'mcp'};
 const List<String> _httpMethods = <String>[
   'GET',
   'POST',
@@ -64,6 +66,8 @@ class CreatorAction {
     this.url = '',
     this.headers = const <String, String>{},
     this.command = '',
+    this.server = '',
+    this.tool = '',
     this.timeoutMs = 8000,
     this.requiredArgs = const <String>[],
   });
@@ -86,6 +90,10 @@ class CreatorAction {
   /// shell 动作字段。
   final String command;
 
+  /// mcp 动作字段：已配置的 MCP 服务端 id 与工具名。
+  final String server;
+  final String tool;
+
   /// 必填参数名（prompt 会校验；其余动作同样拒绝缺参）。
   final List<String> requiredArgs;
 
@@ -100,6 +108,8 @@ class CreatorAction {
           if (headers.isNotEmpty) 'headers': headers,
         },
         if (command.isNotEmpty) 'command': command,
+        if (server.isNotEmpty) 'server': server,
+        if (tool.isNotEmpty) 'tool': tool,
         if (requiredArgs.isNotEmpty) 'required': requiredArgs,
         'timeout_ms': timeoutMs,
       };
@@ -130,6 +140,8 @@ class CreatorAction {
       url: text(m['url']),
       headers: Map<String, String>.unmodifiable(headers),
       command: m['command'] == null ? '' : m['command'].toString(),
+      server: text(m['server']),
+      tool: text(m['tool']),
       timeoutMs: timeoutRaw is num ? timeoutRaw.toInt() : 8000,
       requiredArgs: required,
     );
@@ -147,6 +159,8 @@ class CreatorManifest {
     this.permissions = const <String>[],
     this.dependencies = const <String>[],
     this.actions = const <CreatorAction>[],
+    this.uiSlots = const <String, Map<String, dynamic>>{},
+    this.policies = const <String, Map<String, dynamic>>{},
   });
 
   final String id;
@@ -161,6 +175,12 @@ class CreatorManifest {
   final List<String> dependencies;
   final List<CreatorAction> actions;
 
+  /// UI 插件槽：key 为槽位 id，value 为声明式组件树；激活时注册到插件内核。
+  final Map<String, Map<String, dynamic>> uiSlots;
+
+  /// 权限策略插件：key 为策略 id，value 为 allow/ask/deny 策略；激活时注册。
+  final Map<String, Map<String, dynamic>> policies;
+
   Map<String, dynamic> toJson() => <String, dynamic>{
         'id': id,
         'name': name,
@@ -169,6 +189,8 @@ class CreatorManifest {
         'permissions': List<String>.of(permissions),
         'dependencies': List<String>.of(dependencies),
         'actions': actions.map((CreatorAction a) => a.toJson()).toList(),
+        'ui_slots': uiSlots,
+        'policies': policies,
       };
 
   static CreatorManifest? tryParse(Object? raw) {
@@ -190,6 +212,19 @@ class CreatorManifest {
             .where((String e) => e.isNotEmpty)
             .toList()
         : <String>[];
+    Map<String, Map<String, dynamic>> maps(Object? v) {
+      if (v is! Map) return <String, Map<String, dynamic>>{};
+      final Map<String, Map<String, dynamic>> out =
+          <String, Map<String, dynamic>>{};
+      v.forEach((dynamic key, dynamic value) {
+        if (value is Map) {
+          out[key.toString()] = value.map(
+              (dynamic k, dynamic val) => MapEntry(k.toString(), val));
+        }
+      });
+      return out;
+    }
+
     return CreatorManifest(
       id: text(m['id']),
       name: text(m['name']),
@@ -198,6 +233,8 @@ class CreatorManifest {
       permissions: strings(m['permissions']),
       dependencies: strings(m['dependencies']),
       actions: actions,
+      uiSlots: maps(m['ui_slots']),
+      policies: maps(m['policies']),
     );
   }
 }
@@ -240,6 +277,7 @@ class CreatorRuntime {
     this.kernel,
     this.chat,
     this.shell,
+    this.mcp,
     this.httpClientFactory,
     Set<String> allowedHosts = const <String>{},
     this.httpTimeout = const Duration(seconds: 8),
@@ -251,6 +289,7 @@ class CreatorRuntime {
   final PluginKernel? kernel;
   final CreatorChatHandler? chat;
   final CreatorShellHandler? shell;
+  final CreatorMcpHandler? mcp;
   final CreatorHttpClientFactory? httpClientFactory;
 
   /// http 动作目标 host 白名单，支持精确匹配与 `*.example.com` 通配。
@@ -391,11 +430,25 @@ class CreatorRuntime {
     if (m.permissions.contains('shell')) {
       warnings.add('已声明 shell 权限：插件可执行本机命令，请只激活可信 manifest');
     }
-    if (m.actions.isEmpty) {
-      errors.add('actions 不能为空');
+    if (m.actions.isEmpty && m.uiSlots.isEmpty && m.policies.isEmpty) {
+      errors.add('actions / ui_slots / policies 至少需要一项');
     }
     if (m.actions.length > 64) {
       errors.add('actions 数量过多（上限 64）');
+    }
+    for (final MapEntry<String, Map<String, dynamic>> slot
+        in m.uiSlots.entries) {
+      if (slot.value.isEmpty) {
+        warnings.add('UI 槽位「${slot.key}」为空对象，界面将没有可渲染内容');
+      }
+    }
+    for (final MapEntry<String, Map<String, dynamic>> policy
+        in m.policies.entries) {
+      if (!policy.value.containsKey('allow') &&
+          !policy.value.containsKey('ask') &&
+          !policy.value.containsKey('deny')) {
+        warnings.add('权限策略「${policy.key}」未声明 allow/ask/deny');
+      }
     }
     final Set<String> actionIds = <String>{};
     for (final CreatorAction a in m.actions) {
@@ -408,8 +461,11 @@ class CreatorRuntime {
         errors.add('动作 id「${a.id}」重复');
       }
       if (!_actionTypes.contains(a.type)) {
-        errors.add('$prefix 的类型「${a.type}」未知（仅支持 prompt/http/shell）');
+        errors.add('$prefix 的类型「${a.type}」未知（仅支持 prompt/http/shell/mcp）');
         continue;
+      }
+      if (a.type == 'mcp' && (a.server.isEmpty || a.tool.isEmpty)) {
+        errors.add('$prefix 的 mcp 动作必须声明 server 与 tool');
       }
       for (final String r in a.requiredArgs) {
         if (!_actionIdPattern.hasMatch(r)) {
@@ -709,6 +765,8 @@ class CreatorRuntime {
           return await _runHttp(action, args);
         case 'shell':
           return await _runShell(owner.manifest, action, args);
+        case 'mcp':
+          return await _runMcp(action, args);
       }
     } on Object catch (e) {
       return <String, dynamic>{
@@ -927,6 +985,31 @@ class CreatorRuntime {
     };
   }
 
+  Future<Map<String, dynamic>> _runMcp(
+    CreatorAction action,
+    Map<String, dynamic> args,
+  ) async {
+    final CreatorMcpHandler? handler = mcp;
+    if (handler == null) {
+      return <String, dynamic>{
+        'ok': false,
+        'type': 'mcp',
+        'error': '未接入 MCP 执行器（请在宿主注入 mcp 回调）',
+      };
+    }
+    final Map<String, dynamic> result =
+        await handler(action.server, action.tool, args);
+    return <String, dynamic>{
+      'ok': result['ok'] != false,
+      'type': 'mcp',
+      'server': action.server,
+      'tool': action.tool,
+      'result': result,
+      if (result['ok'] == false)
+        'error': (result['error'] ?? 'MCP 工具返回失败').toString(),
+    };
+  }
+
   /// 导出单个 manifest 的格式化 JSON。
   Future<Map<String, dynamic>> exportJson(String id) async {
     await _ensureLoaded();
@@ -1005,6 +1088,27 @@ class _CreatorPlugin extends Plugin {
   @override
   Future<void> apply(PluginContext ctx) async {
     ctx.provideService('creator.${manifest.id}', this);
+    for (final MapEntry<String, Map<String, dynamic>> slot
+        in manifest.uiSlots.entries) {
+      ctx.registerWidgetSlot(
+        'creator.${manifest.id}.${slot.key}',
+        <String, dynamic>{
+          ...slot.value,
+          'plugin': manifest.id,
+          'slot': slot.key,
+        },
+      );
+    }
+    for (final MapEntry<String, Map<String, dynamic>> policy
+        in manifest.policies.entries) {
+      ctx.registerPermissionPolicy(
+        'creator.${manifest.id}.${policy.key}',
+        <String, dynamic>{
+          ...policy.value,
+          'plugin': manifest.id,
+        },
+      );
+    }
     for (final CreatorAction action in manifest.actions) {
       final String toolName = runtime.toolName(manifest.id, action.id);
       ctx.registerTool(AgentTool(

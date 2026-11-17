@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Directory;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,10 +11,13 @@ import 'flai/app.dart';
 import 'flai/providers/persistent_storage_provider.dart';
 import 'flai/providers/tangram_ai_provider.dart';
 import 'flai/tangram_config.dart';
+import 'harness/store.dart';
+import 'harness/ui_customization.dart';
 import 'services/backend_port.dart';
 import 'services/model_registry.dart';
 import 'services/model_state.dart';
 import 'services/persona_store.dart';
+import 'services/presence_store.dart';
 import 'services/sandbox.dart';
 import 'services/sandbox_runtime.dart';
 import 'services/task_scheduler.dart';
@@ -56,6 +60,10 @@ class _TangramServicesState extends State<TangramServices> {
   TaskScheduler? _scheduler;
   // 模型注册表：模型选择器与聊天推理的唯一真实数据源（真实落盘、动态刷新）。
   ModelRegistry? _registry;
+  // UI 自定义配置：真实落盘、启动时加载；加载失败回退默认值（不阻塞启动）。
+  UiCustomizationStore? _uiCustomization;
+  // 场景模式 / 情绪连贯 / 打断恢复：与人格独立，真实落盘。
+  PresenceStore? _presence;
   bool _ready = false;
 
   @override
@@ -77,6 +85,9 @@ class _TangramServicesState extends State<TangramServices> {
   }
 
   Future<void> _init() async {
+    // UI 自定义与人格并行加载：本地 JSON 读取，失败即回退默认值。
+    final Future<UiCustomizationStore> uiFuture = _loadUiCustomization();
+    final Future<PresenceStore> presenceFuture = _loadPresence();
     final PersonaStore persona = await PersonaStore.load();
     final SandboxRuntime runtime =
         SandboxRuntime(backend: _backend, persona: persona);
@@ -89,6 +100,18 @@ class _TangramServicesState extends State<TangramServices> {
     final ModelRegistry registry = await ModelRegistry.load();
     _registry = registry;
     _ai.registry = registry;
+    // UI 自定义必须在 _ready 之前就绪，buildTangramConfig 才能按 visibleNavKeys
+    // 过滤 navItems；这里 await 的是本地文件读取（最多 3s 超时后回退默认值），
+    // 不会让启动无限等待。
+    final UiCustomizationStore ui = await uiFuture;
+    if (mounted) {
+      _uiCustomization = ui;
+    } else {
+      ui.dispose();
+    }
+    final PresenceStore presence = await presenceFuture;
+    _presence = presence;
+    _ai.presence = presence;
     try {
       await _port.start();
       _chat.init();
@@ -107,6 +130,39 @@ class _TangramServicesState extends State<TangramServices> {
     if (mounted) setState(() => _ready = true);
   }
 
+  /// 加载 UI 自定义配置。任何异常都回退到默认配置，绝不阻塞或崩溃启动。
+  Future<UiCustomizationStore> _loadUiCustomization() async {
+    HarnessStore harness;
+    try {
+      harness = await HarnessStore.instance();
+    } on Object {
+      // 文档目录不可用：常驻实例退到系统临时目录（仍是真实可写磁盘）。
+      HarnessStore.overrideForTest(Directory.systemTemp);
+      harness = await HarnessStore.instance();
+    }
+    try {
+      return await UiCustomizationStore.load(harness)
+          .timeout(const Duration(seconds: 3));
+    } on Object catch (e) {
+      return UiCustomizationStore.defaults(
+        harness,
+        loadError: '加载 UI 配置失败，已回退默认配置：$e',
+      );
+    }
+  }
+
+  /// 加载场景模式。失败回退内存默认值，不影响对话启动。
+  Future<PresenceStore> _loadPresence() async {
+    final HarnessStore harness = await HarnessStore.instance();
+    try {
+      // load 内部已对损坏文件回退到默认内存态，并会在后续写入时重建。
+      return await PresenceStore.load(harness)
+          .timeout(const Duration(seconds: 3));
+    } on Object {
+      return PresenceStore.load(harness);
+    }
+  }
+
   @override
   void dispose() {
     _chat.dispose();
@@ -117,6 +173,8 @@ class _TangramServicesState extends State<TangramServices> {
     _sandboxRuntime?.dispose();
     _scheduler?.dispose();
     _persona?.dispose();
+    _uiCustomization?.dispose();
+    _presence?.dispose();
     unawaited(_ai.dispose());
     unawaited(_port.stop());
     super.dispose();
@@ -124,7 +182,7 @@ class _TangramServicesState extends State<TangramServices> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_ready || _registry == null) {
+    if (!_ready || _registry == null || _uiCustomization == null) {
       return const MaterialApp(
         debugShowCheckedModeBanner: false,
         home: Scaffold(
@@ -151,6 +209,9 @@ class _TangramServicesState extends State<TangramServices> {
         ChangeNotifierProvider<SandboxView>.value(value: _sandbox),
         ChangeNotifierProvider<PersonaStore>.value(value: _persona!),
         ChangeNotifierProvider<ModelRegistry>.value(value: _registry!),
+        ChangeNotifierProvider<UiCustomizationStore>.value(
+            value: _uiCustomization!),
+        ChangeNotifierProvider<PresenceStore>.value(value: _presence!),
         ChangeNotifierProvider<SandboxRuntime>.value(value: _sandboxRuntime!),
         ChangeNotifierProvider<ChatStreamController>.value(value: _chat),
         ChangeNotifierProvider<AudioStreamController>.value(value: _audio),
@@ -162,6 +223,10 @@ class _TangramServicesState extends State<TangramServices> {
           storageProvider: _storage,
           // 模型列表不再由静态 config 承载，改由 ModelRegistry Provider
           // 动态提供（新增/下载后立即刷新，带本地/云端标记）。
+          // 侧栏真实按界面自定义「已保存」的可见 key 过滤；空/未知回退全部入口。
+          visibleNavKeys: _uiCustomization!
+              .apply(_uiCustomization!.scope)
+              .visibleNavKeys,
         ),
       ),
     );

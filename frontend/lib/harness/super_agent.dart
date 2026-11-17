@@ -25,6 +25,7 @@ import 'dart:convert';
 
 import 'package:tangram/harness/plugin_kernel.dart';
 import 'package:tangram/harness/store.dart';
+import 'package:tangram/services/agent_memory.dart';
 
 // ---------------------------------------------------------------------------
 // 领域模型
@@ -163,6 +164,11 @@ class SuperTicket {
   String workDir = '';
   bool replanned = false;
 
+  /// 绑定的角色子 Agent（可选）：独立记忆文件、角色名与记忆作用域。
+  String agentId = '';
+  String agentName = '';
+  String agentMemoryScope = 'isolated';
+
   /// 子工单的人格设定（name/identity/personality/audience）与角色说明。
   /// 只影响 Worker prompt 的表达方式，不改变 Mandate 授权范围。
   final Map<String, dynamic> persona = <String, dynamic>{};
@@ -200,6 +206,9 @@ class SuperTicket {
         'role': role,
         'risk_notes': List<String>.of(riskNotes),
         'clarifications': List<String>.of(clarifications),
+        'agent_id': agentId,
+        'agent_name': agentName,
+        'agent_memory_scope': agentMemoryScope,
       };
 
   static SuperTicket fromJson(Map<String, dynamic> m) {
@@ -257,6 +266,12 @@ class SuperTicket {
     t.clarifications.addAll((m['clarifications'] is List)
         ? (m['clarifications'] as List).map((dynamic e) => e.toString())
         : <String>[]);
+    t.agentId = (m['agent_id'] ?? '').toString();
+    t.agentName = (m['agent_name'] ?? '').toString();
+    t.agentMemoryScope =
+        (m['agent_memory_scope'] ?? 'isolated').toString() == 'shared'
+            ? 'shared'
+            : 'isolated';
     return t;
   }
 }
@@ -1375,7 +1390,7 @@ class SuperAgent {
           ticket.status = TicketStatus.failed;
           break;
         }
-        final String prompt = _workerPrompt(ticket, step);
+        final String prompt = await _workerPrompt(ticket, step);
         Map<String, dynamic> r;
         try {
           r = await chat(<String, dynamic>{
@@ -1393,6 +1408,18 @@ class SuperAgent {
         ticket.history.add('[step ${step + 1}·${ticket.engine}] $reply');
         ticket.result = reply;
         ticket.updatedAt = DateTime.now().toIso8601String();
+        // 绑定角色 Agent 时，把本步结果写入其独立记忆（isolated 不串 Agent）。
+        if (ticket.agentId.isNotEmpty) {
+          try {
+            await AgentMemory(store, ticket.agentId,
+                    memoryScope: ticket.agentMemoryScope)
+                .append('assistant', reply,
+                    <String, dynamic>{'ticket': ticketId, 'step': step + 1});
+          } on Object {
+            // 记忆写入失败不改变工单交付，watchdog 记录可查。
+            ticket.watchdogNotes.add('角色记忆写入失败（不影响本步结果）');
+          }
+        }
         // Inline/Spill：每步后把低频历史归档为摘要 + 事件引用，抑制上下文膨胀。
         _compactHistory(ticket);
         _log('super.worker.step', <String, dynamic>{
@@ -1471,7 +1498,7 @@ class SuperAgent {
         '上下文归档：${spilled.length} 条历史转入 Spill（ref #${t.spillRefs.last}）');
   }
 
-  String _workerPrompt(SuperTicket t, int step) {
+  Future<String> _workerPrompt(SuperTicket t, int step) async {
     final StringBuffer b = StringBuffer();
     b.writeln('你是 Super Agent 的 Worker，处理一个隔离工单。');
     b.writeln('授权范围（Mandate，不可扩张）：${t.mandate.scope}，'
@@ -1493,6 +1520,25 @@ class SuperAgent {
         if (v.isNotEmpty) parts.add('$label=$v');
       });
       if (parts.isNotEmpty) b.writeln('人格设定：${parts.join('；')}');
+    }
+    if (t.agentId.isNotEmpty) {
+      b.writeln('角色 Agent：${t.agentName.isEmpty ? t.agentId : t.agentName}'
+          '（独立记忆作用域 ${t.agentMemoryScope}）');
+      try {
+        final AgentMemory memory = AgentMemory(store, t.agentId,
+            memoryScope: t.agentMemoryScope);
+        final List<Map<String, dynamic>> recent = await memory.recent(6);
+        if (recent.isNotEmpty) {
+          b.writeln('【该角色的独立记忆（最近 ${recent.length} 条）】');
+          for (final Map<String, dynamic> e in recent) {
+            final String text = (e['text'] ?? '').toString().trim();
+            if (text.isEmpty) continue;
+            b.writeln('- ${e['role']}: ${text.length > 240 ? '${text.substring(0, 240)}…' : text}');
+          }
+        }
+      } on Object {
+        b.writeln('（该角色记忆暂不可读，按无记忆继续）');
+      }
     }
     if (t.riskNotes.isNotEmpty) {
       b.writeln('【风险提示】以下风险来自扫描或人工修订，执行时必须规避：');
@@ -2155,6 +2201,9 @@ class SuperAgent {
               ? Map<String, dynamic>.from(p['persona'] as Map)
               : null,
           role: (p['role'] ?? '').toString(),
+          agent: p['agent'] is Map
+              ? Map<String, dynamic>.from(p['agent'] as Map)
+              : null,
         );
       default:
         return <String, dynamic>{'ok': false, 'error': '未知 Super Agent 动作：$action'};
@@ -2194,6 +2243,7 @@ class SuperAgent {
     String goal, {
     Map<String, dynamic>? persona,
     String role = '',
+    Map<String, dynamic>? agent,
   }) async {
     final SuperTicket? parent = _tickets[parentId];
     if (parent == null) {
@@ -2201,6 +2251,13 @@ class SuperAgent {
     }
     if (goal.trim().isEmpty) {
       return <String, dynamic>{'ok': false, 'error': '子任务目标为空'};
+    }
+    final String agentId = (agent?['id'] ?? '').toString().trim();
+    if (agentId.isNotEmpty && agent?['executionEnabled'] != true) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '该角色 Agent 未开启独立执行（executionEnabled=false）',
+      };
     }
     // Mandate 不可自我扩张：子工单沿用父授权范围或更窄，绝不放宽。
     final String id = 'ticket-${++_seq}';
@@ -2220,6 +2277,17 @@ class SuperAgent {
     );
     child.persona.addAll(_sanitizePersona(persona));
     child.role = role.trim();
+    if (agentId.isNotEmpty) {
+      child.agentId = agentId;
+      child.agentName = (agent?['name'] ?? '').toString();
+      child.agentMemoryScope =
+          (agent?['memoryScope'] ?? 'isolated').toString() == 'shared'
+              ? 'shared'
+              : 'isolated';
+      if (child.role.isEmpty) {
+        child.role = (agent?['role'] ?? '').toString();
+      }
+    }
     // 风险与澄清结论随父工单继承，避免子任务在同样风险上重复踩坑。
     child.riskNotes.addAll(parent.riskNotes);
     child.clarifications.addAll(parent.clarifications);

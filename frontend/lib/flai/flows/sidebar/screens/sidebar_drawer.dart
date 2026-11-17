@@ -3,12 +3,18 @@ import 'package:provider/provider.dart';
 
 import '../../../../design/dsh_tokens.dart';
 import '../../../../design/dsh_widgets.dart';
+import '../../../../harness/ui_customization.dart';
 import '../../../../services/persona_store.dart';
 import '../../../../ui/i18n/tga_strings.dart';
 import '../../../../ui/pages/tga_profile_page.dart';
 import '../../../../ui/pages/tga_settings_page.dart';
 import '../sidebar_config.dart';
 import '../widgets/chat_list_item.dart';
+
+/// i18n 词典尚未收录的新导航 key 的中文兜底（显示为可读文案而不是裸 key）。
+const Map<String, String> _navFallbackZh = <String, String>{
+  'sidebar.uiPlugins': 'UI 插件槽',
+};
 
 /// 侧栏导航的业务分组。顺序即渲染顺序；未知 labelKey 回落到系统组，
 /// 保证以后新增入口不会因为没登记分组而消失。
@@ -30,12 +36,15 @@ const Map<String, _NavGroup> _navGroupByLabelKey = <String, _NavGroup>{
   'sidebar.graph': _NavGroup.reports,
   'sidebar.snapshot': _NavGroup.reports,
   'sidebar.experience': _NavGroup.reports,
+  'sidebar.cognition': _NavGroup.reports,
   'sidebar.workspace': _NavGroup.creation,
+  'sidebar.mapping': _NavGroup.creation,
   'sidebar.model3d': _NavGroup.creation,
   'sidebar.store': _NavGroup.creation,
   'sidebar.appMarket': _NavGroup.creation,
   'sidebar.creator': _NavGroup.creation,
   'sidebar.customize': _NavGroup.creation,
+  'sidebar.uiPlugins': _NavGroup.creation,
   'sidebar.videoStudio': _NavGroup.creation,
   'sidebar.groupChat': _NavGroup.collaboration,
   'sidebar.team': _NavGroup.collaboration,
@@ -46,6 +55,7 @@ const Map<String, _NavGroup> _navGroupByLabelKey = <String, _NavGroup>{
   'sidebar.sandbox': _NavGroup.system,
   'sidebar.workflow': _NavGroup.system,
   'sidebar.models': _NavGroup.system,
+  'sidebar.compute': _NavGroup.system,
 };
 
 /// 侧栏：dsh 的会话抽屉 —— 品牌字标 · 新会话 · 导航 · 会话列表 · 底部设置。
@@ -134,6 +144,39 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
     return grouped;
   }
 
+  /// UI 自定义仓库可能不存在（独立测试 / 单独复用抽屉）：缺失时保持原有分组形态。
+  UiCustomizationStore? _uiCustomizationOf(BuildContext context) {
+    try {
+      return Provider.of<UiCustomizationStore>(context);
+    } on Object {
+      return null;
+    }
+  }
+
+  String _labelOf(BuildContext context, NavItem item) =>
+      context.t(item.labelKey, zh: _navFallbackZh[item.labelKey]);
+
+  /// sidebarGrouping=false → 平铺；true → 现有业务分组。
+  /// 可见性过滤已在 config 层（visibleNavKeys）完成，这里绝不二次过滤。
+  List<Widget> _buildNavList(
+    BuildContext context,
+    DshPalette c, {
+    required bool grouped,
+  }) {
+    if (!grouped) {
+      return widget.config.navItems
+          .map(
+            (NavItem item) => _NavRow(
+              icon: item.icon,
+              label: _labelOf(context, item),
+              onTap: () => _openNavItem(context, item),
+            ),
+          )
+          .toList();
+    }
+    return _buildNavGroups(context, c);
+  }
+
   List<Widget> _buildNavGroups(BuildContext context, DshPalette c) {
     final Map<_NavGroup, List<NavItem>> grouped = _groupedNavItems();
     final List<Widget> children = <Widget>[];
@@ -164,7 +207,7 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
         items.map(
           (NavItem item) => _NavRow(
             icon: item.icon,
-            label: context.t(item.labelKey),
+            label: _labelOf(context, item),
             onTap: () => _openNavItem(context, item),
           ),
         ),
@@ -223,6 +266,11 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
     // PersonaStore.language 驱动 MaterialApp.locale：watch 保证切语言时
     // 整个抽屉即时重建（context.t 亦会注册 Localizations 依赖）。
     context.watch<PersonaStore>();
+    // UI 自定义：只有显式关闭分组时才平铺；仓库缺失时保持既有分组形态。
+    // 取已保存的当前作用域配置，未保存的草稿不改变侧栏结构。
+    final UiCustomizationStore? uiStore = _uiCustomizationOf(context);
+    final bool grouped =
+        uiStore?.apply(uiStore.scope).sidebarGrouping ?? true;
     final DshPalette c = DshPalette.of(context);
     final List<ConversationItem> starred = _filtered(widget.starred);
     final List<ConversationItem> recents = _filtered(widget.recents);
@@ -297,7 +345,7 @@ class _FlaiSidebarDrawerState extends State<FlaiSidebarDrawer> {
                       padding: const EdgeInsets.only(bottom: DshSpace.x4),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: _buildNavGroups(context, c),
+                        children: _buildNavList(context, c, grouped: grouped),
                       ),
                     ),
                   ),

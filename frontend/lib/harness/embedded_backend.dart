@@ -47,6 +47,7 @@ import 'package:tangram/harness/downloader.dart';
 import 'package:tangram/harness/experience_transfer.dart';
 import 'package:tangram/harness/account_ops.dart';
 import 'package:tangram/harness/creator_runtime.dart';
+import 'package:tangram/harness/hardware_scheduler.dart';
 import 'package:tangram/harness/im_service.dart';
 import 'package:tangram/harness/knowledge_base.dart';
 import 'package:tangram/harness/local_inference.dart';
@@ -62,6 +63,7 @@ import 'package:tangram/harness/super_agent.dart';
 import 'package:tangram/harness/team_space.dart';
 import 'package:tangram/harness/video_studio.dart';
 import 'package:tangram/harness/workflow.dart';
+import 'package:tangram/harness/workspace_mapping.dart';
 import 'package:tangram/services/model_registry.dart' show kBuiltinFreeModels;
 import 'package:tangram/services/ssh_sandbox.dart';
 import 'package:tangram/services/update_service.dart';
@@ -116,6 +118,13 @@ class EmbeddedBackend implements QqShellRunner {
   /// 团队协作沙箱：本机协作空间 + 角色权限 + 审计日志。
   late final TeamSpaceService team = TeamSpaceService(store);
 
+  /// 硬件自适应调度：真实探针 + 量化/后端/路由建议 + 队列。
+  late final HardwareScheduler hardware = HardwareScheduler();
+
+  /// 工作区域目录映射：宿主目录 ↔ 沙箱文件同步。
+  late final WorkspaceMappingService workspaceMappings =
+      WorkspaceMappingService(store);
+
   /// 经验库 / 账号运营：由页面按需构造，回调统一走本后端的真实能力。
   ExperienceLibrary experienceLibrary() => ExperienceLibrary(store);
   AccountOps accountOps() => AccountOps(store, send: accountOpsSend);
@@ -135,6 +144,21 @@ class EmbeddedBackend implements QqShellRunner {
           _chat(<String, dynamic>{'text': prompt, ...args}),
       shell: (String command, String cwd) =>
           _shellExec(<String, dynamic>{'command': command, 'cwd': cwd}),
+      mcp: (String server, String tool, Map<String, dynamic> args) async {
+        final McpClient? client = _mcpClients[server];
+        if (client == null) {
+          return <String, dynamic>{
+            'ok': false,
+            'error': 'MCP 服务端「$server」未连接；已配置：${_mcpClients.keys.join(", ")}',
+          };
+        }
+        final McpCallResult r = await client.callTool(tool, args);
+        return <String, dynamic>{
+          'ok': r.ok,
+          'text': r.text,
+          'error': r.error,
+        };
+      },
     );
   }
 
@@ -194,7 +218,8 @@ class EmbeddedBackend implements QqShellRunner {
     'proactive_task', 'security_approval', 'plugin_lifecycle',
     'plugin_community', 'plugin_kernel', 'super_agent', 'im_event',
     'knowledge_base', 'workflow', 'snapshot', 'model_group', 'app_market',
-    'team_space', 'responsibility_trace', 'update_status',
+    'team_space', 'compute', 'workspace_mapping',
+    'responsibility_trace', 'update_status',
     'dependency_event', 'perception_event', 'reload', 'status', 'ping', 'echo',
   ];
 
@@ -360,6 +385,9 @@ class EmbeddedBackend implements QqShellRunner {
         'model_group' => await _modelGroup(payload),
         'app_market' => await appPackages.handle(_action(payload, 'list'), payload),
         'team_space' => await team.handle(_action(payload, 'list'), payload),
+        'compute' => await _onCompute(payload),
+        'workspace_mapping' => await workspaceMappings.handle(
+            _action(payload, 'list'), payload),
         'im_event' => await im.handle(_action(payload), payload),
         'responsibility_trace' => await _responsibilityTrace(),
         'update_status' => await _updateStatus(),
@@ -459,6 +487,14 @@ class EmbeddedBackend implements QqShellRunner {
         },
         'ui_customization': <String, dynamic>{
           'architecture': 'theme/layout presets + import/export + global/project scope',
+        },
+        'compute': <String, dynamic>{
+          'architecture': 'hardware probe + quant/backend/route recommendation + queues',
+          'executes_models': false,
+        },
+        'workspace_mapping': <String, dynamic>{
+          'architecture': 'host dir <-> sandbox file sync with sensitive-path deny',
+          'bind_mount': false,
         },
       };
 
@@ -665,6 +701,47 @@ class EmbeddedBackend implements QqShellRunner {
         src.token.isCancelled &&
         src.token.cancelReason == 'probe' &&
         threw;
+  }
+
+  // ---- 硬件自适应调度（真实探针 + 建议 + 队列，不执行模型）----
+  Future<Map<String, dynamic>> _onCompute(Map<String, dynamic> p) async {
+    final String action = _action(p, 'status');
+    switch (action) {
+      case 'detect':
+        final probe = await hardware.detect();
+        return _ok(<String, dynamic>{
+          'probe': probe.toJson(),
+          'recommendation': hardware.recommend().toJson(),
+        });
+      case 'recommend':
+        return _ok(<String, dynamic>{
+          'probe': hardware.probe.toJson(),
+          'recommendation': hardware.recommend().toJson(),
+        });
+      case 'schedule':
+        final String id = (p['id'] ?? p['task'] ?? '').toString().trim();
+        if (id.isEmpty) return _err('任务 id 为空，未入队');
+        final HardwareTask task = HardwareTask(
+          id: id,
+          weight: (p['weight'] ?? 'light').toString(),
+          description: (p['description'] ?? '').toString(),
+        );
+        return _ok(<String, dynamic>{
+          'decision': hardware.schedule(task).toJson(),
+          'pending_light': hardware.pendingLight,
+          'pending_heavy': hardware.pendingHeavy,
+        });
+      case 'status':
+        return _ok(<String, dynamic>{
+          'probe': hardware.probe.toJson(),
+          'recommendation': hardware.recommend().toJson(),
+          'pending_light': hardware.pendingLight,
+          'pending_heavy': hardware.pendingHeavy,
+          'executes_models': false,
+        });
+      default:
+        return _err('未知 compute 动作：$action（detect/recommend/schedule/status）');
+    }
   }
 
   Future<Map<String, dynamic>> _hardware() async {

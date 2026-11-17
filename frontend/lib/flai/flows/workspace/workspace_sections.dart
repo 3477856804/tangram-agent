@@ -1,14 +1,19 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import 'package:tangram/harness/ui_customization.dart';
 import 'package:tangram/ui/pages/tga_3d_page.dart';
 import 'package:tangram/ui/pages/tga_account_ops_page.dart';
 import 'package:tangram/ui/pages/tga_app_market_page.dart';
 import 'package:tangram/ui/pages/tga_channels_page.dart';
+import 'package:tangram/ui/pages/tga_cognition_page.dart';
+import 'package:tangram/ui/pages/tga_compute_page.dart';
 import 'package:tangram/ui/pages/tga_creator_page.dart';
 import 'package:tangram/ui/pages/tga_customize_page.dart';
 import 'package:tangram/ui/pages/tga_experience_page.dart';
 import 'package:tangram/ui/pages/tga_group_chat_page.dart';
 import 'package:tangram/ui/pages/tga_knowledge_page.dart';
+import 'package:tangram/ui/pages/tga_mapping_page.dart';
 import 'package:tangram/ui/pages/tga_models_page.dart';
 import 'package:tangram/ui/pages/tga_persona_page.dart';
 import 'package:tangram/ui/pages/tga_sandbox_page.dart';
@@ -17,6 +22,7 @@ import 'package:tangram/ui/pages/tga_sphere_graph_page.dart';
 import 'package:tangram/ui/pages/tga_store_page.dart';
 import 'package:tangram/ui/pages/tga_team_page.dart';
 import 'package:tangram/ui/pages/tga_training_page.dart';
+import 'package:tangram/ui/pages/tga_ui_plugins_page.dart';
 import 'package:tangram/ui/pages/tga_video_studio_page.dart';
 import 'package:tangram/ui/pages/tga_workflow_page.dart';
 import 'package:tangram/ui/pages/tga_workspace_page.dart';
@@ -34,7 +40,32 @@ import '../sidebar/sidebar_config.dart';
 /// 随进程常驻、由内嵌后端自动装配，不再作为可点选的选项页/操作页暴露在
 /// 导航里（对应 `tga_plugins_page` / `tga_kernel_page` / `tga_super_agent_page`
 /// 三个入口已移除，能力仍在 `PluginKernel` / `SuperAgent` 里真实运行）。
-List<NavItem> buildWorkspaceNavItems() => <NavItem>[
+/// [visibleKeys] 为空 / 全部未知时回退全部入口：配置损坏也绝不把侧栏清空。
+/// 过滤只按 key 保留原声明顺序，NavItem 字段与页面绑定保持不变。
+List<NavItem> buildWorkspaceNavItems({Iterable<String>? visibleKeys}) {
+  final List<NavItem> all = _allWorkspaceNavItems();
+  if (visibleKeys == null) return all;
+  final List<String> keys = visibleKeys.toList();
+  if (keys.isEmpty) return all;
+  final Map<String, NavItem> byKey = <String, NavItem>{
+    for (final NavItem item in all) item.labelKey: item,
+  };
+  // List 输入代表用户拖拽后的明确顺序；Set 输入保持原有声明顺序（测试/旧调用）。
+  final List<NavItem> filtered = <NavItem>[];
+  if (visibleKeys is List<String>) {
+    for (final String key in keys) {
+      final NavItem? item = byKey[key];
+      if (item != null) filtered.add(item);
+    }
+  } else {
+    for (final NavItem item in all) {
+      if (keys.contains(item.labelKey)) filtered.add(item);
+    }
+  }
+  return filtered.isEmpty ? all : filtered;
+}
+
+List<NavItem> _allWorkspaceNavItems() => <NavItem>[
       NavItem(
         icon: Icons.tune_outlined,
         labelKey: 'sidebar.training',
@@ -66,6 +97,12 @@ List<NavItem> buildWorkspaceNavItems() => <NavItem>[
         fullPage: true,
       ),
       NavItem(
+        icon: Icons.folder_copy_outlined,
+        labelKey: 'sidebar.mapping',
+        page: const TgaMappingPage(),
+        fullPage: true,
+      ),
+      NavItem(
         icon: Icons.menu_book_outlined,
         labelKey: 'sidebar.knowledge',
         page: const TgaKnowledgePage(),
@@ -90,6 +127,12 @@ List<NavItem> buildWorkspaceNavItems() => <NavItem>[
         fullPage: true,
       ),
       NavItem(
+        icon: Icons.psychology_alt_outlined,
+        labelKey: 'sidebar.cognition',
+        page: const TgaCognitionPage(),
+        fullPage: true,
+      ),
+      NavItem(
         icon: Icons.storefront_rounded,
         labelKey: 'sidebar.appMarket',
         page: const TgaAppMarketPage(),
@@ -104,7 +147,13 @@ List<NavItem> buildWorkspaceNavItems() => <NavItem>[
       NavItem(
         icon: Icons.palette_outlined,
         labelKey: 'sidebar.customize',
-        page: const TgaCustomizePage(),
+        page: const _SharedCustomizePage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.widgets_outlined,
+        labelKey: 'sidebar.uiPlugins',
+        page: const TgaUiPluginsPage(),
         fullPage: true,
       ),
       NavItem(
@@ -132,6 +181,12 @@ List<NavItem> buildWorkspaceNavItems() => <NavItem>[
         fullPage: true,
       ),
       NavItem(
+        icon: Icons.speed_rounded,
+        labelKey: 'sidebar.compute',
+        page: const TgaComputePage(),
+        fullPage: true,
+      ),
+      NavItem(
         icon: Icons.forum_rounded,
         labelKey: 'sidebar.groupChat',
         page: const TgaGroupChatPage(),
@@ -156,3 +211,20 @@ List<NavItem> buildWorkspaceNavItems() => <NavItem>[
         fullPage: true,
       ),
     ];
+
+/// 复用 main.dart 提供的同一个 [UiCustomizationStore]：保存/切换后主题立即生效。
+/// 没有 Provider（独立测试或单独复用页面）时回退到页面自行加载，行为不变。
+class _SharedCustomizePage extends StatelessWidget {
+  const _SharedCustomizePage();
+
+  @override
+  Widget build(BuildContext context) {
+    UiCustomizationStore? store;
+    try {
+      store = Provider.of<UiCustomizationStore>(context);
+    } on Object {
+      store = null;
+    }
+    return TgaCustomizePage(customization: store);
+  }
+}

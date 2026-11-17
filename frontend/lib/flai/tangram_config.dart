@@ -57,6 +57,8 @@ AppScaffoldConfig buildTangramConfig({
   // 由 main.dart 从后端 model_route{list} 拉取真实模型卡；没有模型就是空列表，
   // 不再预置「我训练的模型 / 本地基底 / API 教师」这类编造条目。
   List<ModelOption> availableModels = const <ModelOption>[],
+  // UI 自定义的可见导航项；null / 空集合 = 全部入口（配置缺失时不缩减侧栏）。
+  List<String>? visibleNavKeys,
 }) => AppScaffoldConfig(
   authProvider: TangramLocalAuthProvider(),
   aiProvider: aiProvider,
@@ -102,7 +104,7 @@ AppScaffoldConfig buildTangramConfig({
   sidebarConfig: SidebarConfig(
     appName: 'TGA',
     appLogo: const BrandMark(size: 36),
-    navItems: buildWorkspaceNavItems(),
+    navItems: buildWorkspaceNavItems(visibleKeys: visibleNavKeys),
     enableSearch: true,
     // 设计稿 2026-11-12 主页顶栏：菜单 · 静音 · 新对话加号。
     // 菜单与新对话由 HomeScreen 自身渲染，这里补「静音」开关。

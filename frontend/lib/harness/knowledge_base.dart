@@ -15,14 +15,20 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 
 import 'store.dart';
+import 'vector_store.dart';
 
 class KnowledgeBase {
-  KnowledgeBase(this.store);
+  KnowledgeBase(this.store, {VectorStore? vectorStore})
+      : vectorStore = vectorStore ?? LocalHashedVectorStore(store);
 
   final HarnessStore store;
+
+  /// 可切换向量库；默认本地哈希向量库（真实落盘）。
+  final VectorStore vectorStore;
   Map<String, dynamic>? _data;
 
   static const String _file = 'knowledge_base.json';
+  static const String _vectorCollection = 'knowledge_chunks';
   static const int _maxIngestBytes = 8 * 1024 * 1024;
   static const Set<String> _textExtensions = <String>{
     '.txt', '.md', '.markdown', '.json', '.jsonl', '.csv', '.tsv', '.log',
@@ -136,7 +142,11 @@ class KnowledgeBase {
       case 'ingest_url':
         return await _ingestUrl(p);
       case 'search':
-        return _search(p);
+        return await _search(p);
+      case 'vector_stats':
+        return await _vectorStats();
+      case 'rebuild_vectors':
+        return await _rebuildVectors(p);
       case 'snapshot':
         return await _snapshot(p);
       case 'snapshots':
@@ -258,12 +268,15 @@ class KnowledgeBase {
     if (_findLibrary(id).isEmpty) {
       return <String, dynamic>{'ok': false, 'error': '知识库不存在'};
     }
+    final List<Map<String, dynamic>> removedChunks =
+        _chunks.where((Map<String, dynamic> c) => c['library_id'] == id).toList();
     _setList('libraries',
         _libraries.where((Map<String, dynamic> l) => l['id'] != id).toList());
     _setList('documents',
         _documents.where((Map<String, dynamic> d) => d['library_id'] != id).toList());
     _setList('chunks',
         _chunks.where((Map<String, dynamic> c) => c['library_id'] != id).toList());
+    await _deleteVectors(removedChunks);
     await _save();
     return <String, dynamic>{'ok': true, 'deleted': id};
   }
@@ -319,10 +332,14 @@ class KnowledgeBase {
     if (!docs.any((Map<String, dynamic> d) => d['id'] == documentId)) {
       return <String, dynamic>{'ok': false, 'error': '文档不存在'};
     }
+    final List<Map<String, dynamic>> removedChunks = _chunks
+        .where((Map<String, dynamic> c) => c['document_id'] == documentId)
+        .toList();
     _setList('documents',
         docs.where((Map<String, dynamic> d) => d['id'] != documentId).toList());
     _setList('chunks',
         _chunks.where((Map<String, dynamic> c) => c['document_id'] != documentId).toList());
+    await _deleteVectors(removedChunks);
     await _save();
     return <String, dynamic>{'ok': true, 'deleted': documentId};
   }
@@ -419,6 +436,27 @@ class KnowledgeBase {
         'length': tf.values.fold<int>(0, (int a, int b) => a + b),
       });
     }
+    int vectorCount = 0;
+    String vectorError = '';
+    for (final Map<String, dynamic> chunk in newChunks) {
+      try {
+        await vectorStore.upsert(
+          _vectorCollection,
+          (chunk['id'] ?? '').toString(),
+          HashingTrick.embed((chunk['text'] ?? '').toString()),
+          <String, dynamic>{
+            'chunk_id': chunk['id'],
+            'library_id': chunk['library_id'],
+            'document_id': chunk['document_id'],
+            'ordinal': chunk['ordinal'],
+          },
+        );
+        vectorCount++;
+      } on Object catch (e) {
+        // 向量库失败不伪造成功：文本仍真实入库，响应里如实标注降级。
+        vectorError = _vectorErrorText(e);
+      }
+    }
     _setList('documents', <Map<String, dynamic>>[..._documents, doc]);
     _setList('chunks', <Map<String, dynamic>>[..._chunks, ...newChunks]);
     await _save();
@@ -427,6 +465,10 @@ class KnowledgeBase {
       'duplicate': false,
       'document': doc,
       'chunks': pieces.length,
+      'vectors': vectorCount,
+      'vector_backend': vectorStore.backendName,
+      'degraded': vectorError.isNotEmpty,
+      if (vectorError.isNotEmpty) 'vector_error': vectorError,
     };
   }
 
@@ -555,25 +597,42 @@ class KnowledgeBase {
     }
     final List<String> cjk =
         RegExp(r'[\u4e00-\u9fff]').allMatches(lower).map((RegExpMatch m) => m.group(0)!).toList();
-    for (int i = 0; i < cjk.length; i++) {
-      add(cjk[i]);
-      if (i + 1 < cjk.length) add('${cjk[i]}${cjk[i + 1]}');
+    // 中文只用二元组打分：单字命中会把无关查询误判为命中。
+    if (cjk.length == 1) add(cjk.first);
+    for (int i = 0; i + 1 < cjk.length; i++) {
+      add('${cjk[i]}${cjk[i + 1]}');
     }
     return tf;
   }
 
-  Map<String, dynamic> _search(Map<String, dynamic> p) {
+  /// 混合检索：BM25 词法分 + 0.35 * 余弦向量分。
+  ///
+  /// 向量库不可用时如实降级为纯 BM25，并在响应与每条结果上标注
+  /// `degraded=true`；此时不会伪造 vector_score，也不会编造命中。
+  Future<Map<String, dynamic>> _search(Map<String, dynamic> p) async {
     final String query = (p['query'] ?? '').toString().trim();
     final int topK =
         (p['top_k'] is num) ? (p['top_k'] as num).toInt().clamp(1, 50) : 8;
     final List<String> onlyIds = _idsOf(p['library_ids']);
     final String personaId = (p['persona_id'] ?? '').toString();
     if (query.isEmpty) {
-      return <String, dynamic>{'ok': true, 'results': <dynamic>[], 'query': ''};
+      return <String, dynamic>{
+        'ok': true,
+        'results': <dynamic>[],
+        'query': '',
+        'backend': vectorStore.backendName,
+        'degraded': false,
+      };
     }
     final Map<String, int> qtf = _tokenize(query);
     if (qtf.isEmpty) {
-      return <String, dynamic>{'ok': true, 'results': <dynamic>[], 'query': query};
+      return <String, dynamic>{
+        'ok': true,
+        'results': <dynamic>[],
+        'query': query,
+        'backend': vectorStore.backendName,
+        'degraded': false,
+      };
     }
     final Set<String> allowedLibraries = <String>{};
     for (final Map<String, dynamic> lib in _libraries) {
@@ -591,8 +650,16 @@ class KnowledgeBase {
             allowedLibraries.contains(c['library_id']))
         .toList();
     if (pool.isEmpty) {
-      return <String, dynamic>{'ok': true, 'results': <dynamic>[], 'query': query};
+      return <String, dynamic>{
+        'ok': true,
+        'results': <dynamic>[],
+        'query': query,
+        'backend': vectorStore.backendName,
+        'degraded': false,
+      };
     }
+
+    // ---- BM25 词法分 ----
     final int totalLength = pool.fold<int>(
         0, (int a, Map<String, dynamic> c) => a + _intOf(c['length']));
     final double avgdl = totalLength <= 0 ? 1.0 : totalLength / pool.length;
@@ -608,7 +675,7 @@ class KnowledgeBase {
     }
     const double k1 = 1.5;
     const double b = 0.75;
-    final List<Map<String, dynamic>> scored = <Map<String, dynamic>>[];
+    final Map<String, double> bm25 = <String, double>{};
     for (final Map<String, dynamic> c in pool) {
       final String text = (c['text'] ?? '').toString().toLowerCase();
       final Map<String, int> tf = _tokenize(text);
@@ -622,15 +689,66 @@ class KnowledgeBase {
             ((pool.length - n + 0.5) / (n + 0.5) + 1).clamp(0.0, 20.0).toDouble();
         score += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl));
       }
-      if (score <= 0) continue;
+      if (score > 0) bm25[(c['id'] ?? '').toString()] = score;
+    }
+
+    // ---- 向量分（失败如实降级，不编造）----
+    final Map<String, double> vectorScores = <String, double>{};
+    bool degraded = false;
+    String vectorError = '';
+    try {
+      final List<double> queryVector = HashingTrick.embed(query);
+      final Set<String> poolIds = pool
+          .map((Map<String, dynamic> c) => (c['id'] ?? '').toString())
+          .toSet();
+      final int limit = pool.length < 64 ? pool.length : 64;
+      final List<VectorMatch> matches =
+          await vectorStore.query(_vectorCollection, queryVector, limit);
+      for (final VectorMatch m in matches) {
+        if (!poolIds.contains(m.id)) continue;
+        vectorScores[m.id] = m.score;
+      }
+    } on Object catch (e) {
+      degraded = true;
+      vectorError = _vectorErrorText(e);
+    }
+
+    final Map<String, Map<String, dynamic>> byId = <String, Map<String, dynamic>>{
+      for (final Map<String, dynamic> c in pool)
+        (c['id'] ?? '').toString(): c,
+    };
+    final Set<String> candidates = <String>{
+      ...bm25.keys,
+      ...vectorScores.keys,
+    };
+    final List<Map<String, dynamic>> scored = <Map<String, dynamic>>[];
+    for (final String id in candidates) {
+      final Map<String, dynamic>? chunk = byId[id];
+      if (chunk == null) continue;
+      final double lexical = bm25[id] ?? 0;
+      final double cosine = vectorScores[id] ?? 0;
+      // 纯向量候选需要达到最低相似度，避免哈希碰撞带来的噪声命中；
+      // BM25 命中的片段始终保留。
+      if (lexical <= 0 && cosine < 0.15) continue;
+      final double hybrid = lexical + 0.35 * cosine;
+      if (hybrid <= 0) continue;
       scored.add(<String, dynamic>{
-        'score': double.parse(score.toStringAsFixed(4)),
-        'chunk': c,
-        'snippet': _snippet((c['text'] ?? '').toString(), qtf.keys.toList()),
+        'score': hybrid,
+        'bm25_score': lexical,
+        'vector_score': cosine,
+        'chunk': chunk,
+        'snippet': _snippet(
+            (chunk['text'] ?? '').toString(), qtf.keys.toList()),
       });
     }
-    scored.sort((Map<String, dynamic> a, Map<String, dynamic> b) =>
-        (b['score'] as double).compareTo(a['score'] as double));
+    scored.sort((Map<String, dynamic> a, Map<String, dynamic> b) {
+      final int byScore =
+          (b['score'] as double).compareTo(a['score'] as double);
+      if (byScore != 0) return byScore;
+      return (a['chunk'] as Map)['id']
+          .toString()
+          .compareTo((b['chunk'] as Map)['id'].toString());
+    });
     final Map<String, Map<String, dynamic>> libs = <String, Map<String, dynamic>>{
       for (final Map<String, dynamic> l in _libraries)
         (l['id'] ?? '').toString(): l,
@@ -657,7 +775,11 @@ class KnowledgeBase {
         'path': doc['path'] ?? '',
         'chunk_id': c['id'],
         'ordinal': c['ordinal'],
-        'score': s['score'],
+        'score': _round(s['score'] as double),
+        'bm25_score': _round(s['bm25_score'] as double),
+        'vector_score': _round(s['vector_score'] as double),
+        'backend': vectorStore.backendName,
+        'degraded': degraded,
         'snippet': s['snippet'],
       });
       if (results.length >= topK) break;
@@ -667,6 +789,103 @@ class KnowledgeBase {
       'query': query,
       'results': results,
       'searched_chunks': pool.length,
+      'backend': vectorStore.backendName,
+      'degraded': degraded,
+      if (vectorError.isNotEmpty) 'vector_error': vectorError,
+    };
+  }
+
+  double _round(double value) => double.parse(value.toStringAsFixed(4));
+
+  String _vectorErrorText(Object e) =>
+      e is VectorStoreException ? e.message : '$e';
+
+  /// 删除文档/库时清理对应向量；尽力而为，陈留向量不会在检索中被匹配，
+  /// 因为结果只接受当前仍存在的 chunk id。
+  Future<void> _deleteVectors(Iterable<Map<String, dynamic>> chunks) async {
+    for (final Map<String, dynamic> chunk in chunks) {
+      try {
+        await vectorStore.delete(
+            _vectorCollection, (chunk['id'] ?? '').toString());
+      } on Object {
+        // 清理失败不掩盖文本删除；检索侧按现有 chunk 过滤。
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>> _vectorStats() async {
+    try {
+      final Map<String, dynamic> stats =
+          await vectorStore.stats(_vectorCollection);
+      return <String, dynamic>{
+        'ok': true,
+        'backend': vectorStore.backendName,
+        'available': vectorStore.available,
+        'collection': _vectorCollection,
+        'chunks': _chunks.length,
+        'count': stats['count'],
+        'dimensions': stats['dimensions'],
+        'stats': stats,
+      };
+    } on Object catch (e) {
+      return <String, dynamic>{
+        'ok': false,
+        'backend': vectorStore.backendName,
+        'available': vectorStore.available,
+        'error': _vectorErrorText(e),
+        'code': e is VectorStoreException ? e.code : 'vector_error',
+      };
+    }
+  }
+
+  /// 真实重建：删除当前 chunk 的旧向量，再按最新文本重新 embedding 写入。
+  Future<Map<String, dynamic>> _rebuildVectors(Map<String, dynamic> p) async {
+    final String libraryId = (p['library_id'] ?? '').toString();
+    final List<Map<String, dynamic>> chunks = _chunks
+        .where((Map<String, dynamic> c) =>
+            libraryId.isEmpty || c['library_id'] == libraryId)
+        .toList();
+    int deleted = 0;
+    int upserted = 0;
+    final List<String> errors = <String>[];
+    for (final Map<String, dynamic> chunk in chunks) {
+      final String id = (chunk['id'] ?? '').toString();
+      try {
+        await vectorStore.delete(_vectorCollection, id);
+        deleted++;
+      } on Object catch (e) {
+        errors.add('delete $id: ${_vectorErrorText(e)}');
+      }
+    }
+    for (final Map<String, dynamic> chunk in chunks) {
+      final String id = (chunk['id'] ?? '').toString();
+      try {
+        await vectorStore.upsert(
+          _vectorCollection,
+          id,
+          HashingTrick.embed((chunk['text'] ?? '').toString()),
+          <String, dynamic>{
+            'chunk_id': chunk['id'],
+            'library_id': chunk['library_id'],
+            'document_id': chunk['document_id'],
+            'ordinal': chunk['ordinal'],
+          },
+        );
+        upserted++;
+      } on Object catch (e) {
+        errors.add('upsert $id: ${_vectorErrorText(e)}');
+      }
+    }
+    return <String, dynamic>{
+      'ok': errors.isEmpty,
+      'backend': vectorStore.backendName,
+      'collection': _vectorCollection,
+      'chunks': chunks.length,
+      'deleted': deleted,
+      'vectors': upserted,
+      if (libraryId.isNotEmpty) 'library_id': libraryId,
+      if (errors.isNotEmpty) 'error': errors.first,
+      if (errors.isNotEmpty) 'errors': errors.take(5).toList(),
     };
   }
 
@@ -693,7 +912,7 @@ class KnowledgeBase {
     int topK = 4,
   }) async {
     if (query.trim().isEmpty) return '';
-    final Map<String, dynamic> r = _search(<String, dynamic>{
+    final Map<String, dynamic> r = await _search(<String, dynamic>{
       'query': query,
       'top_k': topK,
       'persona_id': personaId,
@@ -701,8 +920,11 @@ class KnowledgeBase {
     });
     final List<dynamic> results = r['results'] is List ? r['results'] as List : <dynamic>[];
     if (results.isEmpty) return '';
+    final bool degraded = r['degraded'] == true;
     final StringBuffer b = StringBuffer()
-      ..writeln('【私有知识库检索结果（本地 BM25 真实命中，引用必须标注来源）】');
+      ..writeln(degraded
+          ? '【私有知识库检索结果（向量库不可用，已降级为本地 BM25 真实命中，引用必须标注来源）】'
+          : '【私有知识库检索结果（本地 BM25 + 向量混合检索真实命中，引用必须标注来源）】');
     for (int i = 0; i < results.length; i++) {
       final Map<String, dynamic> x =
           Map<String, dynamic>.from(results[i] as Map);

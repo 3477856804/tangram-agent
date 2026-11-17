@@ -5,6 +5,7 @@ import '../../bridge/bridge_protocol.dart';
 import '../../services/agents_store.dart';
 import '../../services/model_registry.dart';
 import '../../services/persona_store.dart';
+import '../../services/presence_store.dart';
 import '../core/models/chat_event.dart';
 import '../core/models/chat_request.dart';
 import '../core/models/message.dart';
@@ -27,6 +28,10 @@ class TangramAiProvider implements AiProvider {
 
   /// 用户的人格/对话参数（system prompt、temperature 等），真实注入推理请求。
   PersonaStore? persona;
+
+  /// 场景感知 / 情绪 / 打断恢复状态；由主流程注入。
+  /// 为 null 时提示词与行为完全保持改造前不变。
+  PresenceStore? presence;
 
   StreamSubscription<BridgeEnvelope>? _active;
   int _sequence = 0;
@@ -138,13 +143,19 @@ class TangramAiProvider implements AiProvider {
     };
   }
 
-  /// 人格 system prompt + 当前启用的自定义智能体人设（智能体中心 #14）。
-  /// 无启用智能体时与改造前完全一致；agents.json 读取失败也不影响对话。
+  /// 人格 system prompt + 当前启用的自定义智能体人设（智能体中心 #14）
+  /// + 在场状态块（场景模式 / 情绪 / 打断任务）。
+  /// 无启用智能体且未注入 PresenceStore 时与改造前完全一致；
+  /// agents.json 读取失败也不影响对话。
   Future<String> _systemWithAgents() async {
     final String base = persona?.systemPrompt ?? '';
     final String agents = await AgentsStore.enabledSystemPromptBlock();
-    if (agents.isEmpty) return base;
-    return base.isEmpty ? agents : '$base\n\n$agents';
+    final String presenceBlock = presence?.summaryBlock() ?? '';
+    final List<String> parts = <String>[];
+    if (base.isNotEmpty) parts.add(base);
+    if (agents.isNotEmpty) parts.add(agents);
+    if (presenceBlock.isNotEmpty) parts.add(presenceBlock);
+    return parts.join('\n\n');
   }
 
   @override
@@ -153,6 +164,7 @@ class TangramAiProvider implements AiProvider {
     StreamSubscription<BridgeEnvelope>? subscription;
     bool emitted = false;
     bool closed = false;
+    bool replyRecorded = false;
     final StringBuffer buffer = StringBuffer();
 
     void emit(ChatEvent event) {
@@ -170,6 +182,11 @@ class TangramAiProvider implements AiProvider {
 
     Future<void> start() async {
       _cancelled = false;
+      // 每轮用户消息只在这里记录一次，供场景/情绪状态判断语气。
+      final String prompt = _promptOf(request);
+      if (prompt.trim().isNotEmpty) {
+        presence?.recordUserMessage(prompt);
+      }
       // 保留 hot-path 监听：将来后端推送真实逐 token 流时可直接消费。
       // 当前内嵌后端把完整回复放在 control payload，下面用打字机分片呈现，
       // 内容 100% 来自后端真实计算，不做任何编造。
@@ -251,6 +268,10 @@ class TangramAiProvider implements AiProvider {
           }
         }
         emit(TextDone(buffer.toString()));
+        if (!replyRecorded && buffer.isNotEmpty) {
+          replyRecorded = true;
+          presence?.recordAssistantReply(buffer.toString());
+        }
         await finish();
       } catch (error, stack) {
         emit(ChatError(StateError(_friendlyCloudError(error.toString())), stack));

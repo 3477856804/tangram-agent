@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../bridge/backend_client.dart';
+import '../harness/account_ops.dart';
+import '../harness/embedded_backend.dart';
 import 'persona_store.dart';
 
 /// 定时任务标题约定：后端 proactive_task 的 add 只收 title，
@@ -66,6 +68,14 @@ class TaskScheduler extends ChangeNotifier {
 
   Timer? _timer;
   bool _running = false;
+
+  /// 最近一次「定时发布到期草稿」的真实结果（失败原因原样保留以供排查）。
+  /// 只在本 App 进程内累积，作为给 UI 的日志/通知，不伪造发布成功。
+  String _lastPublishNote = '';
+  final List<String> _publishLog = <String>[];
+
+  String get lastPublishNote => _lastPublishNote;
+  List<String> get publishLog => List<String>.unmodifiable(_publishLog);
 
   /// 启动周期检查（幂等）。
   void start() {
@@ -140,11 +150,56 @@ class TaskScheduler extends ChangeNotifier {
       } on Object {
         // Super Agent 未就绪不影响定时任务。
       }
+      // 账号运营：发布「approved + 已到点」的定时草稿。
+      // 如实说明：Timer 只随 App 进程存活而运行；进程被系统杀死/退到后台
+      // 停止执行时不会发布，重新启动后的下一轮检查会补发已到期草稿。
+      // 放在 workflow / super_agent 调度之后并整体 try/catch，失败绝不抛出、
+      // 也不阻塞前两者；结果写入 publishLog 供 UI 展示。
+      await _publishDueDrafts();
     } on Object {
       // 后端未连接等异常：本轮静默跳过，下个周期再试（不谎报执行）。
     } finally {
       _running = false;
     }
+  }
+
+  /// 调用 AccountOps.publishDue 发布到期草稿；不自动审批任何草稿。
+  /// 单轮最多 5 条，20 秒超时，避免占用调度循环太久。
+  Future<void> _publishDueDrafts() async {
+    // 仅 inProcess 内嵌后端能拿到真实发布通道（accountOps）；其它桥接模式
+    // 没有可用的 send，如实跳过而不是伪造发布。
+    final EmbeddedBackend? embedded = backend.embeddedBackend;
+    if (embedded == null) return;
+    try {
+      final AccountOps ops = embedded.accountOps();
+      final Map<String, dynamic> r = await ops
+          .publishDue(limit: 5)
+          .timeout(const Duration(seconds: 20));
+      if (r['ok'] != true) {
+        _recordPublishNote('定时发布失败：${r['error'] ?? 'ok=false'}');
+        return;
+      }
+      final int published =
+          (r['published'] is num) ? (r['published'] as num).toInt() : 0;
+      final int failed =
+          (r['failed'] is num) ? (r['failed'] as num).toInt() : 0;
+      final int skipped =
+          (r['skipped'] is num) ? (r['skipped'] as num).toInt() : 0;
+      if (published == 0 && failed == 0 && skipped == 0) return;
+      _recordPublishNote(
+          '定时发布：成功 $published，失败 $failed，跳过 $skipped');
+    } on Object catch (e) {
+      _recordPublishNote('定时发布异常：$e');
+    }
+  }
+
+  void _recordPublishNote(String note) {
+    final String short = note.length > 200 ? '${note.substring(0, 200)}…' : note;
+    _lastPublishNote = '${DateTime.now().toIso8601String()} $short';
+    _publishLog.add(_lastPublishNote);
+    if (_publishLog.length > 20) _publishLog.removeAt(0);
+    debugPrint('[TaskScheduler] $short');
+    notifyListeners();
   }
 
   Future<void> _runTask({

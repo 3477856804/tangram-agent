@@ -625,6 +625,36 @@ class _TgaCustomizePageState extends State<TgaCustomizePage> {
                 style: Tga.caption),
           ),
           TgaCard(child: _navKeyWrap(config)),
+          TgaGroupTitle('导航顺序（拖拽调整）'),
+          TgaCard(
+            padding: EdgeInsets.zero,
+            child: SizedBox(
+              height: (config.visibleNavKeys.length * 50.0).clamp(50.0, 360.0),
+              child: ReorderableListView.builder(
+                buildDefaultDragHandles: true,
+                itemCount: config.visibleNavKeys.length,
+                onReorder: (int oldIndex, int newIndex) {
+                  store.reorderVisibleNav(oldIndex, newIndex);
+                },
+                itemBuilder: (BuildContext ctx, int index) {
+                  final String key = config.visibleNavKeys[index];
+                  return ListTile(
+                    key: ValueKey<String>(key),
+                    dense: true,
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 12),
+                    leading: Icon(Icons.drag_handle_rounded,
+                        size: 18, color: Tga.textDim),
+                    title: Text(
+                      UiCustomizationConfig.navLabels[key] ?? key,
+                      style: Tga.body,
+                    ),
+                    subtitle: Text(key, style: Tga.caption),
+                  );
+                },
+              ),
+            ),
+          ),
           if (store.lastError.isNotEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(4, 8, 4, 0),

@@ -3,6 +3,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:provider/provider.dart';
+
+import '../../services/presence_store.dart';
+import '../../ui/panels/presence_sheet.dart';
 import '../app_config.dart';
 import '../providers/auth_provider.dart';
 import '../flows/auth/auth_flow.dart';
@@ -371,6 +375,15 @@ class _WiredHomePageState extends State<_WiredHomePage> {
     final baseSidebar = widget.config.sidebarConfig ??
         SidebarConfig(appName: widget.config.appTitle);
 
+    PresenceStore? presence;
+    try {
+      presence = context.watch<PresenceStore>();
+    } on Object {
+      // 独立构建 FlaiHomeScreen 的测试/预览没有注入 PresenceStore：
+      // 此时不显示模式按钮，其余行为保持不变。
+      presence = null;
+    }
+
     return FlaiHomeScreen(
       sidebarConfig: SidebarConfig(
         appName: baseSidebar.appName,
@@ -404,6 +417,10 @@ class _WiredHomePageState extends State<_WiredHomePage> {
       onSendMessage: (text, thinking, search) =>
           ctrl.sendMessage(text, thinking: thinking, search: search),
       onConversationTap: (item) => ctrl.selectConversation(item),
+      presenceMode: presence?.mode,
+      onPresenceTap: presence == null
+          ? null
+          : () => showPresenceSheet(context, presence!),
       chatContent: hasActiveChat
           ? FlaiChatContent(
               messages: ctrl.messages,

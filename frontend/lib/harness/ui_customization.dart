@@ -1,7 +1,8 @@
 /// Tangram 全栈 UI 自定义 —— 可持久化的主题 / 布局配置层。
 ///
-/// 只提供**配置数据**，不直接改 MaterialApp：调用方读取 [apply] 的返回值
-/// 自行消费；本模块绝不覆盖现有 Tga 设计系统，也不注入全局主题单例。
+/// 只提供**配置数据 + 纯函数映射**，不直接改 MaterialApp：调用方读取 [apply]
+/// 的返回值 / [applyUiCustomizationTheme] 的结果自行消费；本模块绝不覆盖现有
+/// Tga 设计系统，也不注入全局主题单例。
 ///
 /// 持久化：`ui_customization.json`（经 [HarnessStore] 原子写盘），结构为
 /// `{version, active_scope, global, project}`。project 未保存时 [apply]
@@ -13,7 +14,7 @@
 import 'dart:convert';
 import 'dart:io' show File;
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:tangram/harness/store.dart';
 
 /// 主色预设（蓝 / 青 / 紫 / 金 / 绿）。
@@ -108,6 +109,7 @@ class UiCustomizationConfig {
 
   /// 与侧栏真实导航基线（workspace_sections.dart）一一对应的 key。
   /// 本模块只做配置，不新增/删除导航；未知 key 在导入时被过滤。
+  /// 顺序与 [buildWorkspaceNavItems] 的声明顺序保持一致。
   static const List<String> knownNavKeys = <String>[
     'sidebar.training',
     'sidebar.persona',
@@ -117,13 +119,22 @@ class UiCustomizationConfig {
     'sidebar.knowledge',
     'sidebar.workflow',
     'sidebar.snapshot',
+    'sidebar.experience',
     'sidebar.appMarket',
+    'sidebar.creator',
+    'sidebar.customize',
+    'sidebar.uiPlugins',
+    'sidebar.videoStudio',
     'sidebar.model3d',
     'sidebar.channels',
     'sidebar.models',
     'sidebar.groupChat',
     'sidebar.team',
+    'sidebar.accountOps',
     'sidebar.graph',
+    'sidebar.mapping',
+    'sidebar.cognition',
+    'sidebar.compute',
   ];
 
   static const Map<String, String> navLabels = <String, String>{
@@ -132,15 +143,24 @@ class UiCustomizationConfig {
     'sidebar.sandbox': '内置沙箱',
     'sidebar.store': '模型商店',
     'sidebar.workspace': '工作区域',
+    'sidebar.mapping': '目录映射',
     'sidebar.knowledge': '私有知识库',
     'sidebar.workflow': '自动化工作流',
     'sidebar.snapshot': '快照备份',
+    'sidebar.experience': '经验库',
+    'sidebar.cognition': '认知决策',
+    'sidebar.compute': '算力调度',
     'sidebar.appMarket': '应用市场',
+    'sidebar.creator': 'Creator 创造',
+    'sidebar.customize': '界面自定义',
+    'sidebar.uiPlugins': 'UI 插件槽',
+    'sidebar.videoStudio': '视频工作室',
     'sidebar.model3d': '3D 建模',
     'sidebar.channels': '更多通信',
     'sidebar.models': '模型管理',
     'sidebar.groupChat': '多模型群聊',
     'sidebar.team': '团队协作',
+    'sidebar.accountOps': '账号运营',
     'sidebar.graph': '知识图谱',
   };
 
@@ -162,7 +182,8 @@ class UiCustomizationConfig {
         fontScale: 1,
         density: UiDensity.comfortable,
         radius: 16,
-        sidebarGrouping: false,
+        // 默认沿用「按业务分组」的既有侧栏形态；用户可显式切到平铺。
+        sidebarGrouping: true,
         visibleNavKeys: knownNavKeys,
         composerFloating: false,
         scope: scope,
@@ -273,7 +294,7 @@ class UiCustomizationConfig {
       radius = clampRadius(radiusRaw);
     }
 
-    bool sidebarGrouping = false;
+    bool sidebarGrouping = true;
     final Object? groupingRaw = json['sidebarGrouping'];
     if (groupingRaw != null) {
       if (groupingRaw is! bool) {
@@ -345,6 +366,98 @@ class UiCustomizationConfig {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 主题应用（纯函数：无 IO、无全局副作用，便于单测）
+// ---------------------------------------------------------------------------
+
+/// 展示层字号缩放的硬边界（配置允许到 1.4，应用时收敛到 1.35 更稳）。
+const double minAppliedFontScale = 0.85;
+const double maxAppliedFontScale = 1.35;
+
+/// 主色预设 → 真实色值（与产品约定的主色一致）。
+Color uiAccentColor(UiAccentPreset preset) => switch (preset) {
+      UiAccentPreset.blue => const Color(0xFF4A90D9),
+      UiAccentPreset.cyan => const Color(0xFF2FB3AE),
+      UiAccentPreset.purple => const Color(0xFF8B5CF6),
+      UiAccentPreset.gold => const Color(0xFFD97706),
+      UiAccentPreset.green => const Color(0xFF059669),
+    };
+
+/// 配置字体缩放 → 实际应用值（0.85–1.35）。
+double uiAppliedFontScale(num value) {
+  if (value.isNaN) return 1;
+  return value
+      .toDouble()
+      .clamp(minAppliedFontScale, maxAppliedFontScale)
+      .toDouble();
+}
+
+/// 系统缩放 × 配置缩放，再做整体 clamp，避免超大字号把布局撑破。
+double uiEffectiveTextScale(num systemScale, num fontScale) {
+  final double system =
+      (systemScale.isFinite && systemScale > 0) ? systemScale.toDouble() : 1;
+  return (system * uiAppliedFontScale(fontScale))
+      .clamp(minAppliedFontScale, maxAppliedFontScale)
+      .toDouble();
+}
+
+/// 配置圆角 → 实际应用值（4–24）。
+double uiAppliedRadius(num value) {
+  if (value.isNaN) return 16;
+  return value
+      .toDouble()
+      .clamp(UiCustomizationConfig.minRadius, UiCustomizationConfig.maxRadius)
+      .toDouble();
+}
+
+/// 信息密度 → VisualDensity 数值：compact 2 / comfortable 0 / spacious -1。
+double uiVisualDensityValue(UiDensity density) => switch (density) {
+      UiDensity.compact => 2.0,
+      UiDensity.comfortable => 0.0,
+      UiDensity.spacious => -1.0,
+    };
+
+/// 表面预设 → 强制亮度；null 表示跟随系统（由 PersonaStore / 系统决定）。
+Brightness? uiForcedBrightness(UiSurfacePreset preset) => switch (preset) {
+      UiSurfacePreset.mist => Brightness.light,
+      UiSurfacePreset.midnight => Brightness.dark,
+      UiSurfacePreset.auto => null,
+    };
+
+/// 把 UI 自定义真实落到一份 [ThemeData] 上：强调色 / 信息密度 / 卡片与按钮圆角。
+///
+/// 只覆盖强调色与几何尺寸，不改底色与文字色板——深浅仍由 PersonaStore
+/// 决定（冲突规则见 app.dart 顶部注释），因此不会破坏既有主题。
+ThemeData applyUiCustomizationTheme(
+  ThemeData base,
+  UiCustomizationConfig config,
+) {
+  final Color accent = uiAccentColor(config.accentPreset);
+  final Color onAccent =
+      ThemeData.estimateBrightnessForColor(accent) == Brightness.dark
+          ? Colors.white
+          : Colors.black;
+  final RoundedRectangleBorder shape = RoundedRectangleBorder(
+    borderRadius: BorderRadius.circular(uiAppliedRadius(config.radius)),
+  );
+  final double density = uiVisualDensityValue(config.density);
+  return base.copyWith(
+    colorScheme: base.colorScheme.copyWith(
+      primary: accent,
+      onPrimary: onAccent,
+      secondary: accent,
+      onSecondary: onAccent,
+      tertiary: accent,
+    ),
+    visualDensity: VisualDensity(horizontal: density, vertical: density),
+    // 用 copyWith 保留既有卡片/按钮主题的其它属性，只替换圆角。
+    cardTheme: base.cardTheme.copyWith(shape: shape),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(shape: shape),
+    ),
+  );
+}
+
 class _ParsedDocument {
   _ParsedDocument(this.scope, this.global, this.project, this.draft);
   final UiScope scope;
@@ -376,6 +489,17 @@ class UiCustomizationStore extends ChangeNotifier {
 
   /// 最近一次被拒绝的操作原因（空 = 无错误），供页面如实展示。
   String lastError = '';
+
+  /// 不读盘的默认内存态：加载失败 / 超时时立即返回可用配置，绝不阻塞启动。
+  /// [loadError] 会在界面自定义页顶部如实展示，不谎称「加载成功」。
+  factory UiCustomizationStore.defaults(
+    HarnessStore store, {
+    String loadError = '',
+  }) {
+    final UiCustomizationConfig fallback = UiCustomizationConfig.defaults();
+    return UiCustomizationStore._(
+        store, UiScope.global, fallback, null, fallback, loadError);
+  }
 
   /// 真实加载；文件不存在用默认值，损坏则回退默认值并在 [loadError] 说明。
   static Future<UiCustomizationStore> load(HarnessStore store) async {
@@ -528,6 +652,23 @@ class UiCustomizationStore extends ChangeNotifier {
       return false;
     }
     _draft = _draft.copyWith(visibleNavKeys: filtered);
+    lastError = '';
+    notifyListeners();
+    return true;
+  }
+
+  /// 拖拽调整可见导航顺序；只重排，不增加/删除项。
+  bool reorderVisibleNav(int oldIndex, int newIndex) {
+    final List<String> next = List<String>.of(_draft.visibleNavKeys);
+    if (oldIndex < 0 || oldIndex >= next.length) return false;
+    int target = newIndex;
+    if (target > oldIndex) target -= 1;
+    if (target < 0) target = 0;
+    if (target >= next.length) target = next.length - 1;
+    if (target == oldIndex) return true;
+    final String key = next.removeAt(oldIndex);
+    next.insert(target, key);
+    _draft = _draft.copyWith(visibleNavKeys: next);
     lastError = '';
     notifyListeners();
     return true;

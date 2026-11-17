@@ -23,6 +23,7 @@ class _TgaKnowledgePageState extends State<TgaKnowledgePage> {
   List<Map<String, dynamic>> _documents = <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _results = <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _snapshots = <Map<String, dynamic>>[];
+  Map<String, dynamic> _vector = <String, dynamic>{};
   String? _selectedId;
   bool _loading = true;
 
@@ -55,6 +56,7 @@ class _TgaKnowledgePageState extends State<TgaKnowledgePage> {
   Future<void> _load() async {
     try {
       final Map<String, dynamic> r = await _call('list');
+      final Map<String, dynamic> v = await _call('vector_stats');
       if (!mounted) return;
       final List<dynamic> libs =
           r['libraries'] is List ? r['libraries'] as List : <dynamic>[];
@@ -63,6 +65,7 @@ class _TgaKnowledgePageState extends State<TgaKnowledgePage> {
             .whereType<Map>()
             .map((Map e) => Map<String, dynamic>.from(e))
             .toList();
+        _vector = v;
         _loading = false;
         if (_selectedId != null &&
             !_libraries.any((Map<String, dynamic> l) => l['id'] == _selectedId)) {
@@ -504,6 +507,36 @@ class _TgaKnowledgePageState extends State<TgaKnowledgePage> {
                             ),
                           ),
                       ],
+                    ],
+                  ),
+                ),
+                TgaCard(
+                  child: Row(
+                    children: <Widget>[
+                      Icon(Icons.hub_outlined, size: 17, color: Tga.primary),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '向量后端：${_vector['backend'] ?? 'local'} · '
+                          '${_vector['count'] ?? 0} 个向量 · '
+                          '${_vector['dimensions'] ?? 256} 维'
+                          '${_vector['ok'] == true ? '' : '（不可用：${_vector['error'] ?? '未知'}）'}',
+                          style: Tga.sub,
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () async {
+                          final Map<String, dynamic> r =
+                              await _call('rebuild_vectors');
+                          if (!mounted) return;
+                          _toast(r['ok'] == true
+                              ? '向量已重建：${r['upserted'] ?? 0} 个'
+                              : (r['error'] ?? '重建失败').toString());
+                          await _load();
+                        },
+                        child: Text('重建索引',
+                            style: TextStyle(color: Tga.primary, fontSize: 12)),
+                      ),
                     ],
                   ),
                 ),
