@@ -359,7 +359,6 @@ class DshComposerSpec {
   static const double shadowAlpha = 0.06;
 }
 
-
 /// 平铺表面：底色 + 0.5dp 描边，无阴影。
 BoxDecoration dshFlat(
   DshPalette c, {
@@ -374,17 +373,50 @@ BoxDecoration dshFlat(
   );
 }
 
-/// 抬升表面：0.5dp 描边 + 极淡投影（菜单 / 对话框 / 输入区 / 悬浮键）。
+/// 抬升表面：极淡投影（菜单 / 对话框 / 输入区 / 悬浮键）。
+///
+/// 保持原有签名与默认参数不变（历史调用点全部兼容）；新增可选 [tint]，
+/// 让浅色模式可以用带蓝灰倾向的阴影而不是死黑，层次更自然。
 List<BoxShadow> dshSoftShadow({
   double blur = 8,
   double lift = 3,
   double alpha = 0.03,
+  Color? tint,
 }) {
   return <BoxShadow>[
     BoxShadow(
-      color: Color.fromRGBO(0, 0, 0, alpha),
+      color: (tint ?? const Color(0xFF2C3E6B)).withValues(alpha: alpha),
       blurRadius: blur,
       offset: Offset(0, lift),
+    ),
+  ];
+}
+
+/// 主题自适应的双层柔和投影。
+///
+/// 单层硬阴影在深色底上要么看不见、要么脏成一片黑；这里用「一层大范围
+/// 环境光 + 一层贴边接触阴影」模拟真实光照，深浅主题分别调色与调透明度。
+/// 只用于卡片 / 输入区 / 悬浮按钮这类需要明显抬升感的表面。
+List<BoxShadow> dshLayeredShadow(
+  DshPalette c, {
+  double blur = 18,
+  double lift = 4,
+  double alpha = 0.06,
+}) {
+  final Color base = c.isDark
+      ? const Color(0xFF000000)
+      : const Color(0xFF2C3E6B);
+  final double strength = c.isDark ? alpha * 3.0 : alpha;
+  return <BoxShadow>[
+    BoxShadow(
+      color: base.withValues(alpha: strength),
+      blurRadius: blur,
+      offset: Offset(0, lift),
+    ),
+    BoxShadow(
+      color: base.withValues(alpha: strength * 0.42),
+      blurRadius: blur * 0.42,
+      offset: Offset(0, lift * 0.35),
     ),
   ];
 }

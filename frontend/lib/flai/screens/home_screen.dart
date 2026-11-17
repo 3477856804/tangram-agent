@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../design/dsh_motion.dart';
 import '../../design/dsh_tokens.dart';
 import '../../services/presence_store.dart';
 import '../../ui/i18n/tga_strings.dart';
@@ -184,21 +185,42 @@ class _FlaiHomeScreenState extends State<FlaiHomeScreen> {
                       _CircleButton(
                         icon: Icons.menu_rounded,
                         tooltip: context.t('sidebar.openDrawer', zh: '打开侧边栏'),
-                        semanticsLabel:
-                            context.t('sidebar.openDrawer', zh: '打开侧边栏'),
+                        semanticsLabel: context.t(
+                          'sidebar.openDrawer',
+                          zh: '打开侧边栏',
+                        ),
                         onTap: () => _scaffoldKey.currentState?.openDrawer(),
                       ),
                       const SizedBox(width: DshSpace.x4),
                       Expanded(
                         child: Semantics(
                           header: true,
-                          child: Text(
-                            _activeTitle(),
-                            style: DshType.s14m.copyWith(
-                              color: c.labelPrimary,
+                          // 切换会话时标题淡入淡出，而不是硬生生换字。
+                          child: AnimatedSwitcher(
+                            duration: DshMotion.fast,
+                            switchInCurve: DshMotion.standard,
+                            layoutBuilder:
+                                (
+                                  Widget? currentChild,
+                                  List<Widget> previousChildren,
+                                ) {
+                                  return Stack(
+                                    alignment: Alignment.centerLeft,
+                                    children: <Widget>[
+                                      ...previousChildren,
+                                      if (currentChild != null) currentChild,
+                                    ],
+                                  );
+                                },
+                            child: Text(
+                              _activeTitle(),
+                              key: ValueKey<String>(_activeTitle()),
+                              style: DshType.s14m.copyWith(
+                                color: c.labelPrimary,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
                       ),
@@ -211,8 +233,10 @@ class _FlaiHomeScreenState extends State<FlaiHomeScreen> {
                           ),
                           iconSize: 19,
                           tooltip: context.t('presence.open', zh: '在场状态'),
-                          semanticsLabel:
-                              context.t('presence.open', zh: '在场状态'),
+                          semanticsLabel: context.t(
+                            'presence.open',
+                            zh: '在场状态',
+                          ),
                           onTap: widget.onPresenceTap!,
                         ),
                       ],
@@ -222,8 +246,10 @@ class _FlaiHomeScreenState extends State<FlaiHomeScreen> {
                           icon: Icons.add_rounded,
                           iconSize: 20,
                           tooltip: context.t('sidebar.newChat', zh: '新会话'),
-                          semanticsLabel:
-                              context.t('sidebar.newChat', zh: '新会话'),
+                          semanticsLabel: context.t(
+                            'sidebar.newChat',
+                            zh: '新会话',
+                          ),
                           onTap: widget.onNewChat!,
                         ),
                     ],
@@ -245,7 +271,7 @@ class _FlaiHomeScreenState extends State<FlaiHomeScreen> {
                           onSuggestion: widget.onSendMessage == null
                               ? null
                               : (String text) =>
-                                  widget.onSendMessage!(text, false, false),
+                                    widget.onSendMessage!(text, false, false),
                         ),
                       ),
                       Padding(
@@ -287,9 +313,12 @@ class _CircleButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final DshPalette c = DshPalette.of(context);
-    final Widget button = InkWell(
+    return DshPressable(
       onTap: onTap,
-      customBorder: const CircleBorder(),
+      borderRadius: BorderRadius.circular(999),
+      tooltip: tooltip,
+      semanticsLabel: semanticsLabel ?? tooltip,
+      haptic: true,
       child: Container(
         // 统一 40dp 点击区，避免不同图标按钮热区大小不一。
         width: 40,
@@ -297,17 +326,13 @@ class _CircleButton extends StatelessWidget {
         decoration: BoxDecoration(
           color: c.inputMajor,
           shape: BoxShape.circle,
-          boxShadow: dshSoftShadow(blur: 10, lift: 2, alpha: 0.05),
+          border: Border.all(color: c.borderL1, width: 0.6),
+          // 主题自适应的双层投影：深色模式下也看得见按钮的抬升。
+          boxShadow: dshLayeredShadow(c, blur: 12, lift: 2, alpha: 0.05),
         ),
         alignment: Alignment.center,
         child: Icon(icon, size: iconSize, color: c.labelPrimary),
       ),
     );
-    final Widget withTooltip =
-        tooltip == null ? button : Tooltip(message: tooltip!, child: button);
-    final String? label = semanticsLabel ?? tooltip;
-    return label == null
-        ? withTooltip
-        : Semantics(button: true, label: label, child: withTooltip);
   }
 }

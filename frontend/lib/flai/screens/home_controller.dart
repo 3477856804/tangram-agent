@@ -26,7 +26,6 @@ class HomeController extends ChangeNotifier {
 
   final void Function(String message)? onError;
 
-
   List<ConversationItem> _conversations = [];
   List<ConversationItem> get conversations => _conversations;
 
@@ -49,6 +48,15 @@ class HomeController extends ChangeNotifier {
   // 长回复上是 O(n²) 复制；写入改为均摊 O(1)，读取时才一次性 toString。
   final StringBuffer _streamingText = StringBuffer();
   final StringBuffer _streamingThinking = StringBuffer();
+
+  // 流式重绘节流：后端每产出一段文本都会回调，若逐段 notifyListeners，
+  // 整条消息列表（含 Markdown 重新解析、代码块布局、滚动跟随）会按
+  // token 频率被重建。按「时间间隔 + 累计字符数」合并刷新，最终由
+  // _finalizeMessage 用完整 buffer 收尾，不丢任何内容、也不用 Timer。
+  static const Duration _kStreamRepaintInterval = Duration(milliseconds: 48);
+  static const int _kStreamRepaintChars = 24;
+  DateTime _lastStreamRepaint = DateTime.fromMillisecondsSinceEpoch(0);
+  int _lastRepaintedLength = 0;
   final Map<String, ToolCall> _pendingToolCalls = {};
   List<Citation> _pendingCitations = [];
 
@@ -89,7 +97,6 @@ class HomeController extends ChangeNotifier {
     return _cachedProfile;
   }
 
-
   Future<void> loadConversations() async {
     _isLoadingConversations = true;
     notifyListeners();
@@ -114,7 +121,6 @@ class HomeController extends ChangeNotifier {
     ai?.cancel();
     super.dispose();
   }
-
 
   Future<void> selectConversation(ConversationItem item) async {
     _activeConversationId = item.id;
@@ -190,7 +196,6 @@ class HomeController extends ChangeNotifier {
     }
   }
 
-
   /// [thinking] / [search] 来自输入区「深度思考 / 智能搜索」胶囊的真实开关，
   /// 随 ChatRequest 透传到 TangramAiProvider，最终进后端 chat payload。
   Future<void> sendMessage(
@@ -227,6 +232,8 @@ class HomeController extends ChangeNotifier {
     _isStreaming = true;
     _streamingText.clear();
     _streamingThinking.clear();
+    _lastStreamRepaint = DateTime.now();
+    _lastRepaintedLength = 0;
     _pendingToolCalls.clear();
     _pendingCitations = [];
     _streamingStatus.clear();
@@ -264,12 +271,12 @@ class HomeController extends ChangeNotifier {
         switch (event) {
           case TextDelta(:final text):
             _streamingText.write(text);
-            _updateStreamingMessage(assistantId);
+            _maybeRepaintStreaming(assistantId);
           case ThinkingStart():
             break;
           case ThinkingDelta(:final text):
             _streamingThinking.write(text);
-            _updateStreamingMessage(assistantId);
+            _maybeRepaintStreaming(assistantId);
           case ThinkingEnd():
             break;
           case TextDone() || ChatDone():
@@ -333,6 +340,20 @@ class HomeController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 合并高频流式刷新：距上次刷新不足 48ms 且新增不足 24 字符时跳过，
+  /// 避免每个 token 都重建整条消息列表。结束时的 finalize 使用完整 buffer，
+  /// 因此跳过中间帧不会造成内容缺失，也不需要任何 Timer / 异步回调。
+  void _maybeRepaintStreaming(String id) {
+    final DateTime now = DateTime.now();
+    final int length = _streamingText.length + _streamingThinking.length;
+    if (now.difference(_lastStreamRepaint) < _kStreamRepaintInterval &&
+        length - _lastRepaintedLength < _kStreamRepaintChars) {
+      return;
+    }
+    _lastStreamRepaint = now;
+    _lastRepaintedLength = length;
+    _updateStreamingMessage(id);
+  }
 
   void _updateStreamingMessage(String id) {
     if (_messages.isEmpty) return;
@@ -354,8 +375,8 @@ class HomeController extends ChangeNotifier {
             : null,
         processStatuses: _streamingStatus.isNotEmpty
             ? _streamingStatus
-                .map((SearchStatus s) => s.toProcessStatus())
-                .toList()
+                  .map((SearchStatus s) => s.toProcessStatus())
+                  .toList()
             : null,
       ),
     ];
@@ -380,8 +401,8 @@ class HomeController extends ChangeNotifier {
           : null,
       processStatuses: _streamingStatus.isNotEmpty
           ? _streamingStatus
-              .map((SearchStatus s) => s.toProcessStatus())
-              .toList()
+                .map((SearchStatus s) => s.toProcessStatus())
+                .toList()
           : null,
       status: MessageStatus.complete,
     );
@@ -399,8 +420,9 @@ class HomeController extends ChangeNotifier {
     final last = _messages.last;
     if (last.id != id) return;
 
-    final errorText =
-        _streamingText.isNotEmpty ? _streamingText.toString() : error;
+    final errorText = _streamingText.isNotEmpty
+        ? _streamingText.toString()
+        : error;
 
     _messages = [
       ..._messages.sublist(0, _messages.length - 1),

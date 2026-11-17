@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../../design/dsh_motion.dart';
 import '../../../../design/dsh_tokens.dart';
 import '../../../../design/dsh_widgets.dart';
 import '../../../../services/model_registry.dart';
@@ -21,11 +22,8 @@ import 'model_selector_sheet.dart';
 /// 发送回调：文本 + 「深度思考 / 智能搜索」两个胶囊的真实开关状态。
 /// 标志沿 onSend → HomeController.sendMessage → ChatRequest →
 /// TangramAiProvider._payload 一路透传进后端 chat payload。
-typedef FlaiSendHandler = void Function(
-  String text,
-  bool thinking,
-  bool search,
-);
+typedef FlaiSendHandler =
+    void Function(String text, bool thinking, bool search);
 
 /// 输入区：dsh 的 InputBar —— R28 的白色卡片 + 发丝描边 + 极淡投影。
 /// 编辑器在上，工具行在下：[+] · 模型 · …… · 麦克风 · 发送。
@@ -68,7 +66,14 @@ class FlaiComposerV2 extends StatefulWidget {
 class _FlaiComposerV2State extends State<FlaiComposerV2> {
   final TextEditingController _textController = TextEditingController();
   final List<PickedAttachment> _pendingAttachments = <PickedAttachment>[];
-  bool _hasText = false;
+
+  /// 输入状态用 ValueNotifier 承载：打字时只重建编辑器行与发送键，
+  /// 不再让每次按键都重建整个输入区（含模型下拉、附件预览、Provider 订阅）。
+  final ValueNotifier<bool> _hasText = ValueNotifier<bool>(false);
+
+  /// 编辑器聚焦状态，用于给整张输入卡一个柔和的点亮反馈。
+  final FocusNode _focusNode = FocusNode();
+  bool _focused = false;
 
   // 录音文件转文字：真实上传网关 ASR，状态与结果如实呈现。
   final AudioTranscribeService _asr = AudioTranscribeService();
@@ -125,9 +130,11 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
     _restoreToggles();
     _textController.addListener(() {
       final bool has = _textController.text.trim().isNotEmpty;
-      if (has != _hasText) {
-        setState(() => _hasText = has);
-      }
+      if (has != _hasText.value) _hasText.value = has;
+    });
+    _focusNode.addListener(() {
+      final bool value = _focusNode.hasFocus;
+      if (_focused != value) setState(() => _focused = value);
     });
   }
 
@@ -138,13 +145,15 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
         widget.voiceTranscript != oldWidget.voiceTranscript &&
         widget.voiceTranscript!.isNotEmpty) {
       _textController.text = widget.voiceTranscript!;
-      setState(() => _hasText = true);
+      _hasText.value = true;
     }
   }
 
   @override
   void dispose() {
     _textController.dispose();
+    _hasText.dispose();
+    _focusNode.dispose();
     _asr.dispose();
     super.dispose();
   }
@@ -173,8 +182,9 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
     final buf = StringBuffer();
     if (text.isNotEmpty) buf.writeln(text);
     for (final PickedAttachment a in _pendingAttachments) {
-      final String size =
-          a.sizeBytes == null ? '大小未知' : _humanSize(a.sizeBytes!);
+      final String size = a.sizeBytes == null
+          ? '大小未知'
+          : _humanSize(a.sizeBytes!);
       buf.writeln('[附件] ${a.name}（${a.mimeType ?? '未知类型'}，$size）');
       final String? content = _readTextAttachment(a);
       if (content != null) {
@@ -189,14 +199,30 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   }
 
   static const Set<String> _textExtensions = <String>{
-    '.txt', '.md', '.json', '.yaml', '.yml', '.csv', '.log',
-    '.dart', '.py', '.js', '.ts', '.xml', '.html', '.css',
-    '.sh', '.toml', '.ini', '.conf',
+    '.txt',
+    '.md',
+    '.json',
+    '.yaml',
+    '.yml',
+    '.csv',
+    '.log',
+    '.dart',
+    '.py',
+    '.js',
+    '.ts',
+    '.xml',
+    '.html',
+    '.css',
+    '.sh',
+    '.toml',
+    '.ini',
+    '.conf',
   };
 
   String? _readTextAttachment(PickedAttachment a) {
     final String lower = a.name.toLowerCase();
-    final bool isText = a.mimeType?.startsWith('text/') == true ||
+    final bool isText =
+        a.mimeType?.startsWith('text/') == true ||
         _textExtensions.any(lower.endsWith);
     if (!isText) return null;
     try {
@@ -251,7 +277,6 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
         offset: _textController.text.length,
       );
       setState(() {
-        _hasText = true;
         _audioTranscribing = false;
         _audioNotice = '已从录音提取文字，可编辑后发送。';
       });
@@ -272,18 +297,19 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
 
   /// 把真实注册表转换成选择器选项：带（本地）/（云端）标记、分组、来源副标题。
   /// 分组标题走 i18n 词典，随语言即时切换。
-  List<ModelOption> _optionsOf(BuildContext context, ModelRegistry r) =>
-      r.entries.map((ModelEntry e) {
+  List<ModelOption> _optionsOf(BuildContext context, ModelRegistry r) => r
+      .entries
+      .map((ModelEntry e) {
         final String group = e.builtin
             ? context.t('home.modelGroupBuiltin', zh: '内置')
             : (e.kind == ModelKind.cloud
-                ? context.t('home.modelGroupCloud', zh: '云端模型（API）')
-                : context.t('home.modelGroupLocal', zh: '本地模型（权重）'));
+                  ? context.t('home.modelGroupCloud', zh: '云端模型（API）')
+                  : context.t('home.modelGroupLocal', zh: '本地模型（权重）'));
         final IconData icon = e.builtin
             ? Icons.bolt_rounded
             : (e.kind == ModelKind.cloud
-                ? Icons.cloud_outlined
-                : Icons.storage_outlined);
+                  ? Icons.cloud_outlined
+                  : Icons.storage_outlined);
         return ModelOption(
           id: e.id,
           name: e.displayName,
@@ -291,7 +317,8 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
           icon: icon,
           group: group,
         );
-      }).toList(growable: false);
+      })
+      .toList(growable: false);
 
   Future<void> _openModelSelector() async {
     final ModelRegistry registry = context.read<ModelRegistry>();
@@ -325,11 +352,12 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   @override
   Widget build(BuildContext context) {
     final DshPalette c = DshPalette.of(context);
-    final bool canSend = _hasText || _pendingAttachments.isNotEmpty;
 
-    // 监听模型注册表与选择变化，模型入口即时刷新（新增/下载后立即生效）。
+    // 保留语言 / 人格配置订阅（切换语言时输入区文案即时刷新），
+    // 但把高频的模型注册表订阅下沉到「TGA 引擎」入口的 Builder 子树：
+    // 模型下载 / 切换只重建那一小块，不再把整个输入区（含正在编辑的
+    // TextField）一起重建。
     context.watch<PersonaStore>();
-    context.watch<ModelRegistry>();
     // 设计稿 2026-11-13：编辑器行在上（浅灰输入框 + 发送键），功能行在下
     // （加号 / 深度思考 / 智能搜索 / TGA 引擎）。模型切换只保留底部
     // 「TGA 引擎」这一个下拉入口，不再在输入行重复渲染模型 chip。
@@ -343,18 +371,24 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
       },
       child: Transform.translate(
         offset: const Offset(0, DshComposerSpec.translateY),
-        child: Container(
+        child: AnimatedContainer(
+          duration: DshMotion.reduced(context) ? Duration.zero : DshMotion.fast,
+          curve: DshMotion.standard,
           decoration: BoxDecoration(
             color: c.inputMajor,
             borderRadius: BorderRadius.circular(DshComposerSpec.radius),
+            // 聚焦时描边点亮、投影略抬升，明确告诉用户「现在在输入」。
             border: Border.all(
-              color: c.borderL1,
-              width: DshComposerSpec.borderWidth,
+              color: _focused ? c.business.withValues(alpha: 0.45) : c.borderL1,
+              width: _focused ? 1.2 : DshComposerSpec.borderWidth,
             ),
-            boxShadow: dshSoftShadow(
+            boxShadow: dshLayeredShadow(
+              c,
               blur: DshComposerSpec.shadowBlur,
               lift: DshComposerSpec.shadowLift,
-              alpha: DshComposerSpec.shadowAlpha,
+              alpha: _focused
+                  ? DshComposerSpec.shadowAlpha * 1.6
+                  : DshComposerSpec.shadowAlpha,
             ),
           ),
           padding: const EdgeInsets.fromLTRB(
@@ -373,12 +407,11 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
                     setState(() => _pendingAttachments.removeAt(index));
                   },
                 ),
-              if (_audioNotice != null)
-                _buildAudioNotice(c),
+              if (_audioNotice != null) _buildAudioNotice(c),
               if (widget.isRecording || widget.isTranscribing)
                 _buildRecordingRow(c)
               else ...<Widget>[
-                _buildEditorRow(c, canSend),
+                _buildEditorRow(c),
                 const SizedBox(height: DshSpace.x10),
                 _buildFeatureRow(c),
               ],
@@ -402,34 +435,34 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: <Widget>[
-          if (_audioTranscribing)
-            SizedBox(
-              width: 13,
-              height: 13,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: c.brandPrimary,
+            if (_audioTranscribing)
+              SizedBox(
+                width: 13,
+                height: 13,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: c.brandPrimary,
+                ),
+              )
+            else
+              Icon(
+                isError ? Icons.error_outline : Icons.audiotrack_rounded,
+                size: 15,
+                color: fg,
               ),
-            )
-          else
-            Icon(
-              isError ? Icons.error_outline : Icons.audiotrack_rounded,
-              size: 15,
-              color: fg,
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _audioNotice!,
+                style: TextStyle(fontSize: 12, color: fg),
+              ),
             ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              _audioNotice!,
-              style: TextStyle(fontSize: 12, color: fg),
-            ),
-          ),
-          if (!_audioTranscribing)
-            GestureDetector(
-              onTap: () => setState(() => _audioNotice = null),
-              behavior: HitTestBehavior.opaque,
-              child: Icon(Icons.close, size: 14, color: c.labelTertiary),
-            ),
+            if (!_audioTranscribing)
+              GestureDetector(
+                onTap: () => setState(() => _audioNotice = null),
+                behavior: HitTestBehavior.opaque,
+                child: Icon(Icons.close, size: 14, color: c.labelTertiary),
+              ),
           ],
         ),
       ),
@@ -437,70 +470,92 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   }
 
   /// 编辑器行：浅灰圆角输入框 + 发送键。
-  Widget _buildEditorRow(DshPalette c, bool canSend) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: <Widget>[
-        Expanded(
-          child: ConstrainedBox(
-            constraints:
-                const BoxConstraints(minHeight: DshComposerSpec.editorMinHeight),
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: DshSpace.x12,
-                vertical: DshSpace.x8,
-              ),
-              decoration: BoxDecoration(
-                color: c.bgModule,
-                borderRadius: BorderRadius.circular(DshR.md),
-              ),
-              child: TextField(
-                controller: _textController,
-                maxLines: 8,
-                minLines: 1,
-                onSubmitted: (_) => _handleSend(),
-                textInputAction: TextInputAction.send,
-                cursorColor: c.business,
-                cursorWidth: 1.5,
-                // 需求：深色模式输入文字纯白、浅色模式纯黑。
-                // 使用专用对话前景令牌，不随次要文字色阶变化。
-                style: DshType.s14.copyWith(color: c.chatText),
-                decoration: InputDecoration(
-                  isDense: true,
-                  hintText: widget.isRecording
-                      ? context.t('home.listening', zh: '正在听…')
-                      : context.t('home.inputHint',
-                          zh: widget.config.resolvedPlaceholder),
-                  hintStyle: DshType.s14.copyWith(color: c.labelCaption),
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  contentPadding: EdgeInsets.zero,
+  ///
+  /// 只有这一行订阅输入状态：打字时不再触发整张输入卡的重建。
+  Widget _buildEditorRow(DshPalette c) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _hasText,
+      builder: (BuildContext context, bool hasText, Widget? _) {
+        final bool canSend = hasText || _pendingAttachments.isNotEmpty;
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: <Widget>[
+            Expanded(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(
+                  minHeight: DshComposerSpec.editorMinHeight,
+                ),
+                child: AnimatedContainer(
+                  duration: DshMotion.reduced(context)
+                      ? Duration.zero
+                      : DshMotion.fast,
+                  curve: DshMotion.standard,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: DshSpace.x12,
+                    vertical: DshSpace.x8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: c.bgModule,
+                    borderRadius: BorderRadius.circular(DshR.md),
+                    border: Border.all(
+                      color: _focused
+                          ? c.business.withValues(alpha: 0.16)
+                          : Colors.transparent,
+                      width: 0.8,
+                    ),
+                  ),
+                  child: TextField(
+                    controller: _textController,
+                    focusNode: _focusNode,
+                    maxLines: 8,
+                    minLines: 1,
+                    onSubmitted: (_) => _handleSend(),
+                    textInputAction: TextInputAction.send,
+                    cursorColor: c.business,
+                    cursorWidth: 1.5,
+                    // 需求：深色模式输入文字纯白、浅色模式纯黑。
+                    // 使用专用对话前景令牌，不随次要文字色阶变化。
+                    style: DshType.s14.copyWith(color: c.chatText),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      hintText: widget.isRecording
+                          ? context.t('home.listening', zh: '正在听…')
+                          : context.t(
+                              'home.inputHint',
+                              zh: widget.config.resolvedPlaceholder,
+                            ),
+                      hintStyle: DshType.s14.copyWith(color: c.labelCaption),
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
-        ),
-        if (widget.config.enableVoice && !_hasText) ...<Widget>[
-          const SizedBox(width: DshSpace.x6),
-          Semantics(
-            button: true,
-            label: widget.isRecording
-                ? context.t('home.stopRecording', zh: '停止录音')
-                : context.t('home.voiceInput', zh: '语音输入'),
-            child: DshIconButton(
-              icon: Icons.mic_none_rounded,
-              iconSize: 18,
-              size: 28,
-              tint: c.labelSecondary,
-              onTap: _handleMicTap,
-              tooltip: context.t('home.voiceInput', zh: '语音输入'),
-            ),
-          ),
-        ],
-        const SizedBox(width: DshSpace.x8),
-        _sendButton(context, enabled: canSend, size: 40),
-      ],
+            if (widget.config.enableVoice && !hasText) ...<Widget>[
+              const SizedBox(width: DshSpace.x6),
+              Semantics(
+                button: true,
+                label: widget.isRecording
+                    ? context.t('home.stopRecording', zh: '停止录音')
+                    : context.t('home.voiceInput', zh: '语音输入'),
+                child: DshIconButton(
+                  icon: Icons.mic_none_rounded,
+                  iconSize: 18,
+                  size: 28,
+                  tint: c.labelSecondary,
+                  onTap: _handleMicTap,
+                  tooltip: context.t('home.voiceInput', zh: '语音输入'),
+                ),
+              ),
+            ],
+            const SizedBox(width: DshSpace.x8),
+            _sendButton(context, enabled: canSend, size: 40),
+          ],
+        );
+      },
     );
   }
 
@@ -533,26 +588,32 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
         button: true,
         toggled: active,
         label: label,
-        child: GestureDetector(
+        child: DshPressable(
           onTap: onTap,
-          child: Container(
+          borderRadius: BorderRadius.circular(999),
+          haptic: true,
+          child: AnimatedContainer(
+            duration: DshMotion.reduced(context)
+                ? Duration.zero
+                : DshMotion.fast,
+            curve: DshMotion.standard,
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
               color: active ? c.businessTertiary : c.inputMajor,
               borderRadius: BorderRadius.circular(999),
               border: Border.all(
-                color: active
-                    ? c.business.withValues(alpha: 0.30)
-                    : c.borderL3,
+                color: active ? c.business.withValues(alpha: 0.36) : c.borderL3,
                 width: 0.8,
               ),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Icon(icon,
-                    size: 13,
-                    color: active ? c.business : c.labelSecondary),
+                Icon(
+                  icon,
+                  size: 13,
+                  color: active ? c.business : c.labelSecondary,
+                ),
                 const SizedBox(width: 5),
                 Text(
                   label,
@@ -627,36 +688,46 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   /// 模型切换的唯一入口：「TGA 引擎」下拉，点击打开真实模型选择器。
   /// 旧输入行里的模型 chip 已删除，避免两处入口互相打架。
   Widget _buildModelEntry(DshPalette c) {
-    final ModelEntry selected = context.watch<ModelRegistry>().selected;
-    return Semantics(
-      button: true,
-      label: context.t('home.switchModelSemantics',
-          zh: '切换模型，快捷键 Ctrl 或 Command 加 M'),
-      child: Tooltip(
-        message: context.t('home.switchModelTooltip', zh: '切换模型（Ctrl + M）'),
-        child: InkWell(
-          onTap: _openModelSelector,
-          borderRadius: BorderRadius.circular(DshR.sm),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: DshSpace.x4,
-              vertical: DshSpace.x4,
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Text(
-                  _modelEntryLabel(selected),
-                  style: DshType.xs13m.copyWith(color: c.labelPrimary),
+    // 用 Builder 拿到子 context，把模型注册表的订阅限制在这棵小子树里。
+    return Builder(
+      builder: (BuildContext context) {
+        final ModelEntry selected = context.watch<ModelRegistry>().selected;
+        return Semantics(
+          button: true,
+          label: context.t(
+            'home.switchModelSemantics',
+            zh: '切换模型，快捷键 Ctrl 或 Command 加 M',
+          ),
+          child: Tooltip(
+            message: context.t('home.switchModelTooltip', zh: '切换模型（Ctrl + M）'),
+            child: InkWell(
+              onTap: _openModelSelector,
+              borderRadius: BorderRadius.circular(DshR.sm),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: DshSpace.x4,
+                  vertical: DshSpace.x4,
                 ),
-                const SizedBox(width: DshSpace.x2),
-                Icon(Icons.expand_more_rounded,
-                    size: 16, color: c.labelTertiary),
-              ],
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Text(
+                      _modelEntryLabel(selected),
+                      style: DshType.xs13m.copyWith(color: c.labelPrimary),
+                    ),
+                    const SizedBox(width: DshSpace.x2),
+                    Icon(
+                      Icons.expand_more_rounded,
+                      size: 16,
+                      color: c.labelTertiary,
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -705,7 +776,11 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
               ),
             ),
             const SizedBox(width: DshSpace.x4),
-            _sendButton(context, enabled: _hasText),
+            ValueListenableBuilder<bool>(
+              valueListenable: _hasText,
+              builder: (BuildContext ctx, bool hasText, Widget? _) =>
+                  _sendButton(ctx, enabled: hasText),
+            ),
           ],
         ),
       ),
@@ -758,9 +833,7 @@ class _InlineWaveformState extends State<_InlineWaveform> {
         Expanded(
           child: SizedBox(
             height: 20,
-            child: CustomPaint(
-              painter: _WaveformPainter(color: widget.dim),
-            ),
+            child: CustomPaint(painter: _WaveformPainter(color: widget.dim)),
           ),
         ),
         const SizedBox(width: DshSpace.x8),

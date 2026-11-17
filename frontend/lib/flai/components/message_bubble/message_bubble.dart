@@ -4,6 +4,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:markdown/markdown.dart' as md;
 
 import '../../core/models/message.dart';
+import '../../../design/dsh_motion.dart';
 import '../../../design/dsh_tokens.dart';
 import '../../core/theme/flai_theme.dart';
 
@@ -50,7 +51,6 @@ class MessageBubble extends StatelessWidget {
   }
 }
 
-
 class _ChatLayout extends StatelessWidget {
   final Message message;
   final FlaiThemeData theme;
@@ -77,8 +77,7 @@ class _ChatLayout extends StatelessWidget {
     final Color chatFg = Theme.of(context).brightness == Brightness.dark
         ? Colors.white
         : Colors.black;
-    final Color bubbleFg =
-        isUser ? theme.colors.userBubbleForeground : chatFg;
+    final Color bubbleFg = isUser ? theme.colors.userBubbleForeground : chatFg;
     // FlaiTheme.dark 的 destructive 是深红底色，直接当文字色在深底上不可读；
     // 错误提示统一取 dsh 语义错误色（深色 #EF4444 / 浅色 #DC2626）。
     final Color errorFg = DshPalette.of(context).error;
@@ -205,9 +204,27 @@ class _ChatLayout extends StatelessWidget {
     if (message.content.isEmpty) return;
     Clipboard.setData(ClipboardData(text: message.content));
     HapticFeedback.lightImpact();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已复制'), duration: Duration(seconds: 2)),
-    );
+    // 连续复制时先撤掉上一条提示，避免 SnackBar 排队堆叠。
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(
+                Icons.check_circle_outline_rounded,
+                size: 16,
+                color: Theme.of(context).colorScheme.onInverseSurface,
+              ),
+              const SizedBox(width: 8),
+              const Text('已复制到剪贴板'),
+            ],
+          ),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
   }
 }
 
@@ -276,10 +293,7 @@ class _BubbleAction extends StatelessWidget {
                 children: [
                   Icon(icon, size: 13, color: color),
                   SizedBox(width: theme.spacing.xs),
-                  Text(
-                    label,
-                    style: theme.typography.bodySmall(color: color),
-                  ),
+                  Text(label, style: theme.typography.bodySmall(color: color)),
                 ],
               ),
             ),
@@ -289,7 +303,6 @@ class _BubbleAction extends StatelessWidget {
     );
   }
 }
-
 
 class _SystemLayout extends StatelessWidget {
   final Message message;
@@ -338,7 +351,6 @@ class _SystemLayout extends StatelessWidget {
     );
   }
 }
-
 
 class _ToolLayout extends StatelessWidget {
   final Message message;
@@ -402,7 +414,6 @@ class _ToolLayout extends StatelessWidget {
     );
   }
 }
-
 
 class _ThinkingBlock extends StatefulWidget {
   final String content;
@@ -538,7 +549,6 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
   }
 }
 
-
 class _ToolCallChips extends StatelessWidget {
   final List<ToolCall> toolCalls;
   final FlaiThemeData theme;
@@ -602,7 +612,6 @@ class _ToolCallChip extends StatelessWidget {
     );
   }
 }
-
 
 class _CitationCard extends StatelessWidget {
   final Citation citation;
@@ -672,7 +681,6 @@ class _CitationCard extends StatelessWidget {
   }
 }
 
-
 class _MessageContent extends StatelessWidget {
   final String content;
   final bool isStreaming;
@@ -686,76 +694,106 @@ class _MessageContent extends StatelessWidget {
     required this.cursorColor,
   });
 
+  /// 同一套前景色 / 字号的 MarkdownStyleSheet 只构造一次。
+  /// 长会话滚动时，原本每个气泡重建都会 new 出约 30 个 TextStyle 与
+  /// 若干 BoxDecoration —— 纯 GC 压力，且与最终渲染结果无关。
+  static final Map<int, MarkdownStyleSheet> _sheetCache =
+      <int, MarkdownStyleSheet>{};
+
+  static MarkdownStyleSheet _sheetFor(TextStyle style, Color cursorColor) {
+    final int key = Object.hash(
+      style.color,
+      style.fontSize,
+      style.fontWeight,
+      style.fontFamily,
+      style.height,
+      cursorColor,
+    );
+    final MarkdownStyleSheet? cached = _sheetCache[key];
+    if (cached != null) return cached;
+    // UI 自定义字号是连续值，给缓存设上限，避免长期运行无限增长。
+    if (_sheetCache.length >= 24) _sheetCache.clear();
+    final MarkdownStyleSheet sheet = _buildSheet(style, cursorColor);
+    _sheetCache[key] = sheet;
+    return sheet;
+  }
+
+  static MarkdownStyleSheet _buildSheet(TextStyle style, Color cursorColor) {
+    // 所有文本样式都显式沿用气泡前景色：MarkdownStyleSheet 未设置的
+    // 元素会回退到 Theme 默认前景色，深色模式下标题/加粗/引用/表格
+    // 会与 AI 气泡背景近同色而不可见（问题 #1）。
+    final TextStyle heading = style.copyWith(
+      fontWeight: FontWeight.w700,
+      height: 1.3,
+    );
+    final TextStyle bold = style.copyWith(fontWeight: FontWeight.w700);
+    return MarkdownStyleSheet(
+      p: style,
+      pPadding: EdgeInsets.zero,
+      h1: heading,
+      h2: heading.copyWith(fontSize: (style.fontSize ?? 14) + 4),
+      h3: heading.copyWith(fontSize: (style.fontSize ?? 14) + 2),
+      h4: heading,
+      h5: heading,
+      h6: heading,
+      h1Padding: EdgeInsets.zero,
+      h2Padding: EdgeInsets.zero,
+      h3Padding: EdgeInsets.zero,
+      h4Padding: EdgeInsets.zero,
+      h5Padding: EdgeInsets.zero,
+      h6Padding: EdgeInsets.zero,
+      em: style.copyWith(fontStyle: FontStyle.italic),
+      strong: bold,
+      del: style.copyWith(decoration: TextDecoration.lineThrough),
+      blockquote: style.copyWith(color: style.color?.withValues(alpha: 0.85)),
+      blockquotePadding: const EdgeInsets.only(left: 10),
+      blockquoteDecoration: BoxDecoration(
+        border: Border(
+          left: BorderSide(
+            color: style.color?.withValues(alpha: 0.35) ?? Colors.grey,
+            width: 3,
+          ),
+        ),
+      ),
+      listBullet: style,
+      listBulletPadding: const EdgeInsets.only(left: 18, top: 2),
+      listIndent: 18,
+      tableHead: bold,
+      tableBody: style,
+      tableHeadAlign: TextAlign.center,
+      tableBorder: TableBorder.all(
+        color: style.color?.withValues(alpha: 0.25) ?? Colors.grey,
+        width: 1,
+      ),
+      a: style.copyWith(
+        color: cursorColor,
+        decoration: TextDecoration.underline,
+      ),
+      code: style.copyWith(
+        fontFamily: 'monospace',
+        backgroundColor: Colors.transparent,
+      ),
+      codeblockDecoration: BoxDecoration(
+        color: style.color?.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      codeblockPadding: const EdgeInsets.fromLTRB(12, 32, 12, 12),
+      horizontalRuleDecoration: BoxDecoration(
+        border: Border(
+          top: BorderSide(
+            color: style.color?.withValues(alpha: 0.25) ?? Colors.grey,
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!isStreaming) {
-      // 所有文本样式都显式沿用气泡前景色：MarkdownStyleSheet 未设置的
-      // 元素会回退到 Theme 默认前景色，深色模式下标题/加粗/引用/表格
-      // 会与 AI 气泡背景近同色而不可见（问题 #1）。
-      final TextStyle heading =
-          style.copyWith(fontWeight: FontWeight.w700, height: 1.3);
-      final TextStyle bold = style.copyWith(fontWeight: FontWeight.w700);
       return MarkdownBody(
         data: content,
-        styleSheet: MarkdownStyleSheet(
-          p: style,
-          pPadding: EdgeInsets.zero,
-          h1: heading,
-          h2: heading.copyWith(fontSize: (style.fontSize ?? 14) + 4),
-          h3: heading.copyWith(fontSize: (style.fontSize ?? 14) + 2),
-          h4: heading,
-          h5: heading,
-          h6: heading,
-          h1Padding: EdgeInsets.zero,
-          h2Padding: EdgeInsets.zero,
-          h3Padding: EdgeInsets.zero,
-          h4Padding: EdgeInsets.zero,
-          h5Padding: EdgeInsets.zero,
-          h6Padding: EdgeInsets.zero,
-          em: style.copyWith(fontStyle: FontStyle.italic),
-          strong: bold,
-          del: style.copyWith(decoration: TextDecoration.lineThrough),
-          blockquote: style.copyWith(color: style.color?.withValues(alpha: 0.85)),
-          blockquotePadding: const EdgeInsets.only(left: 10),
-          blockquoteDecoration: BoxDecoration(
-            border: Border(
-              left: BorderSide(
-                color: style.color?.withValues(alpha: 0.35) ?? Colors.grey,
-                width: 3,
-              ),
-            ),
-          ),
-          listBullet: style,
-          listBulletPadding: const EdgeInsets.only(left: 18, top: 2),
-          listIndent: 18,
-          tableHead: bold,
-          tableBody: style,
-          tableHeadAlign: TextAlign.center,
-          tableBorder: TableBorder.all(
-            color: style.color?.withValues(alpha: 0.25) ?? Colors.grey,
-            width: 1,
-          ),
-          a: style.copyWith(
-            color: cursorColor,
-            decoration: TextDecoration.underline,
-          ),
-          code: style.copyWith(
-            fontFamily: 'monospace',
-            backgroundColor: Colors.transparent,
-          ),
-          codeblockDecoration: BoxDecoration(
-            color: style.color?.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          codeblockPadding: const EdgeInsets.fromLTRB(12, 32, 12, 12),
-          horizontalRuleDecoration: BoxDecoration(
-            border: Border(
-              top: BorderSide(
-                color: style.color?.withValues(alpha: 0.25) ?? Colors.grey,
-              ),
-            ),
-          ),
-        ),
+        styleSheet: _sheetFor(style, cursorColor),
         builders: {'code': _CodeBlockBuilder(codeColor: style.color)},
         selectable: true,
         shrinkWrap: true,
@@ -794,8 +832,14 @@ class _BlinkingCursorState extends State<_BlinkingCursor>
     _controller = AnimationController(
       duration: const Duration(milliseconds: 600),
       vsync: this,
-    )..repeat(reverse: true);
+    );
     _opacity = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
+    // 系统要求减少动态效果时保持常亮光标：不常驻逐帧刷新，也更省电。
+    if (DshMotion.reduced(context)) {
+      _controller.value = 1.0;
+    } else {
+      _controller.repeat(reverse: true);
+    }
   }
 
   @override
@@ -820,7 +864,6 @@ class _BlinkingCursorState extends State<_BlinkingCursor>
     );
   }
 }
-
 
 class _CodeBlockBuilder extends MarkdownElementBuilder {
   final Color? codeColor;
@@ -893,12 +936,15 @@ class _CodeBlockWidget extends StatelessWidget {
                     onTap: () {
                       Clipboard.setData(ClipboardData(text: code));
                       HapticFeedback.lightImpact();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('已复制到剪贴板'),
-                          duration: Duration(seconds: 1),
-                        ),
-                      );
+                      ScaffoldMessenger.of(context)
+                        ..hideCurrentSnackBar()
+                        ..showSnackBar(
+                          const SnackBar(
+                            content: Text('已复制到剪贴板'),
+                            duration: Duration(seconds: 1),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
                     },
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../../../design/dsh_motion.dart';
 import '../../../../design/dsh_tokens.dart';
 import '../../../../design/dsh_widgets.dart';
 import '../../../../ui/i18n/tga_strings.dart';
@@ -69,36 +70,56 @@ class FlaiEmptyChatState extends StatelessWidget {
           children: <Widget>[
             // 设计稿 2026-11-13 用户反馈：去掉鹿标外的白色圆角卡片背景，
             // 直接显示 logo 图片本身（尺寸保持 56）。
-            TangramGlyph(size: 56, color: c.labelPrimary),
-            const SizedBox(height: DshSpace.x24),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: DshSpace.x16),
-              child: Text(
-                title,
-                style: DshType.s14m.copyWith(
-                  fontSize: 24,
-                  height: 32 / 24,
-                  fontWeight: FontWeight.w700,
-                  color: c.labelPrimary,
-                ),
-                textAlign: TextAlign.center,
-              ),
+            // 品牌标、问候语、副标题、快捷指令依次错落淡入：像人打开
+            // 一个新会话时的节奏，而不是整屏「啪」地一次性出现。
+            // 系统开启「减少动态效果」时 DshFadeSlideIn 会自动退化为直出。
+            DshFadeSlideIn(
+              duration: DshMotion.entrance,
+              offsetY: 10,
+              child: TangramGlyph(size: 56, color: c.labelPrimary),
             ),
-            if (config.resolvedGreetingSubtitle.isNotEmpty) ...<Widget>[
-              const SizedBox(height: DshSpace.x8),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: DshSpace.x24),
+            const SizedBox(height: DshSpace.x24),
+            DshFadeSlideIn(
+              delay: const Duration(milliseconds: 70),
+              duration: DshMotion.normal,
+              offsetY: 8,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: DshSpace.x16),
                 child: Text(
-                  config.resolvedGreetingSubtitle,
-                  style: DshType.xs13.copyWith(
-                    fontSize: 13,
-                    color: c.labelSecondary,
-                    height: 1.5,
+                  title,
+                  style: DshType.s14m.copyWith(
+                    fontSize: 24,
+                    height: 32 / 24,
+                    fontWeight: FontWeight.w700,
+                    color: c.labelPrimary,
                   ),
                   textAlign: TextAlign.center,
                 ),
               ),
-            ],
+            ),
+            if (config.resolvedGreetingSubtitle.isNotEmpty)
+              DshFadeSlideIn(
+                delay: const Duration(milliseconds: 130),
+                duration: DshMotion.normal,
+                offsetY: 8,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    DshSpace.x24,
+                    DshSpace.x8,
+                    DshSpace.x24,
+                    0,
+                  ),
+                  child: Text(
+                    config.resolvedGreetingSubtitle,
+                    style: DshType.xs13.copyWith(
+                      fontSize: 13,
+                      color: c.labelSecondary,
+                      height: 1.5,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
             if (onSuggestion != null) ...<Widget>[
               const SizedBox(height: DshSpace.x20),
               Padding(
@@ -108,10 +129,17 @@ class FlaiEmptyChatState extends StatelessWidget {
                   spacing: DshSpace.x8,
                   runSpacing: DshSpace.x8,
                   children: _quickPrompts
+                      .asMap()
+                      .entries
                       .map(
-                        (_QuickPrompt prompt) => _QuickPromptChip(
-                          prompt: prompt,
-                          onTap: () => onSuggestion!(prompt.label),
+                        (MapEntry<int, _QuickPrompt> e) => DshFadeSlideIn(
+                          delay: Duration(milliseconds: 180 + e.key * 55),
+                          duration: DshMotion.normal,
+                          offsetY: 10,
+                          child: _QuickPromptChip(
+                            prompt: e.value,
+                            onTap: () => onSuggestion!(e.value.label),
+                          ),
                         ),
                       )
                       .toList(),

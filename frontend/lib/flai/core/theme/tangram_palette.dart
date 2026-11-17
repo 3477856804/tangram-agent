@@ -256,27 +256,28 @@ class TangramTheme {
 
   /// Material 3 主题（浅色）。
   static ThemeData light() {
-    final ColorScheme scheme = ColorScheme.fromSeed(
-      seedColor: TangramColors.accent,
-      brightness: Brightness.light,
-    ).copyWith(
-      primary: TangramColors.brand,
-      onPrimary: TangramColors.onBrand,
-      primaryContainer: TangramColors.brandDimmed,
-      onPrimaryContainer: TangramColors.textPrimary,
-      secondary: TangramColors.accent,
-      onSecondary: Colors.white,
-      secondaryContainer: TangramColors.accentSoft,
-      onSecondaryContainer: const Color(0xFF0E3074),
-      tertiary: TangramColors.accent,
-      surface: TangramColors.surface,
-      onSurface: TangramColors.textPrimary,
-      onSurfaceVariant: TangramColors.textSecondary,
-      outline: TangramColors.borderL4,
-      outlineVariant: TangramColors.borderL2,
-      error: TangramColors.danger,
-      surfaceTint: Colors.transparent,
-    );
+    final ColorScheme scheme =
+        ColorScheme.fromSeed(
+          seedColor: TangramColors.accent,
+          brightness: Brightness.light,
+        ).copyWith(
+          primary: TangramColors.brand,
+          onPrimary: TangramColors.onBrand,
+          primaryContainer: TangramColors.brandDimmed,
+          onPrimaryContainer: TangramColors.textPrimary,
+          secondary: TangramColors.accent,
+          onSecondary: Colors.white,
+          secondaryContainer: TangramColors.accentSoft,
+          onSecondaryContainer: const Color(0xFF0E3074),
+          tertiary: TangramColors.accent,
+          surface: TangramColors.surface,
+          onSurface: TangramColors.textPrimary,
+          onSurfaceVariant: TangramColors.textSecondary,
+          outline: TangramColors.borderL4,
+          outlineVariant: TangramColors.borderL2,
+          error: TangramColors.danger,
+          surfaceTint: Colors.transparent,
+        );
     final ThemeData base = ThemeData(
       useMaterial3: true,
       brightness: Brightness.light,
@@ -299,6 +300,33 @@ class TangramTheme {
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: false,
+      ),
+      // 全局提示层：浮动圆角 SnackBar / Tooltip，替代默认的直角贴底条。
+      snackBarTheme: SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        elevation: 0,
+        backgroundColor: const Color(0xFF26313C),
+        contentTextStyle: const TextStyle(
+          color: Color(0xFFF1F5F9),
+          fontSize: 13,
+        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      ),
+      tooltipTheme: TooltipThemeData(
+        decoration: BoxDecoration(
+          color: const Color(0xFF26313C),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        textStyle: const TextStyle(color: Colors.white, fontSize: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      ),
+      // 页面转场统一为「轻微缩放淡入」，避免各平台默认动画风格割裂。
+      // 只覆盖 Android；其余平台沿用框架默认转场，避免依赖平台专属类。
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: <TargetPlatform, PageTransitionsBuilder>{
+          TargetPlatform.android: ZoomPageTransitionsBuilder(),
+        },
       ),
       dividerTheme: const DividerThemeData(
         color: TangramColors.borderL2,
@@ -341,27 +369,28 @@ class TangramTheme {
 
   /// Material 3 主题（深色）：极夜黑打底、深海盐蓝承载卡片、柔光星蓝只做点缀。
   static ThemeData dark() {
-    final ColorScheme scheme = ColorScheme.fromSeed(
-      seedColor: TangramColorsDark.accent,
-      brightness: Brightness.dark,
-    ).copyWith(
-      primary: TangramColorsDark.brand,
-      onPrimary: TangramColorsDark.onBrand,
-      primaryContainer: TangramColorsDark.brandDimmed,
-      onPrimaryContainer: TangramColorsDark.textPrimary,
-      secondary: TangramColorsDark.accent,
-      onSecondary: TangramColorsDark.onBrand,
-      secondaryContainer: TangramColorsDark.accentSoft,
-      onSecondaryContainer: TangramColorsDark.textPrimary,
-      tertiary: TangramColorsDark.accent,
-      surface: TangramColorsDark.surface,
-      onSurface: TangramColorsDark.textPrimary,
-      onSurfaceVariant: TangramColorsDark.textSecondary,
-      outline: TangramColorsDark.borderL4,
-      outlineVariant: TangramColorsDark.borderL2,
-      error: TangramColorsDark.danger,
-      surfaceTint: Colors.transparent,
-    );
+    final ColorScheme scheme =
+        ColorScheme.fromSeed(
+          seedColor: TangramColorsDark.accent,
+          brightness: Brightness.dark,
+        ).copyWith(
+          primary: TangramColorsDark.brand,
+          onPrimary: TangramColorsDark.onBrand,
+          primaryContainer: TangramColorsDark.brandDimmed,
+          onPrimaryContainer: TangramColorsDark.textPrimary,
+          secondary: TangramColorsDark.accent,
+          onSecondary: TangramColorsDark.onBrand,
+          secondaryContainer: TangramColorsDark.accentSoft,
+          onSecondaryContainer: TangramColorsDark.textPrimary,
+          tertiary: TangramColorsDark.accent,
+          surface: TangramColorsDark.surface,
+          onSurface: TangramColorsDark.textPrimary,
+          onSurfaceVariant: TangramColorsDark.textSecondary,
+          outline: TangramColorsDark.borderL4,
+          outlineVariant: TangramColorsDark.borderL2,
+          error: TangramColorsDark.danger,
+          surfaceTint: Colors.transparent,
+        );
     final ThemeData base = ThemeData(
       useMaterial3: true,
       brightness: Brightness.dark,
@@ -384,6 +413,31 @@ class TangramTheme {
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: false,
+      ),
+      // 深色模式下提示条反转为浅底深字，保持至少 4.5:1 的对比度。
+      snackBarTheme: SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        elevation: 0,
+        backgroundColor: const Color(0xFFE2E8F0),
+        contentTextStyle: const TextStyle(
+          color: Color(0xFF141618),
+          fontSize: 13,
+        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      ),
+      tooltipTheme: TooltipThemeData(
+        decoration: BoxDecoration(
+          color: const Color(0xFFE2E8F0),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        textStyle: const TextStyle(color: Color(0xFF141618), fontSize: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      ),
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: <TargetPlatform, PageTransitionsBuilder>{
+          TargetPlatform.android: ZoomPageTransitionsBuilder(),
+        },
       ),
       dividerTheme: const DividerThemeData(
         color: TangramColorsDark.borderL2,

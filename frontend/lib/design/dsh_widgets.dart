@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import 'dsh_motion.dart';
 import 'dsh_tokens.dart';
 
 /// TGA (tangram-agent) —— dsh 风格的基础组件。
@@ -136,11 +137,7 @@ class DshIconButton extends StatelessWidget {
             borderRadius: BorderRadius.circular(radius),
           ),
           alignment: Alignment.center,
-          child: Icon(
-            icon,
-            size: iconSize,
-            color: tint ?? c.labelSecondary,
-          ),
+          child: Icon(icon, size: iconSize, color: tint ?? c.labelSecondary),
         ),
       ),
     );
@@ -476,21 +473,38 @@ class DshSendButton extends StatelessWidget {
     final DshPalette c = DshPalette.of(context);
     final bool stop = running && !enabled;
     final bool on = stop || enabled;
-    return Opacity(
+    return AnimatedOpacity(
       opacity: on ? 1 : 0.4,
-      child: InkWell(
-        onTap: () {
-          if (stop) {
-            onStop?.call();
-          } else if (enabled) {
-            onSend();
-          }
-        },
-        customBorder: const CircleBorder(),
+      duration: DshMotion.fast,
+      curve: DshMotion.standard,
+      child: DshPressable(
+        // 禁用态不注册点击：不再出现「点了没反应却有水波纹」的误导反馈。
+        onTap: on
+            ? () {
+                if (stop) {
+                  onStop?.call();
+                } else if (enabled) {
+                  onSend();
+                }
+              }
+            : null,
+        enabled: on,
+        borderRadius: BorderRadius.circular(size / 2),
+        haptic: on,
         child: Container(
           width: size,
           height: size,
-          decoration: BoxDecoration(color: c.business, shape: BoxShape.circle),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: <Color>[c.business, c.business.withValues(alpha: 0.88)],
+            ),
+            shape: BoxShape.circle,
+            boxShadow: on
+                ? dshLayeredShadow(c, blur: 12, lift: 2, alpha: 0.10)
+                : null,
+          ),
           alignment: Alignment.center,
           child: CustomPaint(
             size: Size(size * 0.47, size * 0.47),
@@ -513,8 +527,12 @@ class _SendGlyphPainter extends CustomPainter {
     if (stop) {
       canvas.drawRRect(
         RRect.fromRectAndRadius(
-          Rect.fromLTWH(size.width * 0.18, size.height * 0.18,
-              size.width * 0.64, size.height * 0.64),
+          Rect.fromLTWH(
+            size.width * 0.18,
+            size.height * 0.18,
+            size.width * 0.64,
+            size.height * 0.64,
+          ),
           const Radius.circular(3),
         ),
         p,
@@ -617,7 +635,11 @@ class DshTopBar extends StatelessWidget implements PreferredSizeWidget {
 
 /// 设置卡片：R20，0.5dp 描边，内部行用发丝线分隔。
 class DshSettingsCard extends StatelessWidget {
-  const DshSettingsCard({super.key, required this.children, this.radius = DshR.xl});
+  const DshSettingsCard({
+    super.key,
+    required this.children,
+    this.radius = DshR.xl,
+  });
 
   final List<Widget> children;
   final double radius;
@@ -749,7 +771,9 @@ Future<T?> showDshSheet<T>({
           padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
           child: Container(
             decoration: BoxDecoration(
-              color: c.isDark ? const Color(0xFF303136) : const Color(0xFFF8F9FA),
+              color: c.isDark
+                  ? const Color(0xFF303136)
+                  : const Color(0xFFF8F9FA),
               borderRadius: BorderRadius.circular(DshR.lg),
               border: Border.all(color: c.borderL2, width: dshHairline),
             ),

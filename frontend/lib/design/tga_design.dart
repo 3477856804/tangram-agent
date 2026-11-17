@@ -1,6 +1,9 @@
 import 'dart:math' as math;
+import 'dart:ui' show FontFeature;
 
 import 'package:flutter/material.dart';
+
+import 'dsh_motion.dart';
 
 /// TGA 设计系统双主题色板（2026-11-13 深/浅两套满分配色）。
 ///
@@ -266,21 +269,56 @@ class Tga {
   static const double pagePad = 16;
 
   static TextStyle get h1 => TextStyle(
-      fontSize: 22, fontWeight: FontWeight.w700, color: text, height: 1.3);
+    fontSize: 22,
+    fontWeight: FontWeight.w700,
+    color: text,
+    height: 1.3,
+  );
   static TextStyle get h2 => TextStyle(
-      fontSize: 16, fontWeight: FontWeight.w600, color: text, height: 1.4);
+    fontSize: 16,
+    fontWeight: FontWeight.w600,
+    color: text,
+    height: 1.4,
+  );
   static TextStyle get body => TextStyle(
-      fontSize: 14, fontWeight: FontWeight.w500, color: text, height: 1.4);
+    fontSize: 14,
+    fontWeight: FontWeight.w500,
+    color: text,
+    height: 1.4,
+  );
   static TextStyle get sub => TextStyle(
-      fontSize: 12, fontWeight: FontWeight.w400, color: textSub, height: 1.45);
+    fontSize: 12,
+    fontWeight: FontWeight.w400,
+    color: textSub,
+    height: 1.45,
+  );
   static TextStyle get caption => TextStyle(
-      fontSize: 11, fontWeight: FontWeight.w400, color: textDim, height: 1.4);
+    fontSize: 11,
+    fontWeight: FontWeight.w400,
+    color: textDim,
+    height: 1.4,
+  );
 
   static BoxShadow get softShadow => BoxShadow(
-        color: _active.shadowBase.withValues(alpha: _active.shadowAlpha),
-        blurRadius: 14,
-        offset: const Offset(0, 4),
-      );
+    color: _active.shadowBase.withValues(alpha: _active.shadowAlpha),
+    blurRadius: 14,
+    offset: const Offset(0, 4),
+  );
+
+  /// 卡片专用双层投影：大范围环境光 + 贴边接触阴影，比单层投影更接近
+  /// 真实材质的抬升感；深色主题下自动压低强度，避免糊成黑块。
+  static List<BoxShadow> get cardShadow => <BoxShadow>[
+    BoxShadow(
+      color: _active.shadowBase.withValues(alpha: _active.shadowAlpha * 0.85),
+      blurRadius: 20,
+      offset: const Offset(0, 6),
+    ),
+    BoxShadow(
+      color: _active.shadowBase.withValues(alpha: _active.shadowAlpha * 0.38),
+      blurRadius: 6,
+      offset: const Offset(0, 1),
+    ),
+  ];
 }
 
 /// 页面骨架：主题底色 + 可选标题栏。构建时同步全局激活色板。
@@ -310,9 +348,28 @@ class TgaPage extends StatelessWidget {
         centerTitle: false,
         title: Text(title, style: Tga.h1),
         actions: actions,
+        // 顶栏与内容之间加一条发丝线：滚动时标题区不再和内容糊在一起。
+        flexibleSpace: DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(
+                color: Tga.divider.withValues(alpha: 0.55),
+                width: 0.6,
+              ),
+            ),
+          ),
+        ),
       ),
       bottomNavigationBar: bottom,
-      body: SafeArea(child: child),
+      // 页面首次进入时轻微上浮淡入，避免硬切；动画一次性结束，
+      // 且尊重系统「减少动态效果」设置。
+      body: SafeArea(
+        child: DshFadeSlideIn(
+          duration: DshMotion.normal,
+          offsetY: 8,
+          child: child,
+        ),
+      ),
     );
   }
 }
@@ -331,11 +388,14 @@ class TgaGroupTitle extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(4, 18, 4, 10),
       child: Row(
         children: <Widget>[
-          Text(text,
-              style: TextStyle(
-                  fontSize: 13.5,
-                  fontWeight: FontWeight.w700,
-                  color: Tga.groupTitle)),
+          Text(
+            text,
+            style: TextStyle(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w700,
+              color: Tga.groupTitle,
+            ),
+          ),
           const Spacer(),
           if (trailing != null) trailing!,
         ],
@@ -355,24 +415,29 @@ class TgaCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     Tga.syncFrom(context);
+    final BorderRadius radius = BorderRadius.circular(Tga.rCard);
     final Widget inner = Container(
       width: double.infinity,
       padding: padding ?? const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Tga.card,
-        borderRadius: BorderRadius.circular(Tga.rCard),
-        boxShadow: <BoxShadow>[Tga.softShadow],
+        borderRadius: radius,
+        // 发丝描边 + 双层投影：卡片边界更清晰，深浅主题下都立得住。
+        border: Border.all(
+          color: Tga.divider.withValues(alpha: 0.6),
+          width: 0.6,
+        ),
+        boxShadow: Tga.cardShadow,
       ),
       child: child,
     );
     if (onTap == null) return inner;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(Tga.rCard),
-        child: inner,
-      ),
+    return DshPressable(
+      onTap: onTap,
+      borderRadius: radius,
+      haptic: true,
+      splashColor: Tga.primary.withValues(alpha: 0.08),
+      child: inner,
     );
   }
 }
@@ -405,40 +470,47 @@ class TgaIconTile extends StatelessWidget {
     Tga.syncFrom(context);
     final Color bg = iconBg ?? Tga.iconBlueBg;
     final Color fg = iconColor ?? Tga.iconBlue;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          child: Row(
-            children: <Widget>[
-              Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
-                child: Icon(icon, size: 19, color: fg),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    Text(title, style: Tga.body),
-                    if (subtitle != null) ...<Widget>[
-                      const SizedBox(height: 3),
-                      Text(subtitle!, style: Tga.sub),
-                    ],
-                  ],
+    return DshPressable(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      haptic: true,
+      splashColor: fg.withValues(alpha: 0.08),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: <Widget>[
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: bg,
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: fg.withValues(alpha: 0.14),
+                  width: 0.6,
                 ),
               ),
-              if (trailing != null)
-                trailing!
-              else if (showArrow)
-                Icon(Icons.chevron_right_rounded, size: 19, color: Tga.textDim),
-            ],
-          ),
+              child: Icon(icon, size: 19, color: fg),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Text(title, style: Tga.body),
+                  if (subtitle != null) ...<Widget>[
+                    const SizedBox(height: 3),
+                    Text(subtitle!, style: Tga.sub),
+                  ],
+                ],
+              ),
+            ),
+            if (trailing != null)
+              trailing!
+            else if (showArrow)
+              Icon(Icons.chevron_right_rounded, size: 18, color: Tga.textDim),
+          ],
         ),
       ),
     );
@@ -494,8 +566,11 @@ class TgaSegmented<T> extends StatelessWidget {
 }
 
 class _SegPill<T> extends StatelessWidget {
-  const _SegPill(
-      {required this.label, required this.selected, required this.onTap});
+  const _SegPill({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
   final String label;
   final bool selected;
   final VoidCallback onTap;
@@ -503,15 +578,23 @@ class _SegPill<T> extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     Tga.syncFrom(context);
-    return GestureDetector(
+    return DshPressable(
       onTap: onTap,
+      borderRadius: BorderRadius.circular(Tga.rChip),
+      haptic: true,
+      splashColor: Tga.primary.withValues(alpha: 0.12),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
+        duration: DshMotion.fast,
+        curve: DshMotion.standard,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
           color: selected ? Tga.primary : Tga.card,
           borderRadius: BorderRadius.circular(Tga.rChip),
-          border: Border.all(color: selected ? Tga.primary : Tga.border),
+          border: Border.all(
+            color: selected ? Tga.primary : Tga.border,
+            width: 0.8,
+          ),
+          boxShadow: selected ? Tga.cardShadow : null,
         ),
         child: Text(
           label,
@@ -542,13 +625,17 @@ class TgaTag extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3.5),
       decoration: BoxDecoration(
         color: filled ? c : c.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(7),
+        border: filled
+            ? null
+            : Border.all(color: c.withValues(alpha: 0.16), width: 0.6),
       ),
       child: Text(
         label,
         style: TextStyle(
           fontSize: 11,
           fontWeight: FontWeight.w600,
+          letterSpacing: 0.2,
           color: filled ? Tga.onPrimary : c,
         ),
       ),
@@ -584,8 +671,20 @@ class TgaStatCard extends StatelessWidget {
                 width: 36,
                 height: 36,
                 decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(10)),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: <Color>[
+                      color.withValues(alpha: 0.16),
+                      color.withValues(alpha: 0.07),
+                    ],
+                  ),
+                  borderRadius: BorderRadius.circular(11),
+                  border: Border.all(
+                    color: color.withValues(alpha: 0.14),
+                    width: 0.6,
+                  ),
+                ),
                 child: Icon(icon, size: 19, color: color),
               ),
               const SizedBox(width: 12),
@@ -594,14 +693,21 @@ class TgaStatCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Text(value,
-                    style: TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w800,
-                        color: color,
-                        height: 1.1)),
+                Text(
+                  value,
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.w800,
+                    color: color,
+                    height: 1.1,
+                    // 数字等宽：数值刷新时不会左右跳动。
+                    fontFeatures: const <FontFeature>[
+                      FontFeature.tabularFigures(),
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 4),
-                Text(label, style: Tga.sub),
+                Text(label, style: Tga.caption),
               ],
             ),
           ],
@@ -621,13 +727,27 @@ class TgaEmpty extends StatelessWidget {
     Tga.syncFrom(context);
     return Center(
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 34),
+        padding: const EdgeInsets.symmetric(vertical: 34, horizontal: 24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Icon(icon, size: 34, color: Tga.textDim),
-            const SizedBox(height: 10),
-            Text(text, style: Tga.sub),
+            // 柔和的圆形底座让空态不再是「孤零零一个灰图标」。
+            Container(
+              width: 62,
+              height: 62,
+              decoration: BoxDecoration(
+                color: Tga.cardAlt,
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: Tga.divider.withValues(alpha: 0.7),
+                  width: 0.6,
+                ),
+                boxShadow: Tga.cardShadow,
+              ),
+              child: Icon(icon, size: 28, color: Tga.textDim),
+            ),
+            const SizedBox(height: 14),
+            Text(text, style: Tga.sub, textAlign: TextAlign.center),
           ],
         ),
       ),
@@ -667,20 +787,39 @@ class TgaButton extends StatelessWidget {
           Icon(icon, size: 13, color: fg),
           const SizedBox(width: 4),
         ],
-        Text(label,
-            style:
-                TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: fg)),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: fg,
+          ),
+        ),
       ],
     );
-    return GestureDetector(
+    return DshPressable(
       onTap: onTap,
+      borderRadius: BorderRadius.circular(9),
+      haptic: true,
+      splashColor: fg.withValues(alpha: 0.18),
       child: Container(
         padding: EdgeInsets.symmetric(
-            horizontal: compact ? 12 : 16, vertical: compact ? 7 : 9),
+          horizontal: compact ? 12 : 16,
+          vertical: compact ? 7 : 9,
+        ),
         decoration: BoxDecoration(
           color: filled ? c : c.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(9),
           border: filled ? null : Border.all(color: c.withValues(alpha: 0.35)),
+          boxShadow: filled
+              ? <BoxShadow>[
+                  BoxShadow(
+                    color: c.withValues(alpha: 0.20),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ]
+              : null,
         ),
         child: content,
       ),
@@ -689,7 +828,10 @@ class TgaButton extends StatelessWidget {
 }
 
 /// 搜索框（可粘贴名字、链接）。
-class TgaSearchField extends StatelessWidget {
+///
+/// 交互补全：聚焦时描边点亮、输入后提供一键清除、清除后保持焦点继续输入。
+/// 外部传入的 [controller] 只订阅不销毁，内部创建的才在 dispose 时释放。
+class TgaSearchField extends StatefulWidget {
   const TgaSearchField({
     super.key,
     required this.hint,
@@ -701,34 +843,114 @@ class TgaSearchField extends StatelessWidget {
   final TextEditingController? controller;
 
   @override
+  State<TgaSearchField> createState() => _TgaSearchFieldState();
+}
+
+class _TgaSearchFieldState extends State<TgaSearchField> {
+  final FocusNode _focusNode = FocusNode();
+  TextEditingController? _ownController;
+  bool _focused = false;
+  bool _hasText = false;
+
+  TextEditingController get _controller =>
+      widget.controller ?? (_ownController ??= TextEditingController());
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode.addListener(_onFocusChange);
+    _controller.addListener(_onTextChange);
+    _hasText = _controller.text.isNotEmpty;
+  }
+
+  void _onFocusChange() {
+    final bool value = _focusNode.hasFocus;
+    if (_focused != value) setState(() => _focused = value);
+  }
+
+  void _onTextChange() {
+    final bool value = _controller.text.isNotEmpty;
+    if (_hasText != value) setState(() => _hasText = value);
+  }
+
+  @override
+  void didUpdateWidget(TgaSearchField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller?.removeListener(_onTextChange);
+      _controller.addListener(_onTextChange);
+      _hasText = _controller.text.isNotEmpty;
+    }
+  }
+
+  void _clear() {
+    _controller.clear();
+    widget.onChanged?.call('');
+    _focusNode.requestFocus();
+  }
+
+  @override
+  void dispose() {
+    _focusNode.removeListener(_onFocusChange);
+    _focusNode.dispose();
+    _controller.removeListener(_onTextChange);
+    _ownController?.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     Tga.syncFrom(context);
-    return Container(
+    final bool reduced = DshMotion.reduced(context);
+    return AnimatedContainer(
+      duration: reduced ? Duration.zero : DshMotion.fast,
+      curve: DshMotion.standard,
       height: 42,
       decoration: BoxDecoration(
         color: Tga.card,
         borderRadius: BorderRadius.circular(11),
-        border: Border.all(color: Tga.border),
+        border: Border.all(
+          color: _focused ? Tga.primary.withValues(alpha: 0.65) : Tga.border,
+          width: _focused ? 1.2 : 0.8,
+        ),
+        boxShadow: Tga.cardShadow,
       ),
       child: Row(
         children: <Widget>[
           const SizedBox(width: 12),
-          Icon(Icons.search_rounded, size: 18, color: Tga.textDim),
+          Icon(
+            Icons.search_rounded,
+            size: 18,
+            color: _focused ? Tga.primary : Tga.textDim,
+          ),
           const SizedBox(width: 8),
           Expanded(
             child: TextField(
-              controller: controller,
-              onChanged: onChanged,
+              controller: _controller,
+              focusNode: _focusNode,
+              onChanged: widget.onChanged,
               style: TextStyle(fontSize: 13.5, color: Tga.text),
               decoration: InputDecoration(
-                hintText: hint,
+                hintText: widget.hint,
                 hintStyle: TextStyle(fontSize: 13, color: Tga.textDim),
                 border: InputBorder.none,
                 isCollapsed: true,
               ),
             ),
           ),
-          const SizedBox(width: 12),
+          if (_hasText)
+            DshPressable(
+              onTap: _clear,
+              borderRadius: BorderRadius.circular(999),
+              semanticsLabel: '清除输入',
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: Icon(Icons.close_rounded, size: 15, color: Tga.textDim),
+              ),
+            )
+          else
+            const SizedBox(width: 6),
+          const SizedBox(width: 6),
         ],
       ),
     );
