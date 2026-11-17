@@ -15,8 +15,10 @@ import 'package:tangram/ui/pages/tga_group_chat_page.dart';
 import 'package:tangram/ui/pages/tga_knowledge_page.dart';
 import 'package:tangram/ui/pages/tga_mapping_page.dart';
 import 'package:tangram/ui/pages/tga_models_page.dart';
+import 'package:tangram/ui/pages/tga_performance_page.dart';
 import 'package:tangram/ui/pages/tga_persona_page.dart';
 import 'package:tangram/ui/pages/tga_sandbox_page.dart';
+import 'package:tangram/ui/pages/tga_security_page.dart';
 import 'package:tangram/ui/pages/tga_snapshot_page.dart';
 import 'package:tangram/ui/pages/tga_sphere_graph_page.dart';
 import 'package:tangram/ui/pages/tga_store_page.dart';
@@ -184,6 +186,18 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
         icon: Icons.speed_rounded,
         labelKey: 'sidebar.compute',
         page: const TgaComputePage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.gpp_good_outlined,
+        labelKey: 'sidebar.security',
+        page: const TgaSecurityPage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.monitor_heart_outlined,
+        labelKey: 'sidebar.performance',
+        page: const TgaPerformancePage(),
         fullPage: true,
       ),
       NavItem(

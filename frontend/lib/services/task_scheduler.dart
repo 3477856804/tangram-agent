@@ -7,6 +7,35 @@ import '../harness/account_ops.dart';
 import '../harness/embedded_backend.dart';
 import 'persona_store.dart';
 
+/// 定时任务失败重试策略（纯逻辑，便于单元测试）。
+class TaskRetryPolicy {
+  const TaskRetryPolicy._();
+
+  /// 第 1/2/3 次重试前的等待秒数。
+  static const List<int> backoffSeconds = <int>[60, 300, 900];
+
+  /// runHistory 最多保留的条数。
+  static const int maxRunHistory = 100;
+
+  /// 返回第 [attempt] 次重试（从 1 开始）前的等待秒数；
+  /// attempt > 3 时返回 null，表示不再重试。
+  static int? delayForAttempt(int attempt) {
+    if (attempt < 1 || attempt > backoffSeconds.length) return null;
+    return backoffSeconds[attempt - 1];
+  }
+
+  /// 追加一条运行记录并按上限裁剪（纯逻辑；超出时丢弃最旧记录）。
+  static void appendRunHistory(
+    List<Map<String, dynamic>> history,
+    Map<String, dynamic> entry,
+  ) {
+    history.add(entry);
+    while (history.length > maxRunHistory) {
+      history.removeAt(0);
+    }
+  }
+}
+
 /// 定时任务标题约定：后端 proactive_task 的 add 只收 title，
 /// 因此前端把每日执行时间与说明编码进 title：
 ///   第一行「任务名 @HH:mm」，第二行起为任务说明（可为空）。
@@ -69,6 +98,22 @@ class TaskScheduler extends ChangeNotifier {
   Timer? _timer;
   bool _running = false;
 
+  /// 运行历史（最近 [TaskRetryPolicy.maxRunHistory] 条）。
+  /// 元素字段：id / name / attempt / ok / error / ts / outcome；
+  /// outcome 取 'success' | 'failure' | 'retry_scheduled'，attempt 为 1 基尝试次数。
+  final List<Map<String, dynamic>> _runHistory = <Map<String, dynamic>>[];
+
+  List<Map<String, dynamic>> get runHistory =>
+      List<Map<String, dynamic>>.unmodifiable(_runHistory);
+
+  /// 失败重试队列，key 为 '$id@$dayKey'。
+  final Map<String, _RetryState> _retries = <String, _RetryState>{};
+
+  /// 持久化文件（相对 HarnessStore 根目录）。
+  static const String _statePath = 'scheduler/state.json';
+  Future<void>? _loadFuture;
+  Future<void> _persistChain = Future<void>.value();
+
   /// 最近一次「定时发布到期草稿」的真实结果（失败原因原样保留以供排查）。
   /// 只在本 App 进程内累积，作为给 UI 的日志/通知，不伪造发布成功。
   String _lastPublishNote = '';
@@ -80,6 +125,8 @@ class TaskScheduler extends ChangeNotifier {
   /// 启动周期检查（幂等）。
   void start() {
     _timer ??= Timer.periodic(_interval, (_) => checkNow());
+    // 启动后懒加载重试队列与运行历史（后端此时通常已连接）。
+    unawaited(_ensureStateLoaded());
   }
 
   @override
@@ -94,6 +141,10 @@ class TaskScheduler extends ChangeNotifier {
     if (_running) return;
     _running = true;
     try {
+      await _ensureStateLoaded();
+      // 先处理已到点的重试：直接执行，不再走 dayKey / 触发点判断，
+      // 避免被首次失败时写入的 taskLastRun 拦住。
+      await _processDueRetries();
       final env = await backend.sendControl(
           'proactive_task', <String, dynamic>{'action': 'list'});
       final dynamic payload = env.payload;
@@ -202,12 +253,17 @@ class TaskScheduler extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 执行一次任务并判定成败。
+  /// [attempt] 为本次执行前的重试序号：0 表示首次执行，1 表示第 1 次重试。
+  /// 历史记录中的 attempt 存 1 基的尝试次数（attempt + 1）。
   Future<void> _runTask({
     required String id,
     required ParsedTask task,
     required String dayKey,
+    int attempt = 0,
   }) async {
-    // 先记 lastRun 再执行：失败也不会在同一天反复重试刷屏。
+    // 先记 lastRun 再执行：每日触发不会在同一天被重复调度；
+    // 失败重试由重试队列直接执行，不受这个标记拦截。
     persona.setTaskLastRun(id, dayKey);
     final String prompt = task.description.isEmpty
         ? '【定时任务 · ${task.name}】现在是约定时间 ${task.timeLabel}，'
@@ -215,15 +271,215 @@ class TaskScheduler extends ChangeNotifier {
         : '【定时任务 · ${task.name}】现在是约定时间 ${task.timeLabel}。\n'
             '任务说明：${task.description}\n'
             '请执行这项任务并把结果如实汇报。';
-    await backend.sendControl('chat', <String, dynamic>{
-      'text': prompt,
-      'session_id': 'proactive',
-    });
+    String error = '';
+    bool ok = false;
+    try {
+      final env = await backend.sendControl('chat', <String, dynamic>{
+        'text': prompt,
+        'session_id': 'proactive',
+      });
+      final dynamic payload = env.payload;
+      ok = payload is Map && payload['ok'] == true;
+      if (!ok) {
+        error = payload is Map
+            ? '${payload['error'] ?? 'ok=false'}'
+            : '后端返回了非预期结构';
+      }
+    } on Object catch (e) {
+      error = '$e';
+    }
+
+    if (ok) {
+      // 成功：清空该任务的重试安排并记录 success。
+      _retries.removeWhere((String _, _RetryState s) => s.id == id);
+      _appendHistory(id, task.name, attempt, true, '', 'success');
+      _schedulePersist();
+      notifyListeners();
+      return;
+    }
+
+    // 失败（含异常/超时）：如实记录 failure。
+    _appendHistory(id, task.name, attempt, false, error, 'failure');
+    final int? delay = TaskRetryPolicy.delayForAttempt(attempt + 1);
+    if (delay == null) {
+      _schedulePersist();
+      notifyListeners();
+      return;
+    }
+    // 加入/更新重试队列，等 nextAt 到点由 tick 直接执行。
+    _retries['$id@$dayKey'] = _RetryState(
+      id: id,
+      dayKey: dayKey,
+      attempt: attempt + 1,
+      nextAt: DateTime.now().add(Duration(seconds: delay)),
+      task: task,
+    );
+    _appendHistory(id, task.name, attempt, false, error, 'retry_scheduled');
+    _recordPublishNote(
+        '定时任务 ${task.name} 第 ${attempt + 1} 次失败，${delay}s 后重试：$error');
+    _schedulePersist();
     notifyListeners();
+  }
+
+  /// 执行 nextAt 已到的重试。直接执行，不参与每日触发点/延迟补跑判断。
+  Future<void> _processDueRetries() async {
+    if (_retries.isEmpty) return;
+    final DateTime now = DateTime.now();
+    final List<_RetryState> due = _retries.values
+        .where((_RetryState s) => !s.nextAt.isAfter(now))
+        .toList(growable: false);
+    for (final _RetryState state in due) {
+      _retries.remove(state.key);
+      await _runTask(
+        id: state.id,
+        task: state.task,
+        dayKey: state.dayKey,
+        attempt: state.attempt,
+      );
+    }
+  }
+
+  void _appendHistory(
+    String id,
+    String name,
+    int attempt,
+    bool ok,
+    String error,
+    String outcome,
+  ) {
+    TaskRetryPolicy.appendRunHistory(_runHistory, <String, dynamic>{
+      'id': id,
+      'name': name,
+      'attempt': attempt + 1,
+      'ok': ok,
+      'error': error,
+      'ts': DateTime.now().toIso8601String(),
+      'outcome': outcome,
+    });
+  }
+
+  /// 懒加载 scheduler/state.json。embeddedBackend 为 null 时仅内存运行：
+  /// 不读盘也不落盘，等后端就绪后的下一轮再加载。
+  Future<void> _ensureStateLoaded() {
+    final EmbeddedBackend? embedded = backend.embeddedBackend;
+    if (embedded == null) return Future<void>.value();
+    // 记录同一个 Future：并发触发的检查会等首次加载完成，避免读到空态后覆盖落盘。
+    return _loadFuture ??= _loadState(embedded);
+  }
+
+  Future<void> _loadState(EmbeddedBackend embedded) async {
+    try {
+      final Map<String, dynamic> raw = await embedded.store.readJson(_statePath);
+      final List<dynamic> rawRetries =
+          (raw['retries'] as List?) ?? const <dynamic>[];
+      for (final dynamic r in rawRetries) {
+        final _RetryState? state = _RetryState.fromJson(r);
+        if (state != null) _retries[state.key] = state;
+      }
+      final List<dynamic> rawHistory =
+          (raw['history'] as List?) ?? const <dynamic>[];
+      for (final dynamic h in rawHistory) {
+        if (h is Map) {
+          _runHistory.add(
+              h.map((dynamic k, dynamic v) => MapEntry(k.toString(), v)));
+        }
+      }
+      while (_runHistory.length > TaskRetryPolicy.maxRunHistory) {
+        _runHistory.removeAt(0);
+      }
+      if (_retries.isNotEmpty || _runHistory.isNotEmpty) notifyListeners();
+    } on Object {
+      // 读取失败保持空态，不伪造历史；下一轮仍可正常调度。
+    }
+  }
+
+  /// 变更后落盘（串行，避免并发写同一临时文件）。
+  /// 失败静默：内存中的重试/历史仍真实，不谎报已持久化。
+  void _schedulePersist() {
+    _persistChain = _persistChain.then((_) => _persistState());
+  }
+
+  Future<void> _persistState() async {
+    // 仅内存运行：没有内嵌后端就没有可写的真实数据目录。
+    final EmbeddedBackend? embedded = backend.embeddedBackend;
+    if (embedded == null) return;
+    try {
+      await embedded.store.writeJson(_statePath, <String, dynamic>{
+        'retries': _retries.values.map((_RetryState s) => s.toJson()).toList(),
+        'history': _runHistory,
+      });
+    } on Object {
+      // 落盘失败不影响调度，也不改写内存状态。
+    }
   }
 
   static String _dayKey(DateTime d) =>
       '${d.year.toString().padLeft(4, '0')}-'
       '${d.month.toString().padLeft(2, '0')}-'
       '${d.day.toString().padLeft(2, '0')}';
+}
+
+/// 单条失败重试状态（随 scheduler/state.json 持久化）。
+class _RetryState {
+  _RetryState({
+    required this.id,
+    required this.dayKey,
+    required this.attempt,
+    required this.nextAt,
+    required this.task,
+  });
+
+  final String id;
+  final String dayKey;
+
+  /// 下一次重试序号（1 基）。
+  final int attempt;
+  final DateTime nextAt;
+  final ParsedTask task;
+
+  String get key => '$id@$dayKey';
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'id': id,
+        'day_key': dayKey,
+        'attempt': attempt,
+        'next_at': nextAt.toIso8601String(),
+        'task': <String, dynamic>{
+          'name': task.name,
+          'hour': task.hour,
+          'minute': task.minute,
+          'description': task.description,
+        },
+      };
+
+  static _RetryState? fromJson(dynamic raw) {
+    if (raw is! Map) return null;
+    final String id = '${raw['id'] ?? ''}';
+    final String dayKey = '${raw['day_key'] ?? ''}';
+    final dynamic rawAttempt = raw['attempt'];
+    final DateTime? nextAt = DateTime.tryParse('${raw['next_at'] ?? ''}');
+    final dynamic t = raw['task'];
+    if (id.isEmpty || dayKey.isEmpty || rawAttempt is! num || nextAt == null) {
+      return null;
+    }
+    if (t is! Map) return null;
+    final String name = '${t['name'] ?? ''}';
+    final dynamic rawHour = t['hour'];
+    final dynamic rawMinute = t['minute'];
+    if (name.isEmpty || rawHour is! num || rawMinute is! num) return null;
+    final int attempt = rawAttempt.toInt();
+    if (attempt < 1) return null;
+    return _RetryState(
+      id: id,
+      dayKey: dayKey,
+      attempt: attempt,
+      nextAt: nextAt,
+      task: ParsedTask(
+        name: name,
+        hour: rawHour.toInt(),
+        minute: rawMinute.toInt(),
+        description: '${t['description'] ?? ''}',
+      ),
+    );
+  }
 }

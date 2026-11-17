@@ -138,6 +138,8 @@ class TgaStrings {
     'sidebar.uiPlugins': {'cn': 'UI 插件槽', 'tw': 'UI 外掛槽', 'en': 'UI Plugins'},
     'sidebar.cognition': {'cn': '认知决策', 'tw': '認知決策', 'en': 'Cognition'},
     'sidebar.compute': {'cn': '算力调度', 'tw': '算力調度', 'en': 'Compute'},
+    'sidebar.security': {'cn': '安全中心', 'tw': '安全中心', 'en': 'Security'},
+    'sidebar.performance': {'cn': '性能诊断', 'tw': '效能診斷', 'en': 'Performance'},
     'sidebar.experience': {'cn': '经验库', 'tw': '經驗庫', 'en': 'Experience'},
     'sidebar.accountOps': {'cn': '账号运营', 'tw': '帳號營運', 'en': 'Account Ops'},
     'sidebar.videoStudio': {'cn': '视频工作室', 'tw': '影片工作室', 'en': 'Video Studio'},

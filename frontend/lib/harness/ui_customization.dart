@@ -135,6 +135,8 @@ class UiCustomizationConfig {
     'sidebar.mapping',
     'sidebar.cognition',
     'sidebar.compute',
+    'sidebar.security',
+    'sidebar.performance',
   ];
 
   static const Map<String, String> navLabels = <String, String>{
@@ -150,6 +152,8 @@ class UiCustomizationConfig {
     'sidebar.experience': '经验库',
     'sidebar.cognition': '认知决策',
     'sidebar.compute': '算力调度',
+    'sidebar.security': '安全中心',
+    'sidebar.performance': '性能诊断',
     'sidebar.appMarket': '应用市场',
     'sidebar.creator': 'Creator 创造',
     'sidebar.customize': '界面自定义',
@@ -517,7 +521,10 @@ class UiCustomizationStore extends ChangeNotifier {
       }
       final Map<String, dynamic> map = decoded.map(
           (dynamic k, dynamic v) => MapEntry<String, dynamic>(k.toString(), v));
-      final _ParsedDocument parsed = _parseDocument(map);
+      final Object? versionRaw = map['version'];
+      final int version = versionRaw is num ? versionRaw.toInt() : 1;
+      final _ParsedDocument parsed =
+          _migrateDocument(_parseDocument(map), version);
       return UiCustomizationStore._(
         store,
         parsed.scope,
@@ -565,6 +572,39 @@ class UiCustomizationStore extends ChangeNotifier {
     final UiCustomizationConfig single =
         UiCustomizationConfig.fromJson(raw).copyWith(scope: UiScope.global);
     return _ParsedDocument(UiScope.global, single, null, single);
+  }
+
+  /// 旧文档（version<2）的一次性导航迁移：只追加新增入口，保留原有顺序与
+  /// 去重，不删除任何项。仅在 [load] 读盘时执行；导入 JSON 是用户显式行为，
+  /// 不做隐式补键，避免覆盖导入内容。
+  static _ParsedDocument _migrateDocument(
+    _ParsedDocument parsed,
+    int version,
+  ) {
+    if (version >= 2) return parsed;
+    final UiCustomizationConfig global = _migrateNavKeys(parsed.global);
+    final UiCustomizationConfig? project = parsed.project == null
+        ? null
+        : _migrateNavKeys(parsed.project!);
+    final UiCustomizationConfig draft = parsed.scope == UiScope.project
+        ? (project ?? global.copyWith(scope: UiScope.project))
+        : global;
+    return _ParsedDocument(parsed.scope, global, project, draft);
+  }
+
+  /// 旧版文档迁移：只追加新增入口，保留用户原有顺序与去重，不删除任何项。
+  static UiCustomizationConfig _migrateNavKeys(
+    UiCustomizationConfig config,
+  ) {
+    final List<String> keys = List<String>.of(config.visibleNavKeys);
+    for (final String key in const <String>[
+      'sidebar.security',
+      'sidebar.performance',
+    ]) {
+      if (!keys.contains(key)) keys.add(key);
+    }
+    if (keys.length == config.visibleNavKeys.length) return config;
+    return config.copyWith(visibleNavKeys: keys);
   }
 
   UiCustomizationConfig get config => _draft;
@@ -725,7 +765,7 @@ class UiCustomizationStore extends ChangeNotifier {
     final UiCustomizationConfig? project =
         _currentScope == UiScope.project ? _draft : _projectConfig;
     return <String, dynamic>{
-      'version': 1,
+      'version': 2,
       'active_scope': _currentScope.name,
       'global': global.toJson(),
       if (project != null) 'project': project.toJson(),

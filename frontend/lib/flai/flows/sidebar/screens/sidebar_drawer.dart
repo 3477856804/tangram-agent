@@ -56,6 +56,8 @@ const Map<String, _NavGroup> _navGroupByLabelKey = <String, _NavGroup>{
   'sidebar.workflow': _NavGroup.system,
   'sidebar.models': _NavGroup.system,
   'sidebar.compute': _NavGroup.system,
+  'sidebar.security': _NavGroup.system,
+  'sidebar.performance': _NavGroup.system,
 };
 
 /// 侧栏：dsh 的会话抽屉 —— 品牌字标 · 新会话 · 导航 · 会话列表 · 底部设置。

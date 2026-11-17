@@ -11,7 +11,19 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:tangram/harness/store.dart';
+
+final RegExp _sha256Pattern = RegExp(r'^[0-9a-f]{64}$');
+
+/// 是否为规范化（小写 64 位 hex）的 SHA-256 摘要。
+bool isValidSha256(String value) => _sha256Pattern.hasMatch(value);
+
+/// 流式计算文件真实 SHA-256，避免一次性把大模型文件读入内存。
+Future<String> sha256OfFile(File file) async {
+  final digest = await sha256.bind(file.openRead()).first;
+  return digest.toString();
+}
 
 class DownloadJob {
   DownloadJob({
@@ -32,8 +44,14 @@ class DownloadJob {
 
   String status = 'running';
   String? error;
+  String? expectedSha256;
+  String? actualSha256;
   DateTime startedAt = DateTime.now();
   DateTime? finishedAt;
+
+  /// 仅当提供了期望摘要且实际摘要与之相等时为 true。
+  bool get verified =>
+      expectedSha256 != null && expectedSha256 == actualSha256;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
         'job_id': id,
@@ -44,6 +62,9 @@ class DownloadJob {
         'resumable': resumable,
         'status': status,
         if (error != null) 'error': error,
+        if (actualSha256 != null) 'sha256': actualSha256,
+        if (expectedSha256 != null) 'expected_sha256': expectedSha256,
+        if (verified) 'verified': true,
         'started_at': startedAt.toIso8601String(),
         if (finishedAt != null) 'finished_at': finishedAt!.toIso8601String(),
       };
@@ -86,16 +107,41 @@ class DownloadManager {
   }
 
   /// 启动一次真实下载。返回 job_id；网络/文件失败如实写入 job.error。
+  ///
+  /// [expectedSha256] 非空时必须是 64 位 hex（大小写不敏感），下载完成后
+  /// 校验真实文件摘要，不匹配则删除目标文件并标记失败。
   Future<DownloadJob> start(
     String url, {
     String? filename,
     int chunks = 4,
+    String? expectedSha256,
   }) async {
     final name = (filename?.isNotEmpty == true)
         ? filename!
         : _safeName(Uri.tryParse(url)?.pathSegments.last ?? 'model.gguf');
     final target = '${store.sub('downloads').path}/$name';
     final id = 'dl-${DateTime.now().millisecondsSinceEpoch}-${++_seq}';
+
+    String? expected;
+    if (expectedSha256 != null) {
+      final normalized = expectedSha256.trim().toLowerCase();
+      if (!isValidSha256(normalized)) {
+        final job = DownloadJob(
+          id: id,
+          url: url,
+          target: target,
+          chunks: 1,
+          totalBytes: 0,
+          resumable: false,
+        );
+        job.status = 'failed';
+        job.error = 'expected_sha256 不是合法 SHA-256';
+        job.finishedAt = DateTime.now();
+        _jobs[id] = job;
+        return job;
+      }
+      expected = normalized;
+    }
 
     // 先探测真实大小与是否支持 Range。
     int total = 0;
@@ -125,6 +171,7 @@ class DownloadManager {
       totalBytes: total,
       resumable: resumable,
     );
+    job.expectedSha256 = expected;
     _jobs[id] = job;
     unawaited(_run(job));
     return job;
@@ -167,6 +214,17 @@ class DownloadManager {
         }
         await Future.wait(futures);
         await _merge(job);
+      }
+      final targetFile = File(job.target);
+      job.actualSha256 = await sha256OfFile(targetFile);
+      if (job.expectedSha256 != null &&
+          job.expectedSha256 != job.actualSha256) {
+        await targetFile.delete();
+        job.status = 'failed';
+        job.error = 'SHA-256 校验失败：期望 ${job.expectedSha256}，'
+            '实际 ${job.actualSha256}';
+        job.finishedAt = DateTime.now();
+        return;
       }
       job.status = 'done';
       job.finishedAt = DateTime.now();

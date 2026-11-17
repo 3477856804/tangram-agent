@@ -12,10 +12,24 @@ import 'dart:io';
 
 import 'store.dart';
 
+/// 守卫可抛出该异常，在拒绝结果里附带更具体的说明（如审批单号）。
+class WorkspaceGuardDenied implements Exception {
+  WorkspaceGuardDenied(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 class WorkspaceMappingService {
-  WorkspaceMappingService(this.store);
+  WorkspaceMappingService(this.store, {this.guard});
 
   final HarnessStore store;
+
+  /// 真实文件动作前的安全守卫：返回 false 时拒绝执行并返回 `denied`。
+  /// 默认 null 表示不拦截（保持既有行为）。
+  final Future<bool> Function(String tool, String path)? guard;
 
   static const String _file = 'workspace_mappings.json';
   static const int _maxFiles = 5000;
@@ -31,6 +45,24 @@ class WorkspaceMappingService {
 
   Future<void> _save(List<Map<String, dynamic>> list) =>
       store.writeJson(_file, list);
+
+  /// 执行文件动作前的守卫；返回 null 表示放行，否则返回拒绝结果。
+  Future<Map<String, dynamic>?> _guardDenied(String tool, String path) async {
+    final Future<bool> Function(String tool, String path)? g = guard;
+    if (g == null) return null;
+    final bool allowed;
+    try {
+      allowed = await g(tool, path);
+    } on WorkspaceGuardDenied catch (e) {
+      return <String, dynamic>{'ok': false, 'error': e.message, 'denied': true};
+    }
+    if (allowed) return null;
+    return <String, dynamic>{
+      'ok': false,
+      'error': '操作被安全策略拒绝或待审批：$path',
+      'denied': true,
+    };
+  }
 
   Future<Map<String, dynamic>> handle(
       String action, Map<String, dynamic> p) async {
@@ -87,6 +119,8 @@ class WorkspaceMappingService {
     if (all.any((Map<String, dynamic> m) => m['host_path'] == resolved)) {
       return <String, dynamic>{'ok': false, 'error': '该目录已映射'};
     }
+    final Map<String, dynamic>? denied = await _guardDenied('mkdir', resolved);
+    if (denied != null) return denied;
     final String id = 'map-${DateTime.now().microsecondsSinceEpoch}';
     final Map<String, dynamic> mapping = <String, dynamic>{
       'id': id,
@@ -115,8 +149,14 @@ class WorkspaceMappingService {
     for (final Map<String, dynamic> m in all) {
       if (m['id'] == id) target = m;
     }
+    if (target == null) {
+      return <String, dynamic>{'ok': false, 'error': '映射不存在'};
+    }
+    final Map<String, dynamic>? denied = await _guardDenied(
+        'delete', target['host_path'].toString());
+    if (denied != null) return denied;
     all.removeWhere((Map<String, dynamic> m) => m['id'] == id);
-    if (all.length == before || target == null) {
+    if (all.length == before) {
       return <String, dynamic>{'ok': false, 'error': '映射不存在'};
     }
     await _save(all);
@@ -140,6 +180,8 @@ class WorkspaceMappingService {
     if (!await src.exists()) {
       return <String, dynamic>{'ok': false, 'error': '宿主目录已不存在'};
     }
+    final Map<String, dynamic>? denied = await _guardDenied('copy', src.path);
+    if (denied != null) return denied;
     final Directory dst =
         Directory('${store.root.path}/${m['sandbox_rel']}');
     await dst.create(recursive: true);
@@ -202,6 +244,8 @@ class WorkspaceMappingService {
     if (!await dst.exists()) {
       return <String, dynamic>{'ok': false, 'error': '宿主目录已不存在'};
     }
+    final Map<String, dynamic>? denied = await _guardDenied('write', dst.path);
+    if (denied != null) return denied;
     int files = 0;
     int bytes = 0;
     final List<String> errors = <String>[];
@@ -243,6 +287,8 @@ class WorkspaceMappingService {
     if (m == null) return <String, dynamic>{'ok': false, 'error': '映射不存在'};
     final Directory dir =
         Directory('${store.root.path}/${m['sandbox_rel']}');
+    final Map<String, dynamic>? denied = await _guardDenied('read', dir.path);
+    if (denied != null) return denied;
     if (!await dir.exists()) {
       return <String, dynamic>{'ok': true, 'entries': <dynamic>[]};
     }

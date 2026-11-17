@@ -41,6 +41,7 @@ import 'package:http/http.dart' as http;
 import 'package:tangram/agent/sandbox/sandboxed_shell.dart';
 import 'package:tangram/app_version.dart';
 import 'package:tangram/harness/app_package.dart';
+import 'package:tangram/harness/audit_log.dart';
 import 'package:tangram/harness/builtin_plugins.dart';
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/downloader.dart';
@@ -57,7 +58,9 @@ import 'package:tangram/harness/plugin_kernel.dart';
 import 'package:tangram/harness/prompt_kit.dart';
 import 'package:tangram/harness/proot_sandbox.dart';
 import 'package:tangram/harness/qq_sandbox.dart';
+import 'package:tangram/harness/security_policy.dart';
 import 'package:tangram/harness/snapshot_service.dart';
+import 'package:tangram/harness/startup_timeline.dart';
 import 'package:tangram/harness/store.dart';
 import 'package:tangram/harness/super_agent.dart';
 import 'package:tangram/harness/team_space.dart';
@@ -121,9 +124,9 @@ class EmbeddedBackend implements QqShellRunner {
   /// 硬件自适应调度：真实探针 + 量化/后端/路由建议 + 队列。
   late final HardwareScheduler hardware = HardwareScheduler();
 
-  /// 工作区域目录映射：宿主目录 ↔ 沙箱文件同步。
+  /// 工作区域目录映射：宿主目录 ↔ 沙箱文件同步（文件动作前过权限策略）。
   late final WorkspaceMappingService workspaceMappings =
-      WorkspaceMappingService(store);
+      WorkspaceMappingService(store, guard: _workspaceGuard);
 
   /// 经验库 / 账号运营：由页面按需构造，回调统一走本后端的真实能力。
   ExperienceLibrary experienceLibrary() => ExperienceLibrary(store);
@@ -166,6 +169,38 @@ class EmbeddedBackend implements QqShellRunner {
   /// 未登录/未配置的渠道由 IM 网关如实返回错误，不伪造成功。
   Future<Map<String, dynamic>> accountOpsSend(
       String channel, Map<String, dynamic> payload) async {
+    final String grantKey = 'account.publish|$channel';
+    PolicyDecision decision =
+        (await _policyEngine()).evaluate(tool: 'account.publish', args: channel);
+    // ask 命中的一次性放行凭据：批准后重试同一渠道即直接放行，不再重复建单。
+    if (decision == PolicyDecision.ask && await _consumeGrant(grantKey)) {
+      decision = PolicyDecision.allow;
+    }
+    await _auditLog().append(
+      category: 'security',
+      action: 'account.publish',
+      decision: decision.name,
+      actor: 'account',
+      detail: channel,
+    );
+    if (decision != PolicyDecision.allow) {
+      int? approvalId;
+      if (decision == PolicyDecision.ask) {
+        approvalId = await store.insert('approvals', <String, dynamic>{
+          'action': '账号发布: $channel',
+          'status': 'pending',
+          'grant_key': grantKey,
+          'consumed': 0,
+          'ts': _now(),
+        });
+      }
+      return <String, dynamic>{
+        'ok': false,
+        'error': '发布被安全策略拒绝或待审批（$channel）',
+        'denied': true,
+        if (approvalId != null) 'approval_id': approvalId,
+      };
+    }
     return im.handle('send', <String, dynamic>{
       'connector': channel,
       'channel': channel,
@@ -198,9 +233,12 @@ class EmbeddedBackend implements QqShellRunner {
   static Future<EmbeddedBackend> instance() async {
     final existing = _instance;
     if (existing != null) return existing;
+    StartupTimeline.global.mark('backend.enter');
     final store = await HarnessStore.instance();
+    StartupTimeline.global.mark('store.ready', budgetMs: 800);
     final backend = EmbeddedBackend._(store, DownloadManager(store));
     await backend._initDefaults();
+    StartupTimeline.global.mark('defaults.done', budgetMs: 2500);
     _instance = backend;
     return backend;
   }
@@ -228,6 +266,7 @@ class EmbeddedBackend implements QqShellRunner {
   ];
 
   Future<void> _initDefaults() async {
+    StartupTimeline.global.mark('defaults.start');
     // MCP：启动时后台重连已配置的服务（网络失败不阻塞启动，状态可查）。
     unawaited(_mcpSync());
     // 插件内核 + Super Agent：后台预热装配（不阻塞启动，失败可重试、如实可查）。
@@ -323,6 +362,7 @@ class EmbeddedBackend implements QqShellRunner {
       chat: (Map<String, dynamic> p) => _chat(p),
       kernel: kernel,
     );
+    StartupTimeline.global.mark('kernel.ready', background: true);
   }
 
   Future<Map<String, dynamic>> _onPluginKernel(Map<String, dynamic> p) async {
@@ -530,9 +570,211 @@ class EmbeddedBackend implements QqShellRunner {
         return await _hardware();
       case 'active':
         return _activeModel();
+      case 'perf':
+        return await _perf();
+      case 'diagnostics':
+        return await _diagnostics();
       default:
         return _err('未知 rpc action：${action.isEmpty ? '(空)' : action}');
     }
+  }
+
+  // ---- rpc perf：真实启动耗时 + 存储/知识库/审计规模（不采样、不编造）----
+
+  static const int _kPerfFileLimit = 5000;
+
+  Future<Map<String, dynamic>> _perf() async => _ok(await _perfSections());
+
+  /// perf 与 diagnostics 共用的真实采集，避免两处逻辑漂移。
+  Future<Map<String, dynamic>> _perfSections() async {
+    final Map<String, dynamic> storage = await _perfStorage();
+    Map<String, dynamic> knowledgeStats;
+    try {
+      knowledgeStats = await knowledge.handle('stats', <String, dynamic>{});
+    } on Object catch (e) {
+      knowledgeStats = <String, dynamic>{'ok': false, 'error': '$e'};
+    }
+    final File auditFile = store.file('audit/audit.jsonl');
+    Map<String, dynamic> audit;
+    try {
+      final bool exists = await auditFile.exists();
+      audit = <String, dynamic>{
+        'path': auditFile.path,
+        'exists': exists,
+        'bytes': exists ? await auditFile.length() : 0,
+      };
+    } on Object catch (e) {
+      audit = <String, dynamic>{
+        'path': auditFile.path,
+        'exists': false,
+        'bytes': 0,
+        'error': '$e',
+      };
+    }
+    return <String, dynamic>{
+      'timeline': StartupTimeline.global.report(),
+      'storage': storage,
+      'knowledge': knowledgeStats,
+      'audit': audit,
+    };
+  }
+
+  // ---- rpc diagnostics：脱敏的一键诊断包（只放计数/状态）----
+
+  /// 一键诊断包：版本/平台 + perf 四块 + 安全摘要 + 控制域 + 能力摘要。
+  /// 绝不包含 API key、token、消息正文、文件内容或审计事件明细。
+  Future<Map<String, dynamic>> _diagnostics() async {
+    final Map<String, dynamic> sections = await _perfSections();
+
+    Map<String, dynamic> policySummary;
+    try {
+      final PermissionPolicy policy = await _ensurePolicy();
+      policySummary = <String, dynamic>{
+        'rules': policy.rules.length,
+        'fallback': policy.fallback.name,
+      };
+    } on Object catch (e) {
+      policySummary = <String, dynamic>{'error': '$e'};
+    }
+
+    // 只保留校验结论的计数/状态；reason 里可能带 hash，不放进诊断包。
+    Map<String, dynamic> chainSummary;
+    try {
+      final Map<String, dynamic> verified = await _auditLog().verifyChain();
+      chainSummary = <String, dynamic>{
+        'ok': verified['ok'],
+        'total': verified['total'],
+        'broken_at': verified['broken_at'],
+        'legacy': verified['legacy'],
+      };
+    } on Object catch (e) {
+      chainSummary = <String, dynamic>{'ok': false, 'error': '$e'};
+    }
+
+    final Map<String, dynamic> bundle = <String, dynamic>{
+      'app_version': version,
+      'platform': '${Platform.operatingSystem} ${Platform.version}',
+      'generated_at': DateTime.now().toIso8601String(),
+      'timeline': sections['timeline'],
+      'storage': sections['storage'],
+      'knowledge': sections['knowledge'],
+      'audit': sections['audit'],
+      'security': <String, dynamic>{
+        'policy': policySummary,
+        'audit_chain': chainSummary,
+      },
+      'control_domains': <String, dynamic>{
+        'count': controlDomains.length,
+        'items': controlDomains,
+      },
+      'capabilities': _capabilitySummary(),
+    };
+    return _ok(<String, dynamic>{
+      'bundle': bundle,
+      'json': const JsonEncoder.withIndent('  ').convert(bundle),
+    });
+  }
+
+  /// 能力摘要：直接取 [_capabilities] / [_selfTest] 的真实值，
+  /// 只留名称、版本、计数与状态，不复制路径或工具清单明细。
+  Map<String, dynamic> _capabilitySummary() {
+    final Map<String, dynamic> caps = _capabilities();
+    final dynamic rawKernel = caps['plugin_kernel'];
+    final Map<String, dynamic> kernel = rawKernel is Map
+        ? rawKernel.map(
+            (Object? k, Object? v) => MapEntry(k.toString(), v),
+          )
+        : <String, dynamic>{};
+    final Map<String, dynamic> self = _selfTest();
+    return <String, dynamic>{
+      'name': caps['name'],
+      'version': caps['version'],
+      'transport': caps['transport'],
+      'runtime': caps['runtime'],
+      'ready': caps['ready'],
+      'tool_count': tools.length,
+      'streaming': caps['streaming'],
+      'local_inference': caps['local_inference'],
+      'plugin_kernel': <String, dynamic>{
+        'booted': kernel['booted'],
+        'mounted': kernel['mounted'],
+        'seams': kernel['seams'],
+      },
+      'self_test': <String, dynamic>{
+        'status': self['status'],
+        'checks': self['checks'],
+      },
+    };
+  }
+
+  /// 异步递归统计 root 下每个一级子目录的真实文件数与字节数。
+  /// 全量上限 [_kPerfFileLimit] 个文件，超限即停止扫描并标记 truncated，
+  /// 绝不用 listSync 做同步全量扫盘。
+  Future<Map<String, dynamic>> _perfStorage() async {
+    final List<Map<String, dynamic>> dirs = <Map<String, dynamic>>[];
+    int totalFiles = 0;
+    int totalBytes = 0;
+    var truncated = false;
+    try {
+      await for (final FileSystemEntity entity
+          in store.root.list(followLinks: false)) {
+        if (entity is! Directory) continue;
+        int fileCount = 0;
+        int bytes = 0;
+        var dirTruncated = false;
+        if (!truncated) {
+          try {
+            await for (final FileSystemEntity child
+                in entity.list(recursive: true, followLinks: false)) {
+              if (child is! File) continue;
+              if (totalFiles >= _kPerfFileLimit) {
+                truncated = true;
+                dirTruncated = true;
+                break;
+              }
+              int size = 0;
+              try {
+                size = await child.length();
+              } on Object {
+                size = 0;
+              }
+              totalFiles++;
+              fileCount++;
+              bytes += size;
+              totalBytes += size;
+            }
+          } on Object {
+            dirTruncated = true;
+          }
+        } else {
+          dirTruncated = true;
+        }
+        dirs.add(<String, dynamic>{
+          'name': entity.path.split(Platform.pathSeparator).last,
+          'file_count': fileCount,
+          'bytes': bytes,
+          if (dirTruncated) 'truncated': true,
+        });
+      }
+    } on Object catch (e) {
+      return <String, dynamic>{
+        'root': store.root.path,
+        'dirs': dirs,
+        'file_count': totalFiles,
+        'bytes': totalBytes,
+        'limit': _kPerfFileLimit,
+        'truncated': true,
+        'error': '$e',
+      };
+    }
+    return <String, dynamic>{
+      'root': store.root.path,
+      'dirs': dirs,
+      'file_count': totalFiles,
+      'bytes': totalBytes,
+      'limit': _kPerfFileLimit,
+      'truncated': truncated,
+    };
   }
 
   /// 沙箱策略：默认值 + 用户在「训练设置」里保存的真实覆盖，
@@ -2233,13 +2475,48 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   Future<Map<String, dynamic>> _shellExec(Map<String, dynamic> p) async {
     final raw = (p['command'] ?? '').toString().trim();
     if (raw.isEmpty) return _err('命令为空');
+    String cwd = (p['cwd'] ?? '.').toString();
+
+    // 权限策略前置：clear/help/算式等内置语义分支同样先过策略。
+    // 审计 detail 只落命令摘要（≤120 字符），不记录环境变量或密钥；
+    // AuditLog 落盘前还会再做一次密钥脱敏。
+    final String auditDetail = raw.length > 120 ? raw.substring(0, 120) : raw;
+    final String preview = raw.length > 80 ? raw.substring(0, 80) : raw;
+    final String grantKey = 'shell|$raw';
+    PolicyDecision decision =
+        (await _ensurePolicy()).evaluate(tool: 'shell', path: cwd, args: raw);
+    // ask 命中的一次性放行凭据：批准后重试同一条命令直接执行，不再空转建单；
+    // deny 不看凭据，仍如实拒绝。
+    if (decision == PolicyDecision.ask && await _consumeGrant(grantKey)) {
+      decision = PolicyDecision.allow;
+    }
+    if (decision != PolicyDecision.allow) {
+      await _auditLog().append(
+        category: 'security',
+        action: 'shell',
+        decision: decision.name,
+        actor: 'shell',
+        detail: auditDetail,
+      );
+      if (decision == PolicyDecision.deny) {
+        return _err('命令被安全策略拒绝：$preview');
+      }
+      final int id = await store.insert('approvals', <String, dynamic>{
+        'action': '执行命令: $preview',
+        'status': 'pending',
+        'grant_key': grantKey,
+        'consumed': 0,
+        'ts': _now(),
+      });
+      return _err('命令需要审批：$preview（审批 ID：$id，请在安全中心批准后重试）');
+    }
+
     // 沙箱根目录必须先存在：store.sub 只拼路径不建目录，全新安装时
     // 该目录不存在会导致 _realShellExec 的 cwd 校验失败而回退内置解释器，
     // 表现为「命令啥也用不了」。这里递归建好根，保证真 shell 路径可用。
     final Directory sandboxDir = store.sub('sandbox');
     await sandboxDir.create(recursive: true);
     final root = sandboxDir.path;
-    String cwd = (p['cwd'] ?? '.').toString();
 
     final String env = await _sandboxEnvironment();
     final bool android = Platform.isAndroid;
@@ -3133,6 +3410,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         failed.add(<String, dynamic>{'name': name, 'error': '$e'});
       }
     }
+    StartupTimeline.global.mark('mcp.sync', background: true);
     return <String, dynamic>{
       'connected': connected,
       'failed': failed,
@@ -3273,20 +3551,26 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         if (targetUrl.isEmpty) {
           return _err('未提供下载 URL，且内置目录里没有模型 $id');
         }
+        final expectedSha256 =
+            (p['expected_sha256'] ?? '').toString().trim().toLowerCase();
         final job = await downloads.start(
           targetUrl,
           filename: match.isNotEmpty ? '$id.gguf' : null,
           chunks: 4,
+          expectedSha256: expectedSha256.isEmpty ? null : expectedSha256,
         );
         _emit('download_progress', downloads.progress(job));
         return <String, dynamic>{
-          'ok': true,
+          'ok': job.status != 'failed',
           'job_id': job.id,
           'model_id': id,
-          'status': 'running',
+          'status': job.status,
           'target': job.target,
           'engine': 'dart-range-chunks',
           'resumable': job.resumable,
+          'sha256': job.actualSha256,
+          'expected_sha256': job.expectedSha256,
+          if (job.error != null) 'error': job.error,
           'note': '真实 HTTP 分片下载（Range + 断点续传），进度按落盘字节回写。',
         };
       case 'ms_search': {
@@ -3410,13 +3694,21 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         final safeName =
             '${mp.split('/').last}-${file.split('/').last}'.replaceAll(
                 RegExp(r'[^A-Za-z0-9._-]'), '_');
+        final expectedSha256 =
+            (p['expected_sha256'] ?? '').toString().trim().toLowerCase();
         final job = await downloads.start(url,
-            filename: safeName, chunks: 4);
+            filename: safeName,
+            chunks: 4,
+            expectedSha256: expectedSha256.isEmpty ? null : expectedSha256);
         _emit('download_progress', downloads.progress(job));
         return <String, dynamic>{
-          'ok': true, 'job_id': job.id, 'status': 'running',
+          'ok': job.status != 'failed', 'job_id': job.id,
+          'status': job.status,
           'target': job.target, 'filename': safeName,
           'resumable': job.resumable,
+          'sha256': job.actualSha256,
+          'expected_sha256': job.expectedSha256,
+          if (job.error != null) 'error': job.error,
           'note': '真实 HTTP 分片下载（Range + 断点续传）。',
         };
       }
@@ -3482,11 +3774,39 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
             'own_models': _ownModels(),
           },
         };
-      case 'traces':
+      case 'traces': {
+        // 真实分页：limit（1..500，默认 100）/ offset（>=0）/ query（大小写
+        // 不敏感包含匹配 task/text/reply/source）/ since（秒级 ts 下界）。
+        final int limit = _asInt(p['limit'], 100).clamp(1, 500).toInt();
+        final int rawOffset = _asInt(p['offset'], 0);
+        final int offset = rawOffset < 0 ? 0 : rawOffset;
+        final String query = (p['query'] ?? '').toString().trim().toLowerCase();
+        final double since = _asDouble(p['since'], 0);
+        double tsOf(Map<String, dynamic> r) {
+          final dynamic v = r['ts'];
+          if (v is num) return v.toDouble();
+          if (v is String) return double.tryParse(v) ?? 0;
+          return 0;
+        }
+
+        final List<Map<String, dynamic>> matched = (await store
+                .readRecords('work_traces'))
+            .where((Map<String, dynamic> r) {
+          if (tsOf(r) < since) return false;
+          if (query.isEmpty) return true;
+          return <String>['task', 'text', 'reply', 'source'].any(
+            (String k) => (r[k] ?? '').toString().toLowerCase().contains(query),
+          );
+        }).toList()
+          ..sort((Map<String, dynamic> a, Map<String, dynamic> b) =>
+              tsOf(b).compareTo(tsOf(a)));
+        final List<Map<String, dynamic>> page =
+            matched.skip(offset).take(limit).toList();
         return <String, dynamic>{
-          'ok': true, 'action': action,
-          'data': await store.readRecords('work_traces'),
+          'ok': true, 'action': action, 'data': page,
+          'total': matched.length, 'limit': limit, 'offset': offset,
         };
+      }
       case 'work':
         final task = (p['task'] ?? p['text'] ?? '').toString().trim();
         if (task.isEmpty) return _err('工作轨迹内容为空');
@@ -3518,11 +3838,21 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         final id = (p['model_id'] ?? p['id'] ?? '').toString();
         final match = builtinCatalog.where((m) => m['id'] == id).toList();
         if (match.isEmpty) return _err('内置目录里没有模型 $id');
+        final expectedSha256 =
+            (p['expected_sha256'] ?? '').toString().trim().toLowerCase();
         final job = await downloads.start(match.first['url'].toString(),
-            filename: '$id.gguf', chunks: 4);
+            filename: '$id.gguf',
+            chunks: 4,
+            expectedSha256: expectedSha256.isEmpty ? null : expectedSha256);
         return <String, dynamic>{
-          'ok': true, 'action': action,
-          'data': <String, dynamic>{'job_id': job.id, 'target': job.target},
+          'ok': job.status != 'failed', 'action': action,
+          'data': <String, dynamic>{
+            'job_id': job.id,
+            'target': job.target,
+            'sha256': job.actualSha256,
+            'expected_sha256': job.expectedSha256,
+            if (job.error != null) 'error': job.error,
+          },
         };
       case 'delete_model':
         return _deleteModel((p['name'] ?? '').toString());
@@ -4062,7 +4392,119 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     }
   }
 
-  // ---- security_approval：真实审批 ----
+  // ---- security_approval：真实审批 + 权限策略 + 审计 ----
+
+  /// 懒加载的权限策略：首次使用时从 security/policy.json 恢复。
+  late PermissionPolicy _policy = PermissionPolicy.withDefaults();
+
+  /// 懒加载的审计日志（append-only，落 HarnessStore）。
+  late final AuditLog _audit = AuditLog(store: store);
+
+  bool _policyLoaded = false;
+
+  static const String _policyFile = 'security/policy.json';
+
+  Future<PermissionPolicy> _ensurePolicy() async {
+    if (_policyLoaded) return _policy;
+    final saved = await store.readJson(_policyFile);
+    if (saved.isNotEmpty) _policy = PermissionPolicy.fromJson(saved);
+    _policyLoaded = true;
+    return _policy;
+  }
+
+  Future<void> _savePolicy() async {
+    await store.writeJson(_policyFile, _policy.toJson());
+  }
+
+  /// 权限策略引擎（懒加载：首次使用时恢复 security/policy.json）。
+  Future<PermissionPolicy> _policyEngine() => _ensurePolicy();
+
+  /// 审计日志（懒加载，append-only）。
+  AuditLog _auditLog() => _audit;
+
+  /// 一次性放行凭据：ask 拦截时建单即写入 grant_key，用户「批准」后由被拦
+  /// 动作在下次重试时消费（consumed=1）。否则批准只改 status，重试仍被拦截
+  /// 并重复建单，审批永远空转。
+  Future<bool> _consumeGrant(String grantKey) async {
+    if (grantKey.isEmpty) return false;
+    final List<Map<String, dynamic>> rows = await store.readRecords('approvals');
+    for (int i = rows.length - 1; i >= 0; i--) {
+      final Map<String, dynamic> r = rows[i];
+      if (r['status'] != 'approved' ||
+          r['grant_key'] != grantKey ||
+          r['consumed'] == 1) {
+        continue;
+      }
+      final Object? rawId = r['id'];
+      final int id = rawId is int ? rawId : int.tryParse('$rawId') ?? 0;
+      if (id <= 0) continue;
+      if (!await store.update(
+        'approvals',
+        id,
+        <String, dynamic>{'consumed': 1},
+      )) {
+        return false;
+      }
+      await _auditLog().append(
+        category: 'approval',
+        action: 'grant_consumed',
+        decision: 'allow',
+        detail: grantKey.length > 120 ? grantKey.substring(0, 120) : grantKey,
+      );
+      return true;
+    }
+    return false;
+  }
+
+  /// 工作区域文件动作守卫：策略 allow 放行，ask/deny 拦截并写审计。
+  /// ask 时额外落一条 approvals 待办，并把审批单号带回拒绝信息。
+  Future<bool> _workspaceGuard(String tool, String path) async {
+    final String action = 'workspace.$tool';
+    final String grantKey = 'workspace|$tool|$path';
+    PolicyDecision decision =
+        (await _policyEngine()).evaluate(tool: action, path: path);
+    // ask 命中的一次性放行凭据：批准后重试同一文件动作直接放行，不再空转建单。
+    if (decision == PolicyDecision.ask && await _consumeGrant(grantKey)) {
+      decision = PolicyDecision.allow;
+    }
+    await _auditLog().append(
+      category: 'security',
+      action: action,
+      decision: decision.name,
+      actor: 'workspace',
+      detail: path,
+    );
+    if (decision == PolicyDecision.allow) return true;
+    if (decision == PolicyDecision.ask) {
+      final int id = await store.insert('approvals', <String, dynamic>{
+        'action': '工作区域 $tool: $path',
+        'status': 'pending',
+        'grant_key': grantKey,
+        'consumed': 0,
+        'ts': _now(),
+      });
+      throw WorkspaceGuardDenied(
+        '操作需要审批：$path（审批 ID：$id，请在安全中心批准后重试）',
+      );
+    }
+    return false;
+  }
+
+  Future<void> _auditAppend({
+    required String category,
+    required String action,
+    required String decision,
+    required String actor,
+    Map<String, dynamic> detail = const <String, dynamic>{},
+  }) {
+    return _auditLog().append(
+      category: category,
+      action: action,
+      decision: decision,
+      actor: actor,
+      detail: detail.isEmpty ? '' : jsonEncode(detail),
+    );
+  }
 
   Future<Map<String, dynamic>> _securityApproval(Map<String, dynamic> p) async {
     final action = _action(p, 'list');
@@ -4081,7 +4523,151 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         final ok = await store.update('approvals', id, <String, dynamic>{
           'status': action == 'approve' ? 'approved' : 'denied',
         });
+        await _auditAppend(
+          category: 'approval',
+          action: action,
+          decision: action == 'approve' ? 'approved' : 'denied',
+          actor: (p['actor'] ?? 'user').toString(),
+          detail: <String, dynamic>{'id': id, 'ok': ok},
+        );
         return <String, dynamic>{'ok': ok};
+
+      case 'policy_list':
+        final policy = await _ensurePolicy();
+        return _ok(<String, dynamic>{
+          'rules': policy.rules
+              .map((PermissionRule r) => r.toJson())
+              .toList(),
+          'fallback': policy.fallback.name,
+        });
+
+      case 'policy_set':
+        final raw = <String, dynamic>{};
+        final supplied = p['rule'];
+        if (supplied is Map) {
+          raw.addAll(supplied.map(
+            (Object? k, Object? v) => MapEntry(k.toString(), v),
+          ));
+        }
+        for (final String key in const <String>[
+          'id', 'tool', 'path', 'args', 'decision', 'enabled', 'note',
+        ]) {
+          if (p.containsKey(key)) raw[key] = p[key];
+        }
+        if (raw.isEmpty) return _err('缺少权限规则字段');
+        final rule = PermissionRule.fromJson(raw);
+        if (rule.id.isEmpty) return _err('权限规则缺少 id');
+        final policy = await _ensurePolicy();
+        final rules = List<PermissionRule>.of(policy.rules);
+        final index = rules.indexWhere((PermissionRule r) => r.id == rule.id);
+        final replaced = index >= 0;
+        if (replaced) {
+          rules[index] = rule;
+        } else {
+          // 规则按声明顺序求值、首个命中即生效：内置 default-allow-shell /
+          // default-allow-workspace 等放行规则排在前面时，用户新建的 shell
+          // deny/ask 规则永远命中不到。新规则插到第一条内置 allow 规则之前，
+          // 既优先于内置放行，又保留内置 deny/ask（私钥、破坏性命令）的前置拦截。
+          final int firstDefaultAllow = rules.indexWhere(
+            (PermissionRule r) =>
+                r.decision == PolicyDecision.allow &&
+                r.id.startsWith('default-'),
+          );
+          if (firstDefaultAllow >= 0) {
+            rules.insert(firstDefaultAllow, rule);
+          } else {
+            rules.add(rule);
+          }
+        }
+        _policy = PermissionPolicy(rules: rules, fallback: policy.fallback);
+        await _savePolicy();
+        await _auditAppend(
+          category: 'security',
+          action: 'policy_set',
+          decision: rule.decision.name,
+          actor: (p['actor'] ?? 'user').toString(),
+          detail: <String, dynamic>{'id': rule.id, 'replaced': replaced},
+        );
+        return _ok(<String, dynamic>{
+          'rule': rule.toJson(),
+          'replaced': replaced,
+        });
+
+      case 'policy_remove':
+        final ruleId = (p['id'] ?? '').toString().trim();
+        if (ruleId.isEmpty) return _err('缺少权限规则 id');
+        final policy = await _ensurePolicy();
+        final rules = List<PermissionRule>.of(policy.rules);
+        final before = rules.length;
+        rules.removeWhere((PermissionRule r) => r.id == ruleId);
+        if (rules.length == before) return _err('权限规则不存在：$ruleId');
+        _policy = PermissionPolicy(rules: rules, fallback: policy.fallback);
+        await _savePolicy();
+        await _auditAppend(
+          category: 'security',
+          action: 'policy_remove',
+          decision: 'removed',
+          actor: (p['actor'] ?? 'user').toString(),
+          detail: <String, dynamic>{'id': ruleId},
+        );
+        return _ok(<String, dynamic>{
+          'id': ruleId,
+          'removed': before - rules.length,
+        });
+
+      case 'policy_evaluate':
+        final tool = (p['tool'] ?? '').toString().trim();
+        if (tool.isEmpty) return _err('缺少 tool');
+        final path = (p['path'] ?? '').toString();
+        final rawArgs = p['args'];
+        final args = rawArgs is String
+            ? rawArgs
+            : (rawArgs == null ? '' : jsonEncode(rawArgs));
+        final policy = await _ensurePolicy();
+        String? matched;
+        for (final PermissionRule rule in policy.rules) {
+          if (rule.matches(tool: tool, path: path, args: args)) {
+            matched = rule.id;
+            break;
+          }
+        }
+        return _ok(<String, dynamic>{
+          'decision':
+              policy.evaluate(tool: tool, path: path, args: args).name,
+          'matched': matched,
+        });
+
+      case 'audit_list':
+        final category = (p['category'] ?? '').toString().trim();
+        final limit = int.tryParse('${p['limit'] ?? ''}') ?? 100;
+        final events = category.isEmpty
+            ? await _audit.all()
+            : await _audit.query(category: category, limit: limit);
+        final take = limit <= 0 ? 0 : limit;
+        final limited = events.length > take
+            ? events.sublist(events.length - take)
+            : events;
+        return _ok(<String, dynamic>{
+          'events': limited.map((AuditEvent e) => e.toJson()).toList(),
+          'stats': await _audit.stats(),
+        });
+
+      case 'audit_export':
+        return _ok(<String, dynamic>{'jsonl': await _audit.exportJsonl()});
+
+      case 'audit_import':
+        final jsonl = (p['jsonl'] ?? '').toString();
+        if (jsonl.trim().isEmpty) return _err('jsonl 为空');
+        return _ok(<String, dynamic>{
+          'imported': await _audit.importJsonl(jsonl),
+        });
+
+      case 'audit_verify':
+        return <String, dynamic>{
+          'ok': true,
+          'result': await _auditLog().verifyChain(),
+        };
+
       default:
         return _err('未知 security_approval 动作：$action');
     }
