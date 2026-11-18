@@ -8,6 +8,15 @@ import '../../../design/dsh_motion.dart';
 import '../../../design/dsh_tokens.dart';
 import '../../core/theme/flai_theme.dart';
 
+/// AI 对话正文前景色：必须跟随应用主题真源 FlaiTheme。
+///
+/// 不可改用 Theme.of(context).brightness——Material 主题在局部 Theme 覆盖、
+/// 路由缓存或深浅切换过渡时会与 FlaiTheme 不同步，深色背景下将取到
+/// Colors.black（对比度约 1.05:1，正文完全不可见，2026-11-19 用户截图反馈）。
+/// theme.colors.foreground 由 _resolveTheme 独立决定：
+/// 深色 #EDEFF5（近白）、浅色 #17181C（近黑）。
+Color chatForegroundColor(FlaiThemeData theme) => theme.colors.foreground;
+
 class MessageBubble extends StatelessWidget {
   final Message message;
 
@@ -71,12 +80,16 @@ class _ChatLayout extends StatelessWidget {
     final isUser = message.isUser;
 
     final isError = message.status == MessageStatus.error;
-    // 需求：深色模式输出区文字纯白、浅色模式纯黑。
-    // AI 正文固定使用 chatFg；用户气泡改用主题自带的前景色，避免深色气泡
-    // （浅色主题下的用户气泡）上出现低对比度文字。
-    final Color chatFg = Theme.of(context).brightness == Brightness.dark
-        ? Colors.white
-        : Colors.black;
+    // 需求：深色模式输出区文字白色、浅色模式黑色。
+    // 关键：前景色必须跟随【应用主题真源 FlaiTheme】，而不是 Material 的
+    // Theme.of(context).brightness。后者在局部 Theme 覆盖、路由缓存或深浅
+    // 切换过渡时会与 FlaiTheme 不同步，导致深色背景下正文取到 Colors.black
+    // （对比度约 1.05:1，完全不可见）。theme.colors.foreground 由 app.dart
+    // 的 _resolveTheme 独立决定：深色 #EDEFF5（近白）、浅色 #17181C（近黑），
+    // 从根上消除双主题源不同步造成的黑字。
+    final Color chatFg = chatForegroundColor(theme);
+    // 用户气泡改用主题自带的前景色，避免深色气泡（浅色主题下的用户气泡）
+    // 上出现低对比度文字。
     final Color bubbleFg = isUser ? theme.colors.userBubbleForeground : chatFg;
     // FlaiTheme.dark 的 destructive 是深红底色，直接当文字色在深底上不可读；
     // 错误提示统一取 dsh 语义错误色（深色 #EF4444 / 浅色 #DC2626）。
