@@ -22,6 +22,7 @@ import 'package:tangram/ui/pages/tga_security_page.dart';
 import 'package:tangram/ui/pages/tga_snapshot_page.dart';
 import 'package:tangram/ui/pages/tga_sphere_graph_page.dart';
 import 'package:tangram/ui/pages/tga_store_page.dart';
+import 'package:tangram/ui/pages/tga_sun_run_page.dart';
 import 'package:tangram/ui/pages/tga_team_page.dart';
 import 'package:tangram/ui/pages/tga_training_page.dart';
 import 'package:tangram/ui/pages/tga_ui_plugins_page.dart';
@@ -84,6 +85,12 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
         icon: Icons.terminal_outlined,
         labelKey: 'sidebar.sandbox',
         page: const TgaSandboxPage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.directions_run_rounded,
+        labelKey: 'sidebar.sunRun',
+        page: const TgaSunRunPage(),
         fullPage: true,
       ),
       NavItem(

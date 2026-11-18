@@ -19,6 +19,7 @@ import 'dart:convert';
 
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/plugin_kernel.dart';
+import 'package:tangram/harness/sun_run.dart';
 
 // ---------------------------------------------------------------------------
 // KernelHost：内建插件唯一依赖的"真实能力"契约（由 EmbeddedBackend 注入）
@@ -828,6 +829,74 @@ class BuiltinPlugins {
           });
         },
       ),
+
+      // ---- capability/sunrun（爱阳光跑：GPS 轨迹与运动传感器模拟）----
+      _CapabilityPlugin(
+        id: 'capability.sunrun',
+        name: '爱阳光跑',
+        version: v,
+        description: 'GPS 轨迹与运动传感器模拟（走/跑/骑行）',
+        seam: 'capability/sunrun',
+        definition: 'GPS 轨迹与运动传感器模拟（走/跑/骑行）',
+        build: (PluginContext ctx) {
+          ctx.provideSeamProvider(
+              'capability/sunrun',
+              'route-simulator',
+              '真实轨迹/速度/GNSS 噪声模型',
+              (String method, Map<String, dynamic> args) =>
+                  SunRunRuntime.instance.handle(method, args));
+          ctx.registerTool(AgentTool(
+            name: 'sun_run',
+            description:
+                '爱阳光跑：start/pause/resume/stop/status/history，返回真实模拟数据',
+            tier: ApprovalTier.write,
+            parameters: <String, dynamic>{
+              'type': 'object',
+              'properties': <String, dynamic>{
+                'action': <String, dynamic>{
+                  'type': 'string',
+                  'enum': <String>[
+                    'start',
+                    'pause',
+                    'resume',
+                    'stop',
+                    'status',
+                    'history',
+                  ],
+                },
+                'mode': <String, dynamic>{
+                  'type': 'string',
+                  'enum': <String>['walk', 'run', 'ride'],
+                },
+                'targetKm': <String, dynamic>{'type': 'number'},
+                'paceSecPerKm': <String, dynamic>{'type': 'integer'},
+                'seed': <String, dynamic>{'type': 'integer'},
+                'loop': <String, dynamic>{'type': 'boolean'},
+                'realism': <String, dynamic>{'type': 'number'},
+                'weightKg': <String, dynamic>{'type': 'number'},
+              },
+              'required': <String>['action'],
+            },
+            execute: (Map<String, dynamic> args, CancelToken? token) async {
+              try {
+                final Map<String, dynamic> r = await SunRunRuntime.instance
+                    .handle(args['action'], args);
+                if (r['ok'] == true) {
+                  return ToolResult.ok(jsonEncodeSafe(r), data: r);
+                }
+                return ToolResult.error(
+                    (r['error'] ?? 'sun_run 执行失败').toString());
+              } on Object catch (e) {
+                return ToolResult.error('sun_run 执行失败：$e');
+              }
+            },
+          ));
+          ctx.registerControlAction(
+              'sun_run',
+              (Map<String, dynamic> p) =>
+                  SunRunRuntime.instance.handle(p['action'], p));
+        },
+      ),
     ];
   }
 
@@ -854,6 +923,7 @@ class BuiltinPlugins {
           Bundle('ext', '扩展与界面', <String>[
             'ext.hooks',
             'ui.pages',
+            'capability.sunrun',
           ], <String, dynamic>{'ui': 'tga'}),
         ],
         <String, dynamic>{'kernel': 'cordis-style'},

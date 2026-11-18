@@ -114,6 +114,7 @@ class UiCustomizationConfig {
     'sidebar.training',
     'sidebar.persona',
     'sidebar.sandbox',
+    'sidebar.sunRun',
     'sidebar.store',
     'sidebar.workspace',
     'sidebar.knowledge',
@@ -143,6 +144,7 @@ class UiCustomizationConfig {
     'sidebar.training': '训练设置',
     'sidebar.persona': '人格设置',
     'sidebar.sandbox': '内置沙箱',
+    'sidebar.sunRun': '爱阳光跑',
     'sidebar.store': '模型商店',
     'sidebar.workspace': '工作区域',
     'sidebar.mapping': '目录映射',
@@ -523,8 +525,11 @@ class UiCustomizationStore extends ChangeNotifier {
           (dynamic k, dynamic v) => MapEntry<String, dynamic>(k.toString(), v));
       final Object? versionRaw = map['version'];
       final int version = versionRaw is num ? versionRaw.toInt() : 1;
-      final _ParsedDocument parsed =
+      final _ParsedDocument migrated =
           _migrateDocument(_parseDocument(map), version);
+      // version<3 的旧文档补齐新入口；新文档尊重用户显式隐藏。
+      final _ParsedDocument parsed =
+          version >= 3 ? migrated : _appendNewNavKeys(migrated);
       return UiCustomizationStore._(
         store,
         parsed.scope,
@@ -590,6 +595,29 @@ class UiCustomizationStore extends ChangeNotifier {
         ? (project ?? global.copyWith(scope: UiScope.project))
         : global;
     return _ParsedDocument(parsed.scope, global, project, draft);
+  }
+
+  /// 读盘时补齐新增入口：老用户升级后仍能看到「爱阳光跑」。
+  /// 只在 [load] 生效；显式导入 JSON 不会被隐式补键（导入是用户明确行为）。
+  static _ParsedDocument _appendNewNavKeys(_ParsedDocument parsed) {
+    final UiCustomizationConfig global =
+        _appendNavKey(parsed.global, 'sidebar.sunRun');
+    final UiCustomizationConfig? project = parsed.project == null
+        ? null
+        : _appendNavKey(parsed.project!, 'sidebar.sunRun');
+    final UiCustomizationConfig draft = parsed.scope == UiScope.project
+        ? (project ?? global.copyWith(scope: UiScope.project))
+        : global;
+    return _ParsedDocument(parsed.scope, global, project, draft);
+  }
+
+  static UiCustomizationConfig _appendNavKey(
+      UiCustomizationConfig config, String key) {
+    if (config.visibleNavKeys.isEmpty || config.visibleNavKeys.contains(key)) {
+      return config;
+    }
+    return config.copyWith(
+        visibleNavKeys: <String>[...config.visibleNavKeys, key]);
   }
 
   /// 旧版文档迁移：只追加新增入口，保留用户原有顺序与去重，不删除任何项。
@@ -765,7 +793,7 @@ class UiCustomizationStore extends ChangeNotifier {
     final UiCustomizationConfig? project =
         _currentScope == UiScope.project ? _draft : _projectConfig;
     return <String, dynamic>{
-      'version': 2,
+      'version': 3,
       'active_scope': _currentScope.name,
       'global': global.toJson(),
       if (project != null) 'project': project.toJson(),

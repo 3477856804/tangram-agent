@@ -123,6 +123,7 @@ class TgaStrings {
     'sidebar.training': {'cn': '训练设置', 'tw': '訓練設定', 'en': 'Training'},
     'sidebar.persona': {'cn': '人格设置', 'tw': '人格設定', 'en': 'Persona'},
     'sidebar.sandbox': {'cn': '内置沙箱', 'tw': '內建沙箱', 'en': 'Sandbox'},
+    'sidebar.sunRun': {'cn': '爱阳光跑', 'tw': '愛陽光跑', 'en': 'Sun Run'},
     'sidebar.store': {'cn': '模型商店', 'tw': '模型商店', 'en': 'Model Store'},
     'sidebar.plugins': {'cn': '插件社区', 'tw': '外掛社群', 'en': 'Plugins'},
     'sidebar.workspace': {'cn': '工作区域', 'tw': '工作區域', 'en': 'Workspace'},
