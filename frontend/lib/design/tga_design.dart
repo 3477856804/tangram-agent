@@ -50,78 +50,78 @@ class TgaTokens {
     required this.shadowAlpha,
   });
 
-  // ---- 浅色：浅绿灰底 + 白卡 + 主蓝 #4A90D9 系 ----
+  // ---- 浅色：冷白底 + 纯白卡 + 蓝紫主色 #4D6BFE（豆包式清爽） ----
   static const TgaTokens light = TgaTokens(
-    bg: Color(0xFFF7F9F7),
-    bgSoft: Color(0xFFF2F5F3),
+    bg: Color(0xFFF6F7FB),
+    bgSoft: Color(0xFFF3F5FA),
     card: Color(0xFFFFFFFF),
-    cardAlt: Color(0xFFFBFCFD),
-    primary: Color(0xFF4A90D9),
-    primaryDeep: Color(0xFF4A90D9),
-    groupTitle: Color(0xFF4A90D9),
+    cardAlt: Color(0xFFFBFCFE),
+    primary: Color(0xFF4D6BFE),
+    primaryDeep: Color(0xFF3D5AFE),
+    groupTitle: Color(0xFF17181C),
     onPrimary: Color(0xFFFFFFFF),
-    text: Color(0xFF111111),
-    textSub: Color(0xFF64748B),
-    textDim: Color(0xFFA3AEBD),
-    divider: Color(0xFFDCE8E4),
-    border: Color(0xFFB9DDD7),
-    iconBlueBg: Color(0xFFE7EFFE),
-    iconBlue: Color(0xFF4A90D9),
-    iconPurpleBg: Color(0xFFF0EAFE),
-    iconPurple: Color(0xFF9068E8),
-    iconCyanBg: Color(0xFFE4F7F6),
-    iconCyan: Color(0xFF2FB3AE),
-    iconGoldBg: Color(0xFFFEF3DF),
-    iconGold: Color(0xFFE8A83A),
-    iconPinkBg: Color(0xFFFDEAF2),
-    iconPink: Color(0xFFE86AA0),
-    iconGreenBg: Color(0xFFE5F7EE),
-    iconGreen: Color(0xFF2FAE74),
-    iconRedBg: Color(0xFFFDECEC),
-    iconRed: Color(0xFFE8585B),
-    green: Color(0xFF2FAE74),
-    orange: Color(0xFFF0A02C),
-    red: Color(0xFFE8585B),
-    cyan: Color(0xFF2FB3AE),
-    purple: Color(0xFF9068E8),
-    gold: Color(0xFFE8A83A),
-    pink: Color(0xFFE86AA0),
+    text: Color(0xFF17181C),
+    textSub: Color(0xFF5F6673),
+    textDim: Color(0xFFA0A5B2),
+    divider: Color(0xFFEDEFF5),
+    border: Color(0xFFE5E8F0),
+    iconBlueBg: Color(0xFFE9EDFF),
+    iconBlue: Color(0xFF4D6BFE),
+    iconPurpleBg: Color(0xFFF0EBFF),
+    iconPurple: Color(0xFF7C5CFF),
+    iconCyanBg: Color(0xFFE6F7F8),
+    iconCyan: Color(0xFF14B8C4),
+    iconGoldBg: Color(0xFFFFF3DE),
+    iconGold: Color(0xFFF0A020),
+    iconPinkBg: Color(0xFFFFEAF3),
+    iconPink: Color(0xFFF0559A),
+    iconGreenBg: Color(0xFFE6F8EF),
+    iconGreen: Color(0xFF12B76A),
+    iconRedBg: Color(0xFFFFECEC),
+    iconRed: Color(0xFFF04438),
+    green: Color(0xFF12B76A),
+    orange: Color(0xFFF0A020),
+    red: Color(0xFFF04438),
+    cyan: Color(0xFF14B8C4),
+    purple: Color(0xFF7C5CFF),
+    gold: Color(0xFFF0A020),
+    pink: Color(0xFFF0559A),
     sphereNodes: <Color>[
-      Color(0xFF4A90D9), // 蓝
-      Color(0xFF9068E8), // 紫
-      Color(0xFF2FB3AE), // 青
-      Color(0xFFE86AA0), // 粉
-      Color(0xFFE8A83A), // 金
+      Color(0xFF4D6BFE), // 蓝
+      Color(0xFF7C5CFF), // 紫
+      Color(0xFF14B8C4), // 青
+      Color(0xFFF0559A), // 粉
+      Color(0xFFF0A020), // 金
     ],
-    shadowBase: Color(0xFF2C3E6B),
-    shadowAlpha: 0.05,
+    shadowBase: Color(0xFF1B2559),
+    shadowAlpha: 0.06,
   );
 
-  // ---- 深色：近黑蓝灰底 + 深蓝灰卡 + 主蓝 #7BB5E3 系 ----
+  // ---- 深色：近黑底 + 深蓝灰卡 + 柔光蓝紫主色 ----
   static const TgaTokens dark = TgaTokens(
-    bg: Color(0xFF141618),
-    bgSoft: Color(0xFF1B2027),
-    card: Color(0xFF212B36),
-    cardAlt: Color(0xFF26313C),
-    primary: Color(0xFF7BB5E3),
-    primaryDeep: Color(0xFF7BB5E3),
-    groupTitle: Color(0xFF7BB5E3),
-    onPrimary: Color(0xFF141618),
-    text: Color(0xFFE2E8F0),
-    textSub: Color(0xFF94A3B8),
-    textDim: Color(0xFF64748B),
-    divider: Color(0xFF38444D),
-    border: Color(0xFF38444D),
-    iconBlueBg: Color(0xFF24344A),
-    iconBlue: Color(0xFF7BB5E3),
-    iconPurpleBg: Color(0xFF2A2540),
-    iconPurple: Color(0xFFA78BFA),
-    iconCyanBg: Color(0xFF1E3A38),
-    iconCyan: Color(0xFF5EC8C0),
-    iconGoldBg: Color(0xFF3A3018),
-    iconGold: Color(0xFFF5C063),
-    iconPinkBg: Color(0xFF3A2230),
-    iconPink: Color(0xFFE88AB4),
+    bg: Color(0xFF0E1014),
+    bgSoft: Color(0xFF12151B),
+    card: Color(0xFF171A21),
+    cardAlt: Color(0xFF1C2029),
+    primary: Color(0xFF8C9BFF),
+    primaryDeep: Color(0xFFA5B0FF),
+    groupTitle: Color(0xFFEDEFF5),
+    onPrimary: Color(0xFF0E1014),
+    text: Color(0xFFEDEFF5),
+    textSub: Color(0xFFA0A7B5),
+    textDim: Color(0xFF6B7280),
+    divider: Color(0xFF232833),
+    border: Color(0xFF2A3040),
+    iconBlueBg: Color(0xFF252D4D),
+    iconBlue: Color(0xFF8C9BFF),
+    iconPurpleBg: Color(0xFF2C2545),
+    iconPurple: Color(0xFFB4A0FF),
+    iconCyanBg: Color(0xFF16363A),
+    iconCyan: Color(0xFF5EE0E8),
+    iconGoldBg: Color(0xFF3A2E18),
+    iconGold: Color(0xFFF7C15C),
+    iconPinkBg: Color(0xFF3A2232),
+    iconPink: Color(0xFFF58AB8),
     iconGreenBg: Color(0xFF14352A),
     iconGreen: Color(0xFF34D399),
     iconRedBg: Color(0xFF3B1518),
@@ -129,19 +129,19 @@ class TgaTokens {
     green: Color(0xFF10B981),
     orange: Color(0xFFF59E0B),
     red: Color(0xFFEF4444),
-    cyan: Color(0xFF5EC8C0),
-    purple: Color(0xFFA78BFA),
-    gold: Color(0xFFF5C063),
-    pink: Color(0xFFE88AB4),
+    cyan: Color(0xFF5EE0E8),
+    purple: Color(0xFFB4A0FF),
+    gold: Color(0xFFF7C15C),
+    pink: Color(0xFFF58AB8),
     sphereNodes: <Color>[
-      Color(0xFF7BB5E3), // 蓝
-      Color(0xFFA78BFA), // 紫
-      Color(0xFF5EC8C0), // 青
-      Color(0xFFE88AB4), // 粉
-      Color(0xFFF5C063), // 金
+      Color(0xFF8C9BFF), // 蓝
+      Color(0xFFB4A0FF), // 紫
+      Color(0xFF5EE0E8), // 青
+      Color(0xFFF58AB8), // 粉
+      Color(0xFFF7C15C), // 金
     ],
     shadowBase: Color(0xFF000000),
-    shadowAlpha: 0.35,
+    shadowAlpha: 0.45,
   );
 
   // ---- 背景与卡片 ----
@@ -263,17 +263,13 @@ class Tga {
   // ---- 知识图谱七彩节点 ----
   static List<Color> get sphereNodes => _active.sphereNodes;
 
-  // ---- 尺寸 ----
-  static const double rCard = 16;
+  // ---- 尺寸（豆包式大圆角、宽松留白）----
+  static const double rCard = 20;
   static const double rChip = 999;
-  static const double pagePad = 16;
+  static const double pagePad = 18;
 
   static TextStyle get h1 => TextStyle(
-    fontSize: 22,
-    fontWeight: FontWeight.w700,
-    color: text,
-    height: 1.3,
-  );
+      fontSize: 24, fontWeight: FontWeight.w700, color: text, height: 1.25);
   static TextStyle get h2 => TextStyle(
     fontSize: 16,
     fontWeight: FontWeight.w600,
@@ -281,11 +277,7 @@ class Tga {
     height: 1.4,
   );
   static TextStyle get body => TextStyle(
-    fontSize: 14,
-    fontWeight: FontWeight.w500,
-    color: text,
-    height: 1.4,
-  );
+      fontSize: 14, fontWeight: FontWeight.w500, color: text, height: 1.45);
   static TextStyle get sub => TextStyle(
     fontSize: 12,
     fontWeight: FontWeight.w400,
@@ -300,10 +292,10 @@ class Tga {
   );
 
   static BoxShadow get softShadow => BoxShadow(
-    color: _active.shadowBase.withValues(alpha: _active.shadowAlpha),
-    blurRadius: 14,
-    offset: const Offset(0, 4),
-  );
+        color: _active.shadowBase.withValues(alpha: _active.shadowAlpha),
+        blurRadius: 24,
+        offset: const Offset(0, 6),
+      );
 
   /// 卡片专用双层投影：大范围环境光 + 贴边接触阴影，比单层投影更接近
   /// 真实材质的抬升感；深色主题下自动压低强度，避免糊成黑块。
@@ -388,6 +380,15 @@ class TgaGroupTitle extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(4, 18, 4, 10),
       child: Row(
         children: <Widget>[
+          Container(
+            width: 3,
+            height: 14,
+            decoration: BoxDecoration(
+              color: Tga.primary,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 8),
           Text(
             text,
             style: TextStyle(
@@ -418,7 +419,7 @@ class TgaCard extends StatelessWidget {
     final BorderRadius radius = BorderRadius.circular(Tga.rCard);
     final Widget inner = Container(
       width: double.infinity,
-      padding: padding ?? const EdgeInsets.all(14),
+      padding: padding ?? const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Tga.card,
         borderRadius: radius,
@@ -799,18 +800,18 @@ class TgaButton extends StatelessWidget {
     );
     return DshPressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(9),
+      borderRadius: BorderRadius.circular(Tga.rChip),
       haptic: true,
       splashColor: fg.withValues(alpha: 0.18),
       child: Container(
         padding: EdgeInsets.symmetric(
-          horizontal: compact ? 12 : 16,
-          vertical: compact ? 7 : 9,
+          horizontal: compact ? 14 : 18,
+          vertical: compact ? 8 : 11,
         ),
         decoration: BoxDecoration(
           color: filled ? c : c.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(9),
-          border: filled ? null : Border.all(color: c.withValues(alpha: 0.35)),
+          borderRadius: BorderRadius.circular(Tga.rChip),
+          border: filled ? null : Border.all(color: c.withValues(alpha: 0.32)),
           boxShadow: filled
               ? <BoxShadow>[
                   BoxShadow(
@@ -905,12 +906,14 @@ class _TgaSearchFieldState extends State<TgaSearchField> {
     return AnimatedContainer(
       duration: reduced ? Duration.zero : DshMotion.fast,
       curve: DshMotion.standard,
-      height: 42,
+      height: 44,
       decoration: BoxDecoration(
-        color: Tga.card,
-        borderRadius: BorderRadius.circular(11),
+        color: Tga.bgSoft,
+        borderRadius: BorderRadius.circular(Tga.rChip),
         border: Border.all(
-          color: _focused ? Tga.primary.withValues(alpha: 0.65) : Tga.border,
+          color: _focused
+              ? Tga.primary.withValues(alpha: 0.65)
+              : Tga.border.withValues(alpha: 0.5),
           width: _focused ? 1.2 : 0.8,
         ),
         boxShadow: Tga.cardShadow,

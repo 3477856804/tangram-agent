@@ -45,6 +45,7 @@ import 'package:tangram/harness/audit_log.dart';
 import 'package:tangram/harness/builtin_plugins.dart';
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/downloader.dart';
+import 'package:tangram/harness/explanation_level.dart';
 import 'package:tangram/harness/experience_transfer.dart';
 import 'package:tangram/harness/account_ops.dart';
 import 'package:tangram/harness/creator_runtime.dart';
@@ -65,6 +66,7 @@ import 'package:tangram/harness/store.dart';
 import 'package:tangram/harness/super_agent.dart';
 import 'package:tangram/harness/team_space.dart';
 import 'package:tangram/harness/video_studio.dart';
+import 'package:tangram/harness/web_search.dart';
 import 'package:tangram/harness/workflow.dart';
 import 'package:tangram/harness/workspace_mapping.dart';
 import 'package:tangram/services/model_registry.dart' show kBuiltinFreeModels;
@@ -217,6 +219,9 @@ class EmbeddedBackend implements QqShellRunner {
 
   final ToolRegistry tools = ToolRegistry();
 
+  /// 真实联网搜索：DuckDuckGo HTML 优先，失败时回退中文维基百科。
+  final WebSearchService webSearch = WebSearchService();
+
   /// Android「Debian 用户态（proot）」扩展包：真实下载/解包/proot 执行。
   late final ProotSandbox proot = ProotSandbox(store, downloads);
   /// MCP 真实接入：HTTP/SSE 传输的服务端工具会被注册进 [tools]，
@@ -256,7 +261,7 @@ class EmbeddedBackend implements QqShellRunner {
     'proactive_task', 'security_approval', 'plugin_lifecycle',
     'plugin_community', 'plugin_kernel', 'super_agent', 'im_event',
     'knowledge_base', 'workflow', 'snapshot', 'model_group', 'app_market',
-    'team_space', 'compute', 'workspace_mapping',
+    'team_space', 'compute', 'workspace_mapping', 'web_search',
     'responsibility_trace', 'update_status',
     'dependency_event', 'perception_event', 'reload', 'status', 'ping', 'echo',
   ];
@@ -395,6 +400,26 @@ class EmbeddedBackend implements QqShellRunner {
     return out;
   }
 
+  /// 目录映射分发：统一补上平台链接能力与每个 mapping 的 mode/link_target。
+  Future<Map<String, dynamic>> _workspaceMapping(
+      Map<String, dynamic> p) async {
+    final Map<String, dynamic> result = await workspaceMappings.handle(
+        _action(p, 'list'), p);
+    final bool bindSupported = WorkspaceMappingService.bindSupported;
+    if (result['mappings'] is List) {
+      result['mappings'] = (result['mappings'] as List)
+          .whereType<Map>()
+          .map((Map e) {
+        final Map<String, dynamic> m = Map<String, dynamic>.from(e);
+        m['bind_mode'] = (m['bind_mode'] ?? 'copy').toString();
+        m['link_target'] = (m['link_target'] ?? '').toString();
+        m['bind_supported'] = bindSupported;
+        return m;
+      }).toList();
+    }
+    return <String, dynamic>{...result, 'bind_supported': bindSupported};
+  }
+
   /// 统一分发入口。任何异常都转成结构化 error，绝不让 UI 拿到未捕获异常。
   Future<BackendReply> dispatch(
     String topic,
@@ -426,8 +451,8 @@ class EmbeddedBackend implements QqShellRunner {
         'app_market' => await appPackages.handle(_action(payload, 'list'), payload),
         'team_space' => await team.handle(_action(payload, 'list'), payload),
         'compute' => await _onCompute(payload),
-        'workspace_mapping' => await workspaceMappings.handle(
-            _action(payload, 'list'), payload),
+        'workspace_mapping' => await _workspaceMapping(payload),
+        'web_search' => await _webSearchControl(payload),
         'im_event' => await im.handle(_action(payload), payload),
         'responsibility_trace' => await _responsibilityTrace(),
         'update_status' => await _updateStatus(),
@@ -453,6 +478,22 @@ class EmbeddedBackend implements QqShellRunner {
 
   String _action(Map<String, dynamic> p, [String fallback = '']) =>
       (p['action'] ?? fallback).toString();
+
+  // ---- web_search：真实联网搜索（DuckDuckGo → 中文维基百科） ----
+
+  Future<Map<String, dynamic>> _webSearchControl(Map<String, dynamic> p) async {
+    final String action = _action(p, 'search');
+    if (action != 'search') {
+      return _err('web_search 仅支持 action=search');
+    }
+    final String query = (p['query'] ?? '').toString().trim();
+    if (query.isEmpty) return _err('web_search 缺少 query 参数');
+    final Object? rawLimit = p['limit'];
+    final int limit = rawLimit is num
+        ? rawLimit.toInt()
+        : (int.tryParse(rawLimit?.toString() ?? '') ?? 8);
+    return webSearch.search(query, limit: limit);
+  }
 
   // ---- capability_negotiation：真实能力清单 ----
 
@@ -1145,6 +1186,17 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     } on Object {
       // 知识库文件损坏/不可读时不影响本轮对话，也不编造引用。
     }
+    // 分层解释：用户偏好优先，自动模式按本轮提问关键词判断水平，
+    // 只把讲解方式追加到人格提示词末尾，不覆盖原有 system。
+    // 偏好读取失败时静默按 auto 处理，不影响本轮对话。
+    AudienceLevel audience = AudienceLevel.auto;
+    try {
+      final AudienceLevel pref = await ExplanationLevelPref.load(store);
+      audience = AudienceDetector.detect(text, preferred: pref);
+    } on Object {
+      audience = AudienceLevel.auto;
+    }
+    effectiveSystem += '\n\n${ExplanationStyle.hint(audience)}';
 
     String reply;
     String engine;
@@ -1446,12 +1498,16 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     final bool android = Platform.isAndroid;
     // 环境描述只按「唯一那套环境」如实给出：安卓端不描述宿主 toybox，
     // 桌面端才可能切换到远端 SSH / TCP 桥。
+    final String pkgHint = proot.profile == 'alpine'
+        ? 'apk 装包、python3 / pip 可用'
+        : 'apt/dpkg 原生可用（pkg 是 apt-get 的封装）、python3 / pip 可用';
     final String mode = android
         ? (proot.installed
-            ? '内置沙箱（安卓上唯一一套 Linux：proot + Alpine 用户态；'
-                'apk 装包、python3 / pip 可用，App 沙箱目录在 Linux 内是 /workspace）'
-            : '内置沙箱（安卓上唯一一套 Linux，当前尚未完成初始化；'
-                '首次执行命令会自动真实下载 proot + Alpine，装好前会如实返回进度）')
+            ? '内置沙箱（安卓上唯一一套 Linux 用户态：proot + ${proot.distroLabel}；'
+                '$pkgHint，App 沙箱目录在 Linux 内是 /workspace）'
+            : '内置沙箱（安卓上唯一一套 Linux 用户态，当前尚未完成初始化；'
+                '首次执行命令会自动真实下载 proot + ${proot.distroLabel}，'
+                '装好前会如实返回进度）')
         : (env.contains('SSH')
             ? '远端沙箱（SSH）：命令在远端 Linux 真实执行'
             : '$env（系统真实 shell）');
@@ -2299,6 +2355,64 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         },
       ),
       AgentTool(
+        name: 'web_search',
+        description: '联网搜索真实网页（DuckDuckGo HTML 优先，失败时回退中文维基百科），'
+            '返回真实标题、链接与摘要；无结果时如实返回空，绝不编造来源',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'query': <String, dynamic>{
+              'type': 'string',
+              'description': '搜索关键词',
+            },
+            'limit': <String, dynamic>{
+              'type': 'integer',
+              'minimum': 1,
+              'maximum': 20,
+              'description': '返回条数，默认 8',
+            },
+          },
+          'required': <String>['query'],
+        },
+        execute: (args, _) async {
+          final String query = (args['query'] ?? '').toString().trim();
+          if (query.isEmpty) return ToolResult.error('搜索关键词为空');
+          final Object? rawLimit = args['limit'];
+          final int limit = rawLimit is num
+              ? rawLimit.toInt()
+              : (int.tryParse(rawLimit?.toString() ?? '') ?? 8);
+          final Map<String, dynamic> r =
+              await webSearch.search(query, limit: limit);
+          if (r['ok'] != true) {
+            return ToolResult.error((r['error'] ?? '联网搜索失败').toString());
+          }
+          final List<dynamic> results =
+              (r['results'] as List<dynamic>?) ?? const <dynamic>[];
+          if (results.isEmpty) {
+            return ToolResult.ok(
+              '未搜索到「$query」的真实结果（来源：${r['provider']}）。',
+              data: r,
+            );
+          }
+          final StringBuffer buf = StringBuffer(
+            '**联网搜索「$query」**（provider=${r['provider']}'
+            '${r['degraded'] == true ? '，已降级' : ''}）\n',
+          );
+          if ((r['note'] ?? '').toString().isNotEmpty) {
+            buf.writeln('说明：${r['note']}\n');
+          }
+          for (int i = 0; i < results.length; i++) {
+            final Object? item = results[i];
+            if (item is! Map) continue;
+            buf.writeln('${i + 1}. [${item['title']}](${item['url']})');
+            final String snippet = (item['snippet'] ?? '').toString();
+            if (snippet.isNotEmpty) buf.writeln('   $snippet');
+          }
+          return ToolResult.ok(buf.toString().trim(), data: r);
+        },
+      ),
+      AgentTool(
         name: 'sandbox_eval',
         description: '在受限 Isolate 沙箱中求值表达式（cube 能力契约 + REFUSE）',
         tier: ApprovalTier.exec,
@@ -2520,7 +2634,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
     final String env = await _sandboxEnvironment();
     final bool android = Platform.isAndroid;
-    // 安卓端只有一套 Linux 环境（proot + Alpine 用户态）。
+    // 安卓端只有一套 Linux 用户态（proot + Ubuntu/Alpine）。
     // 宿主 Android toybox shell（uid=10541、只读系统分区、无包管理器）永不参与
     // 命令执行——否则同一台机器会同时冒出 uid=0 与 uid=10541 两套互相矛盾的
     // 环境，正是旧版本被探测成「两台机器」的根因。
@@ -2551,8 +2665,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
             'ok': false,
             'stdout': '',
             'error': st['installing'] == true
-                ? 'Linux 环境首次初始化中：正在真实下载 proot + Alpine rootfs'
-                    '（约 4.2MB）。稍后重试即可；打开「沙箱」页可看实时进度。'
+                ? 'Linux 环境首次初始化中：正在真实下载 proot + '
+                    '${st['distro'] ?? 'Ubuntu 24.04 base'} rootfs'
+                    '（约 ${((st['total'] as num? ?? 30243739) / 1000000).round()}MB）。'
+                    '稍后重试即可；打开「沙箱」页可看实时进度。'
                 : 'Linux 环境未就绪：${st['error'] ?? '安装未完成'}'
                     '。请在「沙箱」页点「Linux 环境」重试安装。',
             'cwd': cwd,
@@ -2814,11 +2930,14 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         buf.writeln('注：本终端默认把命令交给系统真实 shell 执行，'
             'apt/pkg/pip/curl 等系统命令按本机真实情况响应。');
         if (Platform.isAndroid) {
+          final String distro = proot.distroLabel;
           buf.writeln(proot.installed
-              ? '当前运行在唯一那套 Linux 环境（proot + Alpine）：'
-                  'apk / python / pip 真实执行。'
+              ? '当前运行在唯一那套 Linux 用户态（proot + $distro）：'
+                  '${proot.profile == 'alpine' ? 'apk' : 'apt/dpkg（pkg 封装）'}'
+                  ' / python / pip 真实执行。'
               : 'Linux 环境尚未安装：点右上角图标真实下载'
-                  '（proot + Alpine rootfs，约 4.2MB）。');
+                  '（proot + $distro rootfs，约 '
+                  '${(proot.status()['total'] as num? ?? 30243739) ~/ 1000000}MB）。');
         }
       default:
         // 表达式兜底：2+3*4 之类直接走真实求值（受限 Isolate）。
@@ -2991,20 +3110,24 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   /// 旧版本里「沙箱完整性」由调用方各自跑命令判断：一次落进 proot（uid=0、
   /// 2.4G 根分区、gcc/python 齐全），一次落进 Android 宿主 toybox
   /// （uid=10541、933M 分区满、无包管理器），于是被描述成两台互相矛盾的机器。
-  /// 现在只有这一份报告：安卓恒为 proot + Alpine 用户态。
+  /// 现在只有这一份报告：安卓恒为 proot + 单一 profile（Ubuntu/Alpine）用户态。
   Future<Map<String, dynamic>> _envReport() async {
-    const String probe = 'echo "kernel:\$(uname -srm)"; '
-        'echo "uid:\$(id -u)"; '
-        'echo "distro:\$(cat /etc/alpine-release 2>/dev/null || '
-        '(cat /etc/os-release 2>/dev/null | head -1))"; '
-        'echo "disk:\$(df -Pk / | tail -1)"; '
-        'echo "apk:\$(command -v apk || echo -)"; '
-        'echo "python:\$(command -v python3 || echo -)"; '
-        'echo "node:\$(command -v node || echo -)"; '
-        'echo "gcc:\$(command -v gcc || echo -)"; '
-        'echo "writable:\$(touch /root/.tga_env_probe 2>/dev/null && echo yes || echo no)"';
+    // distro 统一读 /etc/os-release 的 PRETTY_NAME（Ubuntu/Alpine 都有）；
+    // 包管理器同时探测 apk 与 apt-get，由解析层按 apk > apt 取真实值。
+    const String probe = "echo \"kernel:\$(uname -srm)\"; "
+        "echo \"uid:\$(id -u)\"; "
+        "echo \"distro:\$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null)\"; "
+        "echo \"disk:\$(df -Pk / | tail -1)\"; "
+        "echo \"apk:\$(command -v apk || echo -)\"; "
+        "echo \"apt-get:\$(command -v apt-get || echo -)\"; "
+        "echo \"python:\$(command -v python3 || echo -)\"; "
+        "echo \"node:\$(command -v node || echo -)\"; "
+        "echo \"gcc:\$(command -v gcc || echo -)\"; "
+        "echo \"writable:\$(touch /root/.tga_env_probe 2>/dev/null && echo yes || echo no)\"";
 
     if (Platform.isAndroid) {
+      final String pkgName =
+          proot.profile == 'alpine' ? 'apk' : 'apt/dpkg（pkg 为封装）';
       if (!proot.installed) {
         final Map<String, dynamic> st = await _startLinuxInstall();
         return <String, dynamic>{
@@ -3012,13 +3135,16 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           'single_environment': true,
           'platform': 'android',
           'environment': '内置沙箱',
-          'profile': 'android-proot-alpine',
+          'profile': 'android-proot-${proot.profile}',
+          'distro': proot.distroLabel,
+          'package_manager': proot.profile == 'alpine' ? 'apk' : 'apt',
           'linux_installed': false,
           'installing': st['installing'] == true,
           'step': (st['step'] ?? 'idle').toString(),
           if (st['error'] != null) 'error': st['error'],
-          'note': '安卓端只有这一套 Linux 环境（proot + Alpine 用户态）；'
-              '首次使用会真实下载并解包，装好后 apk / python / pip 都在用户态执行。',
+          'note': '安卓端只有这一套 Linux 用户态（proot + ${proot.distroLabel}）；'
+              '首次使用会真实下载并解包，装好后 $pkgName / python / pip '
+              '都在用户态执行。',
         };
       }
       final Map<String, dynamic>? r = await proot.run(probe, '.');
@@ -3029,7 +3155,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       report['single_environment'] = true;
       report['platform'] = 'android';
       report['environment'] = '内置沙箱';
-      report['profile'] = 'android-proot-alpine';
+      report['profile'] = 'android-proot-${proot.profile}';
+      if ('${report['distro'] ?? ''}'.isEmpty) {
+        report['distro'] = proot.distroLabel;
+      }
       if (r?['error'] != null && '${r!['error']}'.isNotEmpty) {
         report['error'] = r['error'];
       }
@@ -3078,6 +3207,17 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       return (v.isEmpty || v == '-') ? '' : v;
     }
 
+    // PRETTY_NAME 通常带引号（"Ubuntu 24.04.5 LTS"），去掉首尾引号。
+    String unquote(String raw) {
+      var d = raw.trim();
+      if (d.length >= 2 &&
+          ((d.startsWith('"') && d.endsWith('"')) ||
+              (d.startsWith("'") && d.endsWith("'")))) {
+        d = d.substring(1, d.length - 1).trim();
+      }
+      return d;
+    }
+
     int? totalMb;
     int? freeMb;
     final List<String> df =
@@ -3092,7 +3232,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     return <String, dynamic>{
       'kernel': kv['kernel'] ?? '',
       'uid': kv['uid'] ?? '',
-      'distro': kv['distro'] ?? '',
+      'distro': unquote(kv['distro'] ?? ''),
       'disk_total_mb': totalMb,
       'disk_free_mb': freeMb,
       'package_manager': tool('apk').isNotEmpty
@@ -3106,7 +3246,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       'node_ready': tool('node').isNotEmpty,
       if (tool('node').isEmpty)
         'node_hint': '沙箱未检测到 Node.js；QQ 沙箱直连（dsh-qqbot）依赖 node/npm，'
-            '扫码前会尝试在 Linux 用户态用 apk 真实补装。',
+            '扫码前会尝试在 Linux 用户态用系统包管理器真实补装。',
       'writable': kv['writable'] == 'yes',
     };
   }

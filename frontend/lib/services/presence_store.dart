@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../harness/emotion_tone.dart';
 import '../harness/store.dart';
 
 /// 对话场景模式：决定主动性、寒暄密度与是否允许主动打扰。
@@ -94,6 +95,10 @@ class PresenceStore extends ChangeNotifier {
   PresenceMode mode = PresenceMode.chat;
   Mood mood = Mood.neutral;
 
+  /// 情绪感知与连贯：词库分析 + EMA 平滑，单独落盘到
+  /// `presence/emotion_state.json`；只调整交互风格，不是心理诊断。
+  EmotionContinuity emotion = EmotionContinuity();
+
   /// 0-1 的粗略能量值，用于决定回复长度与主动性，不做任何医学含义解释。
   double energy = 0.6;
 
@@ -158,6 +163,8 @@ class PresenceStore extends ChangeNotifier {
     } on Object {
       // 存储损坏时保持默认内存态；后续写入会重建真实文件。
     }
+    // 情绪连续状态独立落盘；读取失败时保持中性，不阻断在场能力。
+    s.emotion = await EmotionContinuity.load(store);
     s._loaded = true;
     return s;
   }
@@ -189,7 +196,10 @@ class PresenceStore extends ChangeNotifier {
   }
 
   /// 等待已排队的写入完成（测试与退出前使用）。
-  Future<void> flush() => _pendingSave;
+  Future<void> flush() async {
+    await _pendingSave;
+    await emotion.flush();
+  }
 
   void _update(void Function() mutate) {
     mutate();
@@ -246,6 +256,10 @@ class PresenceStore extends ChangeNotifier {
   void recordUserMessage(String text) {
     final String trimmed = text.trim();
     if (trimmed.isEmpty) return;
+    // 先做词库分析 + EMA 更新；无命中时 update 内部会保持原状态，
+    // 情绪不因一句中性消息而跳变。落盘失败由 EmotionContinuity 吞掉。
+    final EmotionReading fresh = EmotionLexicon.analyze(trimmed);
+    final EmotionReading settled = _tickEmotion(trimmed);
     final Mood tone = _detectTone(trimmed);
     final String summary = _summarize(trimmed);
     _update(() {
@@ -257,6 +271,14 @@ class PresenceStore extends ChangeNotifier {
       lastUserTone = tone.name;
       // 明确的语气才改变情绪；中性消息保持情绪连贯，不来回跳。
       if (tone != Mood.neutral) mood = tone;
+      // 关键词已给出明确语气时不覆盖；只有消息本身没有语气词、且词库
+      // 真正命中（fresh.confidence>0）时，才用连续情绪补足。
+      final Mood? emotionMood = tone == Mood.neutral && fresh.confidence >= 0.3
+          ? _moodForEmotion(settled)
+          : null;
+      if (emotionMood != null) {
+        mood = emotionMood;
+      }
       switch (tone) {
         case Mood.frustrated:
           energy = _clamp(energy - 0.05);
@@ -391,6 +413,33 @@ class PresenceStore extends ChangeNotifier {
   }
 
   // ---- 启发式工具 ----
+
+  /// 词库分析 + 连续情绪更新；任何异常都回退到当前状态，绝不阻断对话。
+  EmotionReading _tickEmotion(String text) {
+    try {
+      return emotion.update(EmotionLexicon.analyze(text));
+    } on Object {
+      return emotion.current;
+    }
+  }
+
+  /// 连续情绪标签到既有 [Mood] 的映射：只覆盖语义明确的几类，
+  /// 难过 / 焦虑等没有对应 Mood 时保持原值，避免贴错标签。
+  static Mood? _moodForEmotion(EmotionReading reading) {
+    switch (reading.label) {
+      case EmotionLabel.joy:
+        return Mood.cheerful;
+      case EmotionLabel.angry:
+        return Mood.frustrated;
+      case EmotionLabel.tired:
+        return Mood.tired;
+      case EmotionLabel.calm:
+      case EmotionLabel.sad:
+      case EmotionLabel.anxious:
+      case EmotionLabel.neutral:
+        return null;
+    }
+  }
 
   /// 真实关键词 / 标点 / 长度启发式；只用于选择回复风格。
   static Mood _detectTone(String text) {

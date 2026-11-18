@@ -7,8 +7,9 @@
 版本：**0.0.11**（唯一真源为仓库根 `VERSION`，由 `harness/version.py`
 的 `assert_version_frozen()` 校验 pubspec / 后端包 / App 常量全部一致）
 
-> 本仓库为闭源专有软件（All rights reserved）。仓库内全部源码与资源版权归
-> 檀阁瑞木 / COSMOn 所有，未经授权不得复制、修改、再分发或用于商业用途。
+> 本仓库为开源软件，许可证为 **GNU AGPL-3.0**（见根目录 `LICENSE`）。
+> 参考项目与 vendored 源码的许可证、版本与归属见 `third_party/`。
+> 原版权归属：檀阁瑞木 / COSMOn。
 
 ## 组成
 
@@ -39,8 +40,9 @@
   宿主玩具箱 shell 永不参与命令执行，不会出现「两台互相矛盾的机器」。
 - **3D 建模**：OBJ / STL / PLY(ASCII) / GLB 真实解析、Canvas 实时渲染、
   导出 OBJ/STL；顶点按 1e-6 量化焊接，导出后可无损回读。
-  另提供 `backend/app/runtime/cad_model.py`：build123d/OCCT 参数化 B-rep 建模、
-  布尔运算、体积/包围盒校验与 STEP/STL 导出，缺依赖明确报错。
+  另提供 `backend/app/runtime/cad_model.py`：**已 vendor 参考项目 build123d
+  0.11.1 源码**（`third_party/build123d`，Apache-2.0），做参数化 B-rep 建模、
+  布尔运算、体积/包围盒校验与 STEP/STL 导出；OCCT 原生依赖缺失时明确报错。
 - **主动发消息**：微信 iLink、QQ v2、飞书 OpenAPI 三渠道真实 REST 发送，
   收件人来自真实会话列表，失败如实回传错误码，不伪造成功。
 - **思考过程**：对话中默认直接展开推理内容，可点按收起 / 再展开。

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
 import pytest
@@ -11,7 +10,13 @@ from backend.app.runtime.cad_model import CadError, available, model
 
 
 def _has_build123d() -> bool:
-    return importlib.util.find_spec("build123d") is not None
+    # 源码可能已 vendored，但 OCP/OCCT 原生库仍可能缺失；只有真实 import
+    # 成功才算可用，避免 find_spec 命中源码却误判为可建模。
+    try:
+        import build123d  # noqa: F401
+        return True
+    except Exception:
+        return False
 
 
 def test_dependency_probe_is_honest() -> None:

@@ -68,6 +68,7 @@ const List<String> controlDomains = [
   'chat',
   'model_store',
   'plugin_community',
+  'web_search',
   'status',
   'ping',
   'echo',

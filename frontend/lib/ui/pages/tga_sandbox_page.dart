@@ -15,8 +15,9 @@ import '../../services/ssh_sandbox.dart';
 /// 沙箱终端（问题 #2/#22 真实化）：
 /// - 「内置沙箱」：桌面端系统 bash/sh（apt/pkg/pip 真命令）；安卓
 ///   /system/bin/sh（toybox，如实报 command not found），并提供
-///   「Debian 扩展包」入口——真实下载 proot + Alpine rootfs 后，
-///   apk/python/pip 在用户态里真跑（exec 被 ROM 拒绝时如实报错）。
+///   「Linux 用户态」入口——真实下载 proot + Ubuntu 24.04 base（新装）
+///   或 Alpine（老环境）rootfs 后，apt/apk/python/pip 在用户态里真跑
+///   （exec 被 ROM 拒绝时如实报错）。
 /// - 「远端沙箱（SSH）」：dartssh2 真实握手 + 密码/私钥认证，终端所有
 ///   命令在远端真实 Linux 执行；右上「⚙」配置主机/凭据，「连接测试」
 ///   走完整 SSH 认证并在远端执行 uname。
@@ -31,10 +32,10 @@ class TgaSandboxPage extends StatefulWidget {
 }
 
 // 终端配色（页面与 SSH 配置对话框共用）。
-const Color _termBg = Color(0xFF141A26);
-const Color _termFg = Color(0xFFCFD8E8);
+const Color _termBg = Color(0xFF000000);
+const Color _termFg = Color(0xFFE6E6E6);
 const Color _termGreen = Color(0xFF5FD6A0);
-const Color _termDim = Color(0xFF9FB0CC);
+const Color _termDim = Color(0xFF9AA3B2);
 
 class _TgaSandboxPageState extends State<TgaSandboxPage>
     with WidgetsBindingObserver {
@@ -52,9 +53,10 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
   /// 已加载的 SSH 配置（null = 未配置）。
   SshConfig? _ssh;
 
-  /// Android Debian 扩展包状态（code_task debian_status 真实回执）。
+  /// Android Linux 用户态（proot）状态（code_task debian_status 真实回执）。
   Map<String, dynamic> _debian = const <String, dynamic>{};
   Timer? _debianTimer;
+  bool _autoInstallTried = false;
 
   static const TextStyle _ts = TextStyle(
       fontFamily: 'monospace',
@@ -119,6 +121,30 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
 
   bool get _debianReady => _debian['installed'] == true;
 
+  /// 后端 status 里的真实 profile；未拿到状态时按新装默认 Ubuntu。
+  String get _profile {
+    final String p = (_debian['profile'] ?? '').toString().toLowerCase();
+    return p == 'alpine' ? 'alpine' : 'ubuntu';
+  }
+
+  bool get _ubuntu => _profile == 'ubuntu';
+
+  String get _distroLabel {
+    final String d = (_debian['distro'] ?? '').toString();
+    if (d.isNotEmpty) return d;
+    return _ubuntu ? 'Ubuntu 24.04 base' : 'Alpine 3.20';
+  }
+
+  /// 安装体积文案：优先读后端 status 的真实 total（字节）。
+  String get _installSizeLabel {
+    final int t = (_debian['total'] as num?)?.toInt() ?? 0;
+    final int bytes = t > 0 ? t : 30243739;
+    final double mb = bytes / 1000000;
+    return mb >= 10
+        ? '${mb.toStringAsFixed(0)} MB'
+        : '${mb.toStringAsFixed(1)} MB';
+  }
+
   /// 提示符主机名：远端 user@host / Debian root@debian / 本地 tga@sandbox。
   String get _hostShown {
     if (_remote) {
@@ -127,8 +153,8 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
           ? '${c.user}@${c.host.split('.').first}'
           : 'tga@remote';
     }
-    // 安卓端只有唯一那套 Linux（proot + Alpine）环境，提示符不再出现
-    // 「debian/toybox 两个主机名」的暗示。
+    // 安卓端只有唯一那套 Linux 用户态（proot + Ubuntu/Alpine）环境，
+    // 提示符不再出现「debian/toybox 两个主机名」的暗示。
     if (Platform.isAndroid && _debianReady) return 'root@linux';
     if (Platform.isAndroid) return 'tga@linux';
     return 'tga@sandbox';
@@ -220,14 +246,6 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
                 ),
               ),
             ),
-            GestureDetector(
-              onTap: _running ? null : _submit,
-              child: Padding(
-                padding: const EdgeInsets.only(left: 6),
-                child: Icon(Icons.play_arrow_rounded,
-                    size: 18, color: _running ? _termDim : _termGreen),
-              ),
-            ),
           ],
         ),
       ),
@@ -240,6 +258,21 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
   Future<void> _submit() async {
     final String cmd = _input.text.trim();
     if (cmd.isEmpty || _running) return;
+    // 开箱即用：环境没装好时不让命令静默落到宿主 shell，先自动初始化。
+    if (Platform.isAndroid && !_remote && !_debianReady) {
+      final String step = (_debian['step'] ?? 'idle').toString();
+      final bool installing =
+          step == 'downloading' || step == 'extracting' || _debian['installing'] == true;
+      _setInput('');
+      setState(() {
+        _lines.add(installing
+            ? 'Linux 环境初始化中，完成后请重新执行：$cmd'
+            : 'Linux 环境尚未就绪，已自动开始安装；完成后请重新执行：$cmd');
+      });
+      _scrollToEnd();
+      if (!installing) unawaited(_autoInstallLinux());
+      return;
+    }
     _setInput('');
     if (_history.isEmpty || _history.last != cmd) _history.add(cmd);
     _historyIndex = -1;
@@ -309,10 +342,46 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
         } else {
           _debianTimer?.cancel();
           _debianTimer = null;
+          // 开箱即用：首次进入终端就自动装好环境，不需要用户再找「下载」。
+          if (!_debianReady &&
+              _debian['installing'] != true &&
+              !_autoInstallTried &&
+              Platform.isAndroid) {
+            _autoInstallTried = true;
+            unawaited(_autoInstallLinux());
+          }
         }
       }
     } on Object {
       // 后端未就绪：保持上次状态，不谎报。
+    }
+  }
+
+  /// 首次启动自动安装 Linux 用户态；失败如实回显，可手动点「下载」重试。
+  Future<void> _autoInstallLinux() async {
+    if (!mounted) return;
+    setState(() => _lines.add(
+        '首次启动：正在自动安装 Linux 用户态（$_distroLabel，约 $_installSizeLabel）…'));
+    _scrollToEnd();
+    try {
+      final BackendClient backend = context.read<BackendClient>();
+      final BridgeEnvelope env = await backend.sendControl(
+          'code_task', <String, dynamic>{'action': 'debian_install'});
+      final dynamic payload = env.payload;
+      final Map<String, dynamic> r = payload is Map
+          ? Map<String, dynamic>.from(payload)
+          : <String, dynamic>{'ok': false, 'error': '后端未返回安装结果'};
+      if (!mounted) return;
+      if (r['ok'] != true) {
+        setState(() => _lines.add('自动安装失败：${r['error'] ?? '未知原因'}'));
+        _scrollToEnd();
+        return;
+      }
+      await _refreshDebianStatus();
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() => _lines.add('自动安装失败：$e（可点右上「下载」重试）'));
+      _scrollToEnd();
     }
   }
 
@@ -405,15 +474,22 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
     if (Platform.isAndroid) {
       if (_debianReady) {
         return <String>[
-          'alpine 3.20 Linux userland via proot · 这是本机唯一一套 Linux 环境',
-          'apk · python3 · pip 全部在用户态真实执行；/workspace 指向 App 沙箱目录',
-          'apt 属于 Debian 系包管理器，这套环境用 apk（需要 apt 可自行再装 Debian rootfs）。',
+          '$_distroLabel Linux userland via proot · 本机唯一一套 Linux 用户态',
+          _ubuntu
+              ? 'apt / dpkg 原生可用（pkg 为 apt-get 封装）· python3 / pip 可装；/workspace 指向 App 沙箱目录'
+              : 'apk · pkg · apt · python3 · pip 可直接使用；pkg/apt 映射到 apk；/workspace 指向 App 沙箱目录',
+          _ubuntu
+              ? '本机唯一一套 Linux 用户态（Ubuntu via proot），不会回落到 Android 宿主 shell。'
+              : '本机唯一一套 Linux 用户态（Alpine via proot），不会回落到 Android 宿主 shell。',
         ];
       }
       return <String>[
-        '本机只有这一套 Linux 环境（proot + Alpine），当前尚未完成初始化',
-        '点右上「下载」真实安装（约 4.2MB）；装好前命令会如实返回「初始化中」',
-        '不会回落到 Android 宿主 shell，避免出现两套互相矛盾的环境。',
+        '本机唯一一套 Linux 用户态（Ubuntu/Alpine via proot），正在自动完成初始化',
+        '首次打开会自动下载并安装（${_ubuntu ? 'Ubuntu base' : 'Alpine'} 约 $_installSizeLabel'
+            '${_ubuntu ? '，已装 Alpine 老环境不变' : ''}），无需手动点下载',
+        _ubuntu
+            ? '装好后 apt / dpkg 原生可用（pkg 为封装），不会回落到宿主 shell。'
+            : '装好后 apk / pkg / apt / python3 / pip 可直接使用，不会回落到宿主 shell。',
       ];
     }
     return <String>[
@@ -478,7 +554,7 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
                   Container(
                     padding: const EdgeInsets.symmetric(
                         horizontal: 14, vertical: 8),
-                    color: const Color(0xFF1B2333),
+                    color: const Color(0xFF0B0B0D),
                     child: Row(
                       children: <Widget>[
                         _dot(const Color(0xFFE86A6A)),
@@ -500,7 +576,9 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
                                 ? 'ssh · connected'
                                 : 'ssh · 未连接')
                             : (Platform.isAndroid
-                                ? (_debianReady ? 'proot · linux' : 'linux 未安装')
+                                ? (_debianReady
+                                    ? 'proot · $_profile'
+                                    : 'linux 未安装')
                                 : 'bash/sh'),
                             style: const TextStyle(
                                 fontSize: 11,
@@ -569,7 +647,7 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
 }
 
 // ---------------------------------------------------------------------------
-// Debian 扩展包面板（问题 #5）：监听 proot_progress hot-path 事件，
+// Linux 用户态（proot）面板：监听 proot_progress hot-path 事件，
 // 进度条按真实接收字节推进；解包显示「正在解包…」；失败如实显示
 // 错误并恢复按钮；已装显示「已安装」。debian_status 轮询作兜底。
 // ---------------------------------------------------------------------------
@@ -600,6 +678,22 @@ class _DebianSheetBodyState extends State<_DebianSheetBody>
 
   bool get _installed => _status['installed'] == true;
   bool get _busy => _status['installing'] == true || _starting;
+
+  String get _profile {
+    final String p = (_status['profile'] ?? '').toString().toLowerCase();
+    return p == 'alpine' ? 'alpine' : 'ubuntu';
+  }
+
+  bool get _ubuntu => _profile == 'ubuntu';
+
+  String get _sizeLabel {
+    final int t = (_status['total'] as num?)?.toInt() ?? 0;
+    final int bytes = t > 0 ? t : 30243739;
+    final double mb = bytes / 1000000;
+    return mb >= 10
+        ? '${mb.toStringAsFixed(0)} MB'
+        : '${mb.toStringAsFixed(1)} MB';
+  }
 
   @override
   void initState() {
@@ -715,8 +809,11 @@ class _DebianSheetBodyState extends State<_DebianSheetBody>
   }
 
   String _progressLine() {
-    if (_installed) return 'Linux 环境已就绪（本机唯一一套）';
-    if (!_busy) return '未安装 · 共约 4.2 MB，进度按真实接收字节统计';
+    if (_installed) {
+      final String distro = (_status['distro'] ?? '').toString();
+      return '${distro.isEmpty ? 'Linux 用户态' : distro} 已就绪（本机唯一一套）';
+    }
+    if (!_busy) return '未安装 · 共 $_sizeLabel，进度按真实接收字节统计';
     if (_phase == 'extract') return '正在解包…';
     final String tot = _total > 0 ? ' / ${_mb(_total)}' : '';
     final String sp = _speed > 1 ? ' · ${_mb(_speed)}/s' : '';
@@ -726,6 +823,11 @@ class _DebianSheetBodyState extends State<_DebianSheetBody>
   @override
   Widget build(BuildContext context) {
     final String error = (_status['error'] ?? '').toString();
+    final String installedLabel = <String>[
+      if ((_status['distro'] ?? '').toString().isNotEmpty)
+        '${_status['distro']}',
+      '${_status['rootfs']}',
+    ].join(' · ');
     final double? frac =
         _total > 0 ? (_received / _total).clamp(0.0, 1.0) : null;
     final double? barValue;
@@ -744,19 +846,22 @@ class _DebianSheetBodyState extends State<_DebianSheetBody>
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text('Linux 环境（proot 用户态）',
+          Text('Linux 用户态（proot）',
               style: const TextStyle(
                   color: _termGreen, fontSize: 14, fontFamily: 'monospace')),
           const SizedBox(height: 8),
           Text(
-              '下载 proot（UserLAnd arm64）+ Alpine 3.20 minirootfs，'
-              '解包后 apk/python/pip 在本机用户态真实执行；装好后它就是'
-              '安卓端唯一的一套 Linux 环境。',
+              _ubuntu
+                  ? '下载 proot（UserLAnd arm64）+ Ubuntu 24.04 base（约 $_sizeLabel），'
+                      '解包后 apt/dpkg 原生可用（pkg 为 apt-get 封装）、python/pip '
+                      '在本机用户态真实执行；已装 Alpine 老环境保持原样。'
+                  : '下载 proot（UserLAnd arm64）+ Alpine 3.20 minirootfs（约 $_sizeLabel），'
+                      '解包后 apk/python/pip 在本机用户态真实执行；pkg/apt 映射到 apk。',
               style: const TextStyle(
                   color: _termDim, fontSize: 12, height: 1.4)),
           const SizedBox(height: 12),
           if (_installed)
-            Text('已安装：${_status['rootfs']}',
+            Text('已安装：$installedLabel',
                 style: const TextStyle(
                     color: _termGreen, fontSize: 12, fontFamily: 'monospace'))
           else ...<Widget>[

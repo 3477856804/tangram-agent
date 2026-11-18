@@ -15,45 +15,43 @@ import 'flai_theme.dart';
 class TangramColors {
   TangramColors._();
 
-  // 表面：页面底色云雾白 #F7F9F7（67%），卡片 / 输入区纯白（25%），靠色差分层。
-  static const Color background = Color(0xFFF7F9F7);
-  static const Color backgroundAlt = Color(0xFFF2F5F3);
+  // 表面：冷白底 #F6F7FB，卡片 / 输入区纯白，靠色差与轻阴影分层。
+  static const Color background = Color(0xFFF6F7FB);
+  static const Color backgroundAlt = Color(0xFFF3F5FA);
   static const Color surface = Color(0xFFFFFFFF);
-  static const Color surfaceHigh = Color(0xFFF7F9F7);
-  static const Color surfaceRaised = Color(0xFFF1F4F6);
+  static const Color surfaceHigh = Color(0xFFF8F9FC);
+  static const Color surfaceRaised = Color(0xFFF1F3F9);
 
-  // 文本：墨黑 / 贝壳灰
-  static const Color textPrimary = Color(0xFF111111);
-  static const Color textSecondary = Color(0xFF64748B);
-  // textMuted 原为 #8A97A8，白底对比度仅 2.97:1（低于 WCAG AA 4.5:1），
-  // 次要文字在浅色下偏淡。提到 #64748B（4.6:1），与 secondary 齐平以达标；
-  // caption 仍用更浅的 #A3AEBD 保留层次（仅用于极不重要的角标）。
-  static const Color textMuted = Color(0xFF64748B);
-  static const Color textCaption = Color(0xFFA3AEBD);
+  // 文本：墨黑 / 石墨灰
+  static const Color textPrimary = Color(0xFF17181C);
+  static const Color textSecondary = Color(0xFF5F6673);
+  // 次要文字保持 WCAG AA：白底 5.6:1。
+  static const Color textMuted = Color(0xFF5F6673);
+  static const Color textCaption = Color(0xFFA0A5B2);
 
-  // 描边（海盐蓝 #B9DDD7 透明度阶梯）
-  static const Color borderL1 = Color(0x14B9DDD7);
-  static const Color borderL2 = Color(0x29B9DDD7);
-  static const Color borderL3 = Color(0xFFB9DDD7);
-  static const Color borderL4 = Color(0x4DB9DDD7);
+  // 描边：中性冷灰阶梯（替换原先偏绿的海盐蓝）。
+  static const Color borderL1 = Color(0xFFEFF1F6);
+  static const Color borderL2 = Color(0xFFE7EAF2);
+  static const Color borderL3 = Color(0xFFDDE1EB);
+  static const Color borderL4 = Color(0xFFC9CFDE);
 
-  // 品牌 / 点缀：深星蓝 #4A90D9，只上主按钮与选中态（8% 纪律）。
-  static const Color brand = Color(0xFF4A90D9);
-  static const Color brandDimmed = Color(0xFFE4EEF7);
+  // 品牌 / 点缀：蓝紫 #4D6BFE，只上主按钮与选中态。
+  static const Color brand = Color(0xFF4D6BFE);
+  static const Color brandDimmed = Color(0xFFE8ECFF);
   static const Color onBrand = Color(0xFFFFFFFF);
 
-  static const Color accent = Color(0xFF4A90D9);
-  static const Color accentSoft = Color(0xFFE4EEF7);
+  static const Color accent = Color(0xFF4D6BFE);
+  static const Color accentSoft = Color(0xFFE8ECFF);
 
   // 旧字段：语义对齐
-  static const Color ruiMu = Color(0xFF111111);
-  static const Color ruiMuLight = Color(0xFF64748B);
-  static const Color tanMu = Color(0xFFA3AEBD);
-  static const Color jade = Color(0xFF4A90D9);
-  static const Color jadeDeep = Color(0xFF2563EB);
+  static const Color ruiMu = Color(0xFF17181C);
+  static const Color ruiMuLight = Color(0xFF5F6673);
+  static const Color tanMu = Color(0xFFA0A5B2);
+  static const Color jade = Color(0xFF4D6BFE);
+  static const Color jadeDeep = Color(0xFF3D5AFE);
   static const Color gold = Color(0xFFD97706);
   static const Color goldLight = Color(0xFFF59E0B);
-  static const Color violet = Color(0xFF8B5CF6);
+  static const Color violet = Color(0xFF7C5CFF);
   static const Color magenta = Color(0xFFDC2626);
 
   // 状态（浅色语义）
@@ -66,47 +64,45 @@ class TangramColors {
   static const Color idle = Color(0xFFCBD2D9);
 
   // 用户气泡
-  static const Color bubble = Color(0xFFE4EEF7);
+  static const Color bubble = Color(0xFFEAEEFF);
 }
 
 /// 深色模式色板（极夜黑 / 深海盐蓝 / 柔光星蓝），与 DshPalette.dark 同源。
 class TangramColorsDark {
   TangramColorsDark._();
 
-  static const Color background = Color(0xFF141618);
-  static const Color backgroundAlt = Color(0xFF1B2027);
-  static const Color surface = Color(0xFF212B36);
-  static const Color surfaceHigh = Color(0xFF26313C);
-  static const Color surfaceRaised = Color(0xFF2A3540);
+  static const Color background = Color(0xFF0E1014);
+  static const Color backgroundAlt = Color(0xFF12151B);
+  static const Color surface = Color(0xFF171A21);
+  static const Color surfaceHigh = Color(0xFF1C2029);
+  static const Color surfaceRaised = Color(0xFF232833);
 
-  static const Color textPrimary = Color(0xFFE2E8F0);
-  static const Color textSecondary = Color(0xFF94A3B8);
-  // textMuted 原为 #7A8899，落在思考块容器上时对比度仅 3.66:1（截图里
-  // 深色模式整段文字发暗的根因）。提到 #94A3B8（7.07:1）达标；caption
-  // 保持 #64748B 仅作极次要角标。
-  static const Color textMuted = Color(0xFF94A3B8);
-  static const Color textCaption = Color(0xFF64748B);
+  static const Color textPrimary = Color(0xFFEDEFF5);
+  static const Color textSecondary = Color(0xFFA0A7B5);
+  // 深色下 7:1+，在卡片/思考块上仍可读。
+  static const Color textMuted = Color(0xFFA0A7B5);
+  static const Color textCaption = Color(0xFF6B7280);
 
-  static const Color borderL1 = Color(0xFF262E36);
-  static const Color borderL2 = Color(0xFF303A44);
-  static const Color borderL3 = Color(0xFF38444D);
-  static const Color borderL4 = Color(0xFF46545F);
+  static const Color borderL1 = Color(0xFF232833);
+  static const Color borderL2 = Color(0xFF2A3040);
+  static const Color borderL3 = Color(0xFF333A4A);
+  static const Color borderL4 = Color(0xFF414A5E);
 
-  static const Color brand = Color(0xFF7BB5E3);
-  static const Color brandDimmed = Color(0xFF2A3A4A);
-  static const Color onBrand = Color(0xFF141618);
+  static const Color brand = Color(0xFF8C9BFF);
+  static const Color brandDimmed = Color(0xFF262E4D);
+  static const Color onBrand = Color(0xFF0E1014);
 
-  static const Color accent = Color(0xFF7BB5E3);
-  static const Color accentSoft = Color(0xFF24344A);
+  static const Color accent = Color(0xFF8C9BFF);
+  static const Color accentSoft = Color(0xFF252D4D);
 
-  static const Color ruiMu = Color(0xFFE2E8F0);
-  static const Color ruiMuLight = Color(0xFF94A3B8);
-  static const Color tanMu = Color(0xFF64748B);
-  static const Color jade = Color(0xFF7BB5E3);
-  static const Color jadeDeep = Color(0xFF3B82F6);
+  static const Color ruiMu = Color(0xFFEDEFF5);
+  static const Color ruiMuLight = Color(0xFFA0A7B5);
+  static const Color tanMu = Color(0xFF6B7280);
+  static const Color jade = Color(0xFF8C9BFF);
+  static const Color jadeDeep = Color(0xFFA5B0FF);
   static const Color gold = Color(0xFFF59E0B);
   static const Color goldLight = Color(0xFFF7AD31);
-  static const Color violet = Color(0xFFA78BFA);
+  static const Color violet = Color(0xFFB4A0FF);
   static const Color magenta = Color(0xFFEF4444);
 
   static const Color success = Color(0xFF10B981);
@@ -117,7 +113,7 @@ class TangramColorsDark {
   static const Color dangerSoft = Color(0xFF3B1518);
   static const Color idle = Color(0xFF46545F);
 
-  static const Color bubble = Color(0xFF2A3A4A);
+  static const Color bubble = Color(0xFF232B4A);
 }
 
 /// dsh 不用渐变做层级；这里保留类型，全部收敛成平色/单色。

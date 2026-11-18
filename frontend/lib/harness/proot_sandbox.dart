@@ -1,4 +1,7 @@
-/// Android 本地 Debian 用户态（proot）——「内置沙箱」终端的 Linux 扩展包。
+/// Android 本地 Linux 用户态（proot）——「内置沙箱」终端的 Linux 扩展包。
+/// 新装默认 Ubuntu 24.04 base（与 Termux 同级的普通用户态，仍走 proot，
+/// 不是独立内核）；已装 Alpine 3.20 的老环境按 READY.json 里的 profile
+/// 继续以 Alpine 运行，不受影响。
 ///
 /// 安卓本身只有 toybox（/system/bin/sh），没有 apt/pkg。本模块用真实链路
 /// 补上用户态 Linux：
@@ -7,12 +10,13 @@
 ///      - proot 静态 tracer（UserLAnd 官方 arm64 二进制，内嵌 loader，
 ///        DT_NEEDED 仅 libtalloc.so.2 + bionic libc/libdl）；
 ///      - libtalloc.so.2（配套动态库）；
-///      - Alpine minirootfs 3.20.3 aarch64（tar.gz，518 条目，纯 Dart
-///        可用 dart:io GZipCodec + 本文件内 tar 解析器解包）。
+///      - Ubuntu base 24.04.5 arm64（默认，29936675 B）或 Alpine
+///        minirootfs 3.20.3 aarch64（老环境兼容，3947906 B）；两者都是
+///        gzip tar，用 dart:io GZipCodec + 本文件内 tar 解析器解包。
 ///   2. 解包 rootfs 到 App 私有目录（文件/目录/符号链接/硬链接，
 ///      拒绝路径穿越），用系统 toybox chmod 恢复可执行位。
 ///   3. 命令执行：`proot -0 -l -r <rootfs> -b /dev -b /proc -b /sys
-///      /bin/sh -c <script>` —— apk/python/pip 等包命令在用户态里真跑。
+///      /bin/sh -c <script>` —— apt/apk/python/pip 等包命令在用户态里真跑。
 ///
 /// 前提：Android 10+ 对 targetSdk≥29 的应用禁止 exec 私有目录里的文件
 /// （SELinux app_data_file noexec）。本 APK 以 targetSdk=28 构建（自有
@@ -20,10 +24,11 @@
 /// 首次 exec 失败会把真实原因（EACCES/EPERM）如实回显并引导改用
 /// 「远端沙箱（SSH）」，绝不模拟成功。
 ///
-/// 三个 URL 均为 2026-11-14 curl 实测存在（GET 校验字节数与 gzip 完整性）：
+/// URL 均为实测存在（GET 校验字节数与 gzip 完整性）：
 ///   proot      231416 B  sha256 6bb2cb176d4a617fc0c4cd1a948075bc5ff1ddaf9ece306df0f2f0b52dbc8547
 ///   libtalloc   75648 B  sha256 81500585cc2dacbe1bdb687e0dd26e9c89cedbbcf0e609c5b905cc4705fabdd6
-///   rootfs    3947906 B  sha256 041fa34a81788242df9e78fa69b97ab45b8ec47ddbf88864755610414a7bf3de
+///   ubuntu   29936675 B  https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz
+///   alpine    3947906 B  sha256 041fa34a81788242df9e78fa69b97ab45b8ec47ddbf88864755610414a7bf3de
 
 
 import 'dart:async';
@@ -42,14 +47,47 @@ class ProotSandbox {
       'https://raw.githubusercontent.com/CypherpunkArmory/UserLAnd-Assets-Support/master/assets/arm64/proot';
   static const String kTallocUrl =
       'https://raw.githubusercontent.com/CypherpunkArmory/UserLAnd-Assets-Support/master/assets/arm64/libtalloc.so.2';
+
+  /// 新装默认 rootfs：Ubuntu 24.04 base arm64（gzip tar，约 30 MB）。
+  static const String kUbuntuRootfsUrl =
+      'https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz';
+
+  /// 老环境兼容：Alpine minirootfs 3.20.3 aarch64。
   static const String kRootfsUrl =
       'https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/aarch64/alpine-minirootfs-3.20.3-aarch64.tar.gz';
 
   static const int kProotBytes = 231416;
   static const int kTallocBytes = 75648;
+  static const int kUbuntuRootfsBytes = 29936675;
   static const int kRootfsBytes = 3947906;
 
-  static const String _rootfsName = 'tga-debian-alpine-rootfs.tar.gz';
+  /// 新装默认 profile；已装环境的 READY.json 没写 profile 时按 alpine 解释。
+  static const String kDefaultProfile = 'ubuntu';
+
+  static const String kUbuntuDistroName = 'ubuntu-base-24.04.5-base-arm64';
+  static const String kAlpineDistroName = 'alpine-minirootfs-3.20.3-aarch64';
+
+  static String normalizeProfile(String? raw) {
+    final String p = (raw ?? '').trim().toLowerCase();
+    return (p == 'alpine' || p == 'ubuntu') ? p : kDefaultProfile;
+  }
+
+  static String rootfsUrlFor(String profile) =>
+      profile == 'alpine' ? kRootfsUrl : kUbuntuRootfsUrl;
+
+  static int rootfsBytesFor(String profile) =>
+      profile == 'alpine' ? kRootfsBytes : kUbuntuRootfsBytes;
+
+  static String rootfsDistroFor(String profile) =>
+      profile == 'alpine' ? kAlpineDistroName : kUbuntuDistroName;
+
+  static String distroLabelFor(String profile) =>
+      profile == 'alpine' ? 'Alpine 3.20' : 'Ubuntu 24.04 base';
+
+  /// 解包用的临时压缩包名（按 profile 区分，避免旧 Alpine 包残留误用）。
+  static String rootfsArchiveFor(String profile) => profile == 'alpine'
+      ? 'tga-debian-alpine-rootfs.tar.gz'
+      : 'tga-ubuntu-24.04-base-arm64-rootfs.tar.gz';
 
   final HarnessStore store;
   final DownloadManager downloads;
@@ -60,15 +98,55 @@ class ProotSandbox {
   File get tallocLib => File('${extDir.path}/libtalloc.so.2');
   File get readyFile => File('${extDir.path}/READY.json');
 
+  /// 安装中的目标 profile（READY 落盘前也能给出正确口径；null = 不在安装）。
+  String? _installProfile;
+
+  Map<String, dynamic> _readyJson() {
+    try {
+      if (!readyFile.existsSync()) return const <String, dynamic>{};
+      final Object? v = jsonDecode(readyFile.readAsStringSync());
+      return v is Map ? Map<String, dynamic>.from(v) : const <String, dynamic>{};
+    } on Object {
+      return const <String, dynamic>{};
+    }
+  }
+
+  /// 当前生效 profile：
+  /// * 安装中 → 本次安装的目标 profile；
+  /// * 已装 → READY.json 的 profile / distro / rootfs；老版本没有 profile
+  ///   字段（当时只有 Alpine）一律按 alpine 解释；
+  /// * 未装 → 新装默认 ubuntu。
+  String get profile {
+    if (_installProfile != null) return _installProfile!;
+    if (!readyFile.existsSync()) return kDefaultProfile;
+    final Map<String, dynamic> m = _readyJson();
+    final String p = (m['profile'] ?? '').toString().toLowerCase();
+    if (p == 'alpine' || p == 'ubuntu') return p;
+    final String d = '${m['distro'] ?? ''} ${m['rootfs'] ?? ''}'.toLowerCase();
+    return d.contains('ubuntu') ? 'ubuntu' : 'alpine';
+  }
+
+  /// 供 UI / env_report 展示的发行版口径。
+  String get distroLabel => distroLabelFor(profile);
+
   /// 是否真正可用：READY 标记 + proot 二进制完整（>100KB）+ rootfs 里
-  /// 已有可执行的 /bin/busybox 与 /bin/sh。任一缺失都视为未装，避免
-  /// 「以为自己装了、结果跑不起来」的半成品状态。
+  /// 已有可执行的 /bin/sh，且该 profile 的关键文件存在：
+  /// * Alpine：/bin/busybox（/bin/sh 是指向绝对路径 /bin/busybox 的
+  ///   符号链接，宿主解析时目标不存在，只能用 _present 判断链接本身）；
+  /// * Ubuntu：/bin/bash 或 /usr/bin/apt-get。
   bool get installed =>
       readyFile.existsSync() &&
       prootBin.existsSync() &&
       prootBin.lengthSync() > 100000 &&
-      File('${rootfsDir.path}/bin/busybox').existsSync() &&
-      File('${rootfsDir.path}/bin/sh').existsSync();
+      _present('${rootfsDir.path}/bin/sh') &&
+      (profile == 'alpine'
+          ? File('${rootfsDir.path}/bin/busybox').existsSync()
+          : (File('${rootfsDir.path}/bin/bash').existsSync() ||
+              File('${rootfsDir.path}/usr/bin/apt-get').existsSync()));
+
+  static bool _present(String path) =>
+      FileSystemEntity.typeSync(path, followLinks: false) !=
+      FileSystemEntityType.notFound;
 
   // ---- 安装状态机（流式真实字节进度，失败如实记录）----
 
@@ -92,23 +170,31 @@ class ProotSandbox {
       _onProgress;
 
   Map<String, dynamic> status() {
+    final String p = profile;
+    final int rootfsBytes = rootfsBytesFor(p);
     final int total =
-        _total > 0 ? _total : kProotBytes + kTallocBytes + kRootfsBytes;
+        _total > 0 ? _total : kProotBytes + kTallocBytes + rootfsBytes;
+    final String pkg = p == 'alpine' ? 'apk/python/pip' : 'apt/dpkg/python/pip';
     return <String, dynamic>{
       'ok': true,
       'installed': installed,
       'step': installed && _step == 'idle' ? 'ready' : _step,
       'installing': _installing,
+      'profile': p,
+      'distro': distroLabelFor(p),
+      'rootfs_name': rootfsDistroFor(p),
       'downloaded': _received,
       'total': total,
+      'rootfs_bytes': rootfsBytes,
       'percent': total > 0 ? (_received * 100 / total).clamp(0, 100).toDouble() : 0.0,
       'speed': _speed,
       if (_error != null) 'error': _error,
       'rootfs': installed ? rootfsDir.path : '',
       'proot': prootBin.existsSync() ? prootBin.path : '',
-      'note': 'Alpine 3.20 minirootfs + proot（UserLAnd arm64 官方二进制），'
-          '共约 4.2 MB；流式下载按真实接收字节上报进度，'
-          'apk/python/pip 在用户态真实执行。',
+      'note': '${distroLabelFor(p)} + proot（UserLAnd arm64 官方二进制），'
+          '共约 ${(total / 1000000).toStringAsFixed(0)} MB；'
+          '流式下载按真实接收字节上报进度，'
+          '$pkg 在用户态真实执行。',
     };
   }
 
@@ -130,22 +216,29 @@ class ProotSandbox {
   /// 完成后解包 rootfs（phase='extract'）、恢复权限、写 resolv.conf
   /// 并落 READY 标记。方法本身立即返回，不阻塞 control 请求。
   Future<Map<String, dynamic>> install({
+    String profile = kDefaultProfile,
     void Function(String phase, int received, int total, double bytesPerSec)?
         onProgress,
   }) async {
+    final String target = normalizeProfile(profile);
     if (installed) {
-      return <String, dynamic>{'ok': true, 'note': 'Debian 用户态已就绪。'};
+      return <String, dynamic>{
+        'ok': true,
+        'profile': this.profile,
+        'note': '${distroLabel} 用户态已就绪。',
+      };
     }
     if (_installing) {
       return <String, dynamic>{'ok': true, 'note': '安装已在进行中。'};
     }
     _installing = true;
+    _installProfile = target;
     _error = null;
     _step = 'downloading';
     _onProgress = onProgress;
     _received = 0;
     _doneBytes = 0;
-    _total = kProotBytes + kTallocBytes + kRootfsBytes;
+    _total = kProotBytes + kTallocBytes + rootfsBytesFor(target);
     _speed = 0;
     _lastPhase = 'download';
     _lastReceived = 0;
@@ -154,26 +247,32 @@ class ProotSandbox {
     _winAt = DateTime.now();
     _winBytes = 0;
     _emitAt = DateTime.now();
-    unawaited(_runInstall());
+    unawaited(_runInstall(target));
     return <String, dynamic>{
       'ok': true,
-      'note': '真实流式下载中：进度按接收字节实时上报（约 4.2 MB）。',
+      'profile': target,
+      'note': '真实流式下载中：${distroLabelFor(target)}，'
+          '进度按接收字节实时上报（约 ${(_total / 1000000).toStringAsFixed(0)} MB）。',
     };
   }
 
-  Future<void> _runInstall() async {
+  Future<void> _runInstall(String profile) async {
     final http.Client client = http.Client();
     try {
       if (!extDir.existsSync()) extDir.createSync(recursive: true);
-      final File rootfsTmp = File('${extDir.path}/$_rootfsName');
-      await _downloadStream(client, kProotUrl, prootBin, kTallocBytes + kRootfsBytes);
-      await _downloadStream(client, kTallocUrl, tallocLib, kRootfsBytes);
-      await _downloadStream(client, kRootfsUrl, rootfsTmp, 0);
+      final int rootfsBytes = rootfsBytesFor(profile);
+      final File rootfsTmp =
+          File('${extDir.path}/${rootfsArchiveFor(profile)}');
+      await _downloadStream(
+          client, kProotUrl, prootBin, kTallocBytes + rootfsBytes);
+      await _downloadStream(client, kTallocUrl, tallocLib, rootfsBytes);
+      await _downloadStream(client, rootfsUrlFor(profile), rootfsTmp, 0);
 
       _step = 'extracting';
       _report('extract', _received, _total, 0);
 
       final bytes = await rootfsTmp.readAsBytes();
+      final int rootfsActual = bytes.length;
       final Uint8List tar =
           Uint8List.fromList(GZipCodec().decode(bytes));
       _extractTar(tar, rootfsDir);
@@ -192,9 +291,21 @@ class ProotSandbox {
       // 走 /workspace 就能直接看到（同一份磁盘，不是复制）。
       final Directory appSandbox = store.sub('sandbox');
       if (!appSandbox.existsSync()) appSandbox.createSync(recursive: true);
-      // Alpine minirootfs 不带可用 DNS 配置；写真实公共 DNS。
-      await File('${rootfsDir.path}/etc/resolv.conf')
-          .writeAsString('nameserver 8.8.8.8\nnameserver 1.1.1.1\n');
+      // ubuntu-base / Alpine minirootfs 都不带可用 DNS 配置；写真实公共 DNS。
+      // ubuntu-base 里 /etc/resolv.conf 可能是指向 /run 的符号链接，先删掉
+      // 链接本身再写普通文件，避免写入悬空目标导致安装失败。
+      final File resolv = File('${rootfsDir.path}/etc/resolv.conf');
+      if (FileSystemEntity.typeSync(resolv.path, followLinks: false) !=
+          FileSystemEntityType.notFound) {
+        await resolv.delete();
+      }
+      await resolv.writeAsString('nameserver 8.8.8.8\nnameserver 1.1.1.1\n');
+
+      // 兼容层按 profile 写入：
+      // * Ubuntu：apt/dpkg 原生可用，只补一个 pkg → apt-get 的封装；
+      // * Alpine：pkg / apt 两个 Termux 风格命令真实映射到 apk。
+      // 脚本失败不影响系统包管理器本体。
+      await _writeCompatShims(profile);
 
       // 恢复可执行位：tar 头里的 mode 无法用 dart:io 直接落位，
       // 统一交给系统 toybox chmod（系统二进制，任何 targetSdk 都可执行）。
@@ -204,17 +315,19 @@ class ProotSandbox {
       }
 
       // JS 运行时预装：QQ 沙箱直连走腾讯官方 dsh-qqbot（npx dsh），
-      // 依赖 node/npm。在 Alpine 初始化阶段用 apk 真实预装，使「扫码登录
-      // 后直接出码」链路成立。apk 从 Alpine 官方源拉取，失败如实记录到
-      // READY.json 的 js 字段，由 ensureJs() 在扫码前再幂等补装，绝不伪造。
-      final Map<String, dynamic> js = await provisionJs();
+      // 依赖 node/npm。Alpine 在初始化阶段用 apk 真实预装；Ubuntu 首次
+      // apt-get update/install 可能耗时数分钟，故安装阶段不预装，由
+      // ensureJs() 在扫码前按需真实补装，避免拖垮整体安装。
+      final Map<String, dynamic> js = await provisionJs(profile: profile);
 
       await readyFile.writeAsString(jsonEncode(<String, dynamic>{
         'installed_at': DateTime.now().toIso8601String(),
-        'rootfs': 'alpine-minirootfs-3.20.3-aarch64',
-        'proot_bytes': kProotBytes,
-        'talloc_bytes': kTallocBytes,
-        'rootfs_bytes': kRootfsBytes,
+        'profile': profile,
+        'distro': distroLabelFor(profile),
+        'rootfs': rootfsDistroFor(profile),
+        'proot_bytes': prootBin.lengthSync(),
+        'talloc_bytes': tallocLib.lengthSync(),
+        'rootfs_bytes': rootfsActual,
         'js': js,
       }), flush: true);
       _step = 'ready';
@@ -224,6 +337,7 @@ class ProotSandbox {
     } finally {
       client.close();
       _installing = false;
+      _installProfile = null;
     }
   }
 
@@ -317,6 +431,138 @@ class ProotSandbox {
     }
   }
 
+  bool _shimsReady = false;
+
+  /// Ubuntu 的 pkg 兼容层：只映射到 apt-get，绝不覆盖原生 apt/dpkg。
+  static const String _ubuntuPkgBody = '''#!/bin/sh
+# TGA: Ubuntu 环境，pkg 兼容层映射到 apt-get；原生 apt/dpkg 未被覆盖。
+cmd="\$1"; [ \$# -gt 0 ] && shift
+args=""
+for a in "\$@"; do
+  [ "\$a" = "-y" ] || [ "\$a" = "--yes" ] || args="\$args \$a"
+done
+case "\$cmd" in
+  install|add) exec apt-get install -y \$args ;;
+  uninstall|remove|purge) exec apt-get remove -y \$args ;;
+  update) exec apt-get update ;;
+  upgrade) exec apt-get upgrade -y ;;
+  search) exec apt-cache search \$args ;;
+  list-installed) exec dpkg -l ;;
+  *) exec apt-get "\$cmd" \$args ;;
+esac
+''';
+
+  /// 写入兼容脚本，按 profile 区分：
+  /// * Ubuntu：原生 apt/dpkg 保留，只写 pkg → apt-get（Termux 习惯）；
+  /// * Alpine：保持原有 pkg / apt → apk 映射，老环境完全不变。
+  Future<void> _writeCompatShims(String profile) async {
+    final String p = normalizeProfile(profile);
+    final Directory bin = Directory('${rootfsDir.path}/usr/local/bin');
+    if (!bin.existsSync()) bin.createSync(recursive: true);
+    const String aptBody = '''#!/bin/sh
+# TGA: Alpine 环境，apt 兼容层映射到 apk。
+cmd="\$1"; [ \$# -gt 0 ] && shift
+args=""
+for a in "\$@"; do
+  [ "\$a" = "-y" ] || [ "\$a" = "--yes" ] || args="\$args \$a"
+done
+case "\$cmd" in
+  install) exec apk add \$args ;;
+  remove|purge) exec apk del \$args ;;
+  update) exec apk update ;;
+  upgrade) exec apk upgrade ;;
+  search) exec apk search \$args ;;
+  *) echo "TGA: 这是 Alpine 环境，apt 已映射到 apk；支持 install/remove/update/upgrade/search。" >&2; exit 2 ;;
+esac
+''';
+    const String pkgBody = '''#!/bin/sh
+# TGA: Termux 风格 pkg 兼容层，映射到 apk。
+cmd="\$1"; [ \$# -gt 0 ] && shift
+args=""
+for a in "\$@"; do
+  [ "\$a" = "-y" ] || [ "\$a" = "--yes" ] || args="\$args \$a"
+done
+case "\$cmd" in
+  install|add) exec apk add \$args ;;
+  uninstall|remove) exec apk del \$args ;;
+  update) exec apk update ;;
+  upgrade) exec apk upgrade ;;
+  search) exec apk search \$args ;;
+  list-installed) exec apk info ;;
+  *) exec apk "\$cmd" \$args ;;
+esac
+''';
+    try {
+      final List<String> written = <String>[];
+      if (p == 'alpine') {
+        await File('${bin.path}/apt').writeAsString(aptBody, flush: true);
+        await File('${bin.path}/pkg').writeAsString(pkgBody, flush: true);
+        written.addAll(<String>['${bin.path}/apt', '${bin.path}/pkg']);
+      } else {
+        // Ubuntu：不写 /usr/local/bin/apt，保证原生 apt 行为不被拦截。
+        await File('${bin.path}/pkg')
+            .writeAsString(_ubuntuPkgBody, flush: true);
+        written.add('${bin.path}/pkg');
+      }
+      final String chmod = Platform.isAndroid ? '/system/bin/chmod' : 'chmod';
+      await Process.run(chmod, <String>['755', ...written]);
+      _shimsReady = true;
+    } on Object {
+      // 只读 rootfs 等异常不阻断；用户仍可直接用系统包管理器。
+    }
+  }
+
+  /// 已装用户的兼容层补齐：Ubuntu 只要求 pkg；Alpine 要求 pkg + apt。
+  Future<void> _ensureCompatShims() async {
+    if (_shimsReady) return;
+    if (!installed) return;
+    final String p = profile;
+    final Directory bin = Directory('${rootfsDir.path}/usr/local/bin');
+    final List<String> needed = p == 'alpine'
+        ? <String>['pkg', 'apt']
+        : <String>['pkg'];
+    if (needed.every((String n) => File('${bin.path}/$n').existsSync())) {
+      _shimsReady = true;
+      return;
+    }
+    await _writeCompatShims(p);
+  }
+
+  /// Android/Termux 式用户态绑定：读取已授权、可写、未禁用的 link 映射，
+  /// 用 proot `-b host:/mnt/tga/<id>` 挂进 Linux。无需 root，也不复制文件。
+  /// 只读映射不在此绑定（proot -b 不能可靠降为只读），继续走 copy。
+  Future<List<String>> _workspaceBindArgs() async {
+    try {
+      final List<dynamic> raw = await store.readList('workspace_mappings.json');
+      final List<String> args = <String>[];
+      for (final dynamic item in raw) {
+        if (item is! Map) continue;
+        final Map<String, dynamic> m = Map<String, dynamic>.from(item);
+        if (m['enabled'] == false) continue;
+        if ((m['bind_mode'] ?? '') != 'link') continue;
+        if ((m['access'] ?? 'rw') == 'ro') continue;
+        final String host = (m['link_target'] ?? '').toString();
+        final String id = (m['id'] ?? '').toString();
+        if (host.isEmpty || id.isEmpty) continue;
+        final String p = host.replaceAll('\\', '/').toLowerCase();
+        const List<String> deny = <String>[
+          '/etc', '/proc', '/sys', '/dev', '/boot', '/root',
+          '.ssh', '.gnupg', '.aws', '.config/gcloud',
+          'id_rsa', 'id_ed25519', 'credentials', 'secrets', '.env',
+        ];
+        if (deny.any(p.contains)) continue;
+        if (!Directory(host).existsSync()) continue;
+        final String guest = '/mnt/tga/$id';
+        Directory('${rootfsDir.path}$guest').createSync(recursive: true);
+        args.addAll(<String>['-b', '$host:$guest']);
+      }
+      return args;
+    } on Object {
+      // 映射文件缺失/损坏不影响终端本身。
+      return const <String>[];
+    }
+  }
+
   // ---- 真实执行：proot 里跑 /bin/sh ----
 
   /// 已安装则用 proot 用户态真实执行；未安装返回 null（调用方回退
@@ -328,6 +574,7 @@ class ProotSandbox {
     Duration timeout = const Duration(seconds: 60),
   }) async {
     if (requireInstalled && !installed) return null;
+    if (installed) await _ensureCompatShims();
     final String guestCwd = cwd == '.'
         ? '/root'
         : (cwd.startsWith('/') ? cwd : '/root/$cwd');
@@ -342,6 +589,7 @@ class ProotSandbox {
     if (!prootTmp.existsSync()) prootTmp.createSync(recursive: true);
     final Directory appSandbox = store.sub('sandbox');
     if (!appSandbox.existsSync()) appSandbox.createSync(recursive: true);
+    final List<String> bindArgs = await _workspaceBindArgs();
 
     Process proc;
     try {
@@ -361,6 +609,7 @@ class ProotSandbox {
           // 工作区与 App 沙箱共用同一份磁盘：Linux 里 /workspace 就是它。
           '-b',
           '${appSandbox.path}:/workspace',
+          ...bindArgs,
           '/bin/sh',
           '-c',
           script,
@@ -381,7 +630,7 @@ class ProotSandbox {
       return <String, dynamic>{
         'ok': false,
         'stdout': '',
-        'error': 'Debian 用户态无法启动（${e.errorCode} ${e.message}）。'
+        'error': 'Linux 用户态无法启动（${e.errorCode} ${e.message}）。'
             'Android 10+ 若 ROM 强制禁止执行应用私有目录文件'
             '（SELinux app_data_file noexec），proot 无法运行；'
             '请改用「远端沙箱（SSH）」在真实 Linux 上跑 apt。',
@@ -434,10 +683,22 @@ class ProotSandbox {
 
   // ---- JS 运行时（nodejs/npm）：QQ 沙箱直连 dsh-qqbot 的真实前置依赖 ----
 
-  /// 在 Alpine 用户态里真实执行 `apk add nodejs npm`，返回结构化结果。
-  /// 安装阶段调用（此时 READY 未落盘，故 requireInstalled=false）；
-  /// 失败如实返回 ok:false + error，绝不伪造成功。
-  Future<Map<String, dynamic>> provisionJs() async {
+  /// 安装阶段的 JS 运行时准备，按 profile 区分：
+  /// * Alpine：真实执行 `apk add --no-cache nodejs npm`；
+  /// * Ubuntu：不在安装阶段预装（apt-get update + install 可能数分钟，
+  ///   且网络失败会拖垮整个安装），如实返回未预装，由 ensureJs() 在
+  ///   QQ 扫码前按需真实补装。
+  /// 安装阶段调用时 READY 未落盘，故 requireInstalled=false；
+  /// 失败如实返回 ok:false，绝不伪造成功。
+  Future<Map<String, dynamic>> provisionJs({String? profile}) async {
+    final String p = normalizeProfile(profile ?? this.profile);
+    if (p == 'ubuntu') {
+      return <String, dynamic>{
+        'ok': false,
+        'skipped': true,
+        'reason': 'debian: node 未预装，首次使用前按需安装',
+      };
+    }
     // apk 需要 DNS/源可达，安装阶段 resolv.conf 已写好；给足超时。
     final Map<String, dynamic>? r = await run(
       'if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then '
@@ -449,6 +710,27 @@ class ProotSandbox {
       requireInstalled: false,
       timeout: const Duration(seconds: 300),
     );
+    return _jsResult(r);
+  }
+
+  /// Ubuntu 按需补装：`apt-get update && DEBIAN_FRONTEND=noninteractive
+  /// apt-get install -y nodejs npm`，真实执行、真实回传。
+  Future<Map<String, dynamic>> _aptProvisionJs() async {
+    final Map<String, dynamic>? r = await run(
+      'if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then '
+      'echo "already: \$(node --version) / \$(npm --version)"; exit 0; fi; '
+      'export DEBIAN_FRONTEND=noninteractive; '
+      'apt-get update 2>&1 && apt-get install -y nodejs npm 2>&1; '
+      'if command -v node >/dev/null 2>&1; then echo "js-ready: \$(node --version)"; '
+      'else echo "js-missing"; exit 1; fi',
+      '.',
+      requireInstalled: false,
+      timeout: const Duration(minutes: 10),
+    );
+    return _jsResult(r);
+  }
+
+  Map<String, dynamic> _jsResult(Map<String, dynamic>? r) {
     if (r == null) {
       return <String, dynamic>{
         'ok': false,
@@ -467,6 +749,7 @@ class ProotSandbox {
   }
 
   /// 幂等确保 node/npm 可用：查询 READY.json 的安装结果，缺失则补装。
+  /// Ubuntu 在安装阶段不预装 node，这里按需执行真实 apt-get 安装。
   /// 供 QQ 扫码 start() 在启动 dsh 前调用；返回真实状态。
   Future<Map<String, dynamic>> ensureJs() async {
     if (!installed) {
@@ -475,7 +758,7 @@ class ProotSandbox {
         'error': 'Linux 沙箱尚未就绪，无法准备 JS 运行时',
       };
     }
-    // 先真实探测一次，避免重复 apk add。
+    // 先真实探测一次，避免重复安装。
     final Map<String, dynamic>? probe = await run('command -v node && node --version', '.');
     if (probe != null && probe['ok'] == true &&
         (probe['stdout'] ?? '').toString().trim().isNotEmpty) {
@@ -485,7 +768,8 @@ class ProotSandbox {
         'note': 'JS 运行时已在沙箱中就绪',
       };
     }
-    final Map<String, dynamic> r = await provisionJs();
+    final Map<String, dynamic> r =
+        profile == 'ubuntu' ? await _aptProvisionJs() : await provisionJs();
     if (r['ok'] == true) {
       return <String, dynamic>{
         'ok': true,

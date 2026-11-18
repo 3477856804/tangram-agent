@@ -389,3 +389,45 @@ def analyze(prices: Iterable[float], symbol: str = "UNKNOWN") -> dict[str, Any]:
     }
     assert_compliant(result)
     return result
+
+
+def backtest(
+    candles: Sequence[Any],
+    strategy: str | Any = "ma_cross",
+    *,
+    config: Any = None,
+    **strategy_kwargs: Any,
+) -> dict[str, Any]:
+    """回测薄封装：调用 ``app.runtime.backtest`` 的事件驱动引擎。
+
+    ``strategy`` 可以是内置策略名（``"ma_cross"`` / ``"rsi_reversion"``）或
+    一个 ``Strategy`` 实例；``strategy_kwargs`` 透传给内置策略构造函数，
+    ``config`` 为 ``BacktestConfig`` 或等价的 dict。数据不足/非法时如实抛错。
+    """
+    from .backtest import BacktestConfig, Backtester, MaCross, RsiReversion, Strategy
+
+    if isinstance(strategy, Strategy):
+        engine_strategy = strategy
+    elif isinstance(strategy, str):
+        key = strategy.strip().lower().replace("-", "_")
+        if key in ("ma_cross", "macross"):
+            engine_strategy = MaCross(**strategy_kwargs)
+        elif key in ("rsi_reversion", "rsireversion"):
+            engine_strategy = RsiReversion(**strategy_kwargs)
+        else:
+            raise ValueError(
+                f"未知策略 {strategy!r}，可选：'ma_cross' / 'rsi_reversion'"
+            )
+    else:
+        raise TypeError("strategy 必须是策略名或 Strategy 实例")
+
+    if config is None:
+        engine_config = BacktestConfig()
+    elif isinstance(config, BacktestConfig):
+        engine_config = config
+    elif isinstance(config, dict):
+        engine_config = BacktestConfig(**config)
+    else:
+        raise TypeError("config 必须是 BacktestConfig、dict 或 None")
+
+    return Backtester(engine_config).run(candles, engine_strategy)

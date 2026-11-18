@@ -8,6 +8,8 @@ import 'package:provider/provider.dart';
 import '../../bridge/backend_client.dart';
 import '../../bridge/bridge_protocol.dart';
 import '../../design/tga_design.dart';
+import '../../harness/explanation_level.dart';
+import '../../harness/store.dart';
 import '../../services/persona_store.dart';
 import '../../services/task_scheduler.dart';
 
@@ -432,6 +434,7 @@ class _IdentitySubPageState extends State<_IdentitySubPage> {
   ];
   int _tab = 0;
   late final List<TextEditingController> _controllers;
+  AudienceLevel _audience = AudienceLevel.auto;
 
   @override
   void initState() {
@@ -443,6 +446,38 @@ class _IdentitySubPageState extends State<_IdentitySubPage> {
       TextEditingController(text: p.personality),
       TextEditingController(text: p.audience),
     ];
+    _loadAudience();
+  }
+
+  /// 读取真实落盘的讲解层级偏好；失败时保持 auto，不打扰用户。
+  Future<void> _loadAudience() async {
+    try {
+      final HarnessStore store = await HarnessStore.instance();
+      final AudienceLevel level = await ExplanationLevelPref.load(store);
+      if (!mounted) return;
+      setState(() => _audience = level);
+    } on Object {
+      // 读取失败静默回退 auto。
+    }
+  }
+
+  /// 选择即保存；保存失败如实提示并回退到上一个选项。
+  Future<void> _setAudience(AudienceLevel level) async {
+    if (level == _audience) return;
+    final AudienceLevel previous = _audience;
+    setState(() => _audience = level);
+    try {
+      final HarnessStore store = await HarnessStore.instance();
+      final bool ok = await ExplanationLevelPref.save(store, level);
+      if (ok) return;
+      if (!mounted) return;
+      setState(() => _audience = previous);
+      _toast(context, '讲解层级保存失败，请稍后重试');
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() => _audience = previous);
+      _toast(context, '讲解层级保存失败：$e');
+    }
   }
 
   @override
@@ -520,6 +555,43 @@ class _IdentitySubPageState extends State<_IdentitySubPage> {
           const SizedBox(height: 14),
           TgaCard(
             child: Text(_hintFor(_tabs[_tab]), style: Tga.sub),
+          ),
+          const SizedBox(height: 14),
+          const TgaGroupTitle('讲解层级'),
+          TgaCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text('按你的水平调整讲解深度，选择后立即保存并应用于后续对话。',
+                    style: Tga.sub),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: <Widget>[
+                    for (final AudienceLevel level in AudienceLevel.values)
+                      ChoiceChip(
+                        label: Text(
+                          level.label,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            color: _audience == level
+                                ? Tga.onPrimary
+                                : Tga.text,
+                          ),
+                        ),
+                        selected: _audience == level,
+                        selectedColor: Tga.primary,
+                        backgroundColor: Tga.cardAlt,
+                        side: BorderSide(color: Tga.border),
+                        onSelected: (bool selected) {
+                          if (selected) _setAudience(level);
+                        },
+                      ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ],
       ),

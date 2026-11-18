@@ -14,8 +14,15 @@ STEP / STL。build123d 是可选依赖（pip install build123d），未安装时
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+# 参考项目 build123d（Apache-2.0）源码已 vendor 到 third_party/build123d，
+# 优先使用仓库内源码；OCCT 原生依赖仍需用户在环境里安装。
+_VENDORED_BUILD123D = Path(__file__).resolve().parents[3] / "third_party" / "build123d"
+if _VENDORED_BUILD123D.is_dir() and str(_VENDORED_BUILD123D) not in sys.path:
+    sys.path.insert(0, str(_VENDORED_BUILD123D))
 
 
 class CadError(RuntimeError):

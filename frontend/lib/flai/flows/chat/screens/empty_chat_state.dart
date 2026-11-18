@@ -68,15 +68,35 @@ class FlaiEmptyChatState extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
-            // 设计稿 2026-11-13 用户反馈：去掉鹿标外的白色圆角卡片背景，
-            // 直接显示 logo 图片本身（尺寸保持 56）。
-            // 品牌标、问候语、副标题、快捷指令依次错落淡入：像人打开
-            // 一个新会话时的节奏，而不是整屏「啪」地一次性出现。
+            // 品牌标、问候语、副标题、快捷指令依次错落淡入；品牌标外加
+            // 一层蓝紫径向光晕，弱化机械感（豆包式柔和背景）。
             // 系统开启「减少动态效果」时 DshFadeSlideIn 会自动退化为直出。
             DshFadeSlideIn(
               duration: DshMotion.entrance,
               offsetY: 10,
-              child: TangramGlyph(size: 56, color: c.labelPrimary),
+              child: SizedBox(
+                width: 132,
+                height: 132,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: <Widget>[
+                    Container(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: RadialGradient(
+                          colors: <Color>[
+                            c.brandPrimary.withValues(alpha: 0.18),
+                            c.brandPrimary.withValues(alpha: 0.05),
+                            Colors.transparent,
+                          ],
+                          stops: const <double>[0, 0.55, 1],
+                        ),
+                      ),
+                    ),
+                    TangramGlyph(size: 56, color: c.labelPrimary),
+                  ],
+                ),
+              ),
             ),
             const SizedBox(height: DshSpace.x24),
             DshFadeSlideIn(
@@ -88,9 +108,10 @@ class FlaiEmptyChatState extends StatelessWidget {
                 child: Text(
                   title,
                   style: DshType.s14m.copyWith(
-                    fontSize: 24,
-                    height: 32 / 24,
+                    fontSize: 26,
+                    height: 34 / 26,
                     fontWeight: FontWeight.w700,
+                    letterSpacing: -0.4,
                     color: c.labelPrimary,
                   ),
                   textAlign: TextAlign.center,
