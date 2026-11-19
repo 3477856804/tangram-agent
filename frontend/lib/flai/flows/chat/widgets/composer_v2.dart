@@ -185,6 +185,12 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
       final String size = a.sizeBytes == null
           ? '大小未知'
           : _humanSize(a.sizeBytes!);
+      // 图片走真实本地路径：内嵌后端会把它交给带 mmproj 的视觉模型；
+      // 不再当成二进制附件只登记元信息。
+      if (a.mimeType?.startsWith('image/') == true && a.file.existsSync()) {
+        buf.writeln('[图片] ${a.file.path}');
+        continue;
+      }
       buf.writeln('[附件] ${a.name}（${a.mimeType ?? '未知类型'}，$size）');
       final String? content = _readTextAttachment(a);
       if (content != null) {

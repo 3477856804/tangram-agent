@@ -86,12 +86,16 @@ class LocalInference {
 
   LlamaEngine? _engine;
   String? _loadedPath;
+  String? _projectorPath;
   bool _loading = false;
   String? _lastError;
 
   bool get isLoaded => _engine != null && _loadedPath != null;
   String? get loadedPath => _loadedPath;
   String? get lastError => _lastError;
+
+  /// 当前模型是否已挂载 mmproj 多模态投影器（视觉/音频输入）。
+  bool get hasProjector => _projectorPath != null;
 
   /// 累计推理指标（真实生成次数、token 数、平均延迟、前缀命中率）。
   Map<String, dynamic> get metrics => planner.metrics();
@@ -214,6 +218,7 @@ class LocalInference {
           ).timeout(Duration(seconds: p.timeout));
           _engine = engine;
           _loadedPath = modelPath;
+          await _attachProjector(engine, modelPath);
           return true;
         } on Object catch (e) {
           lastFailure = e;
@@ -278,6 +283,29 @@ class LocalInference {
     }
   }
 
+  /// 同一目录下的 mmproj*.gguf 自动挂载为多模态投影器。
+  /// 没有投影器时保持纯文本，不影响正常对话。
+  Future<void> _attachProjector(LlamaEngine engine, String modelPath) async {
+    _projectorPath = null;
+    try {
+      final Directory dir = File(modelPath).parent;
+      final List<File> candidates = dir.listSync().whereType<File>().where((
+        File f,
+      ) {
+        final String n = f.path.toLowerCase();
+        return n.endsWith('.gguf') && n.contains('mmproj');
+      }).toList()..sort((File a, File b) => a.path.compareTo(b.path));
+      if (candidates.isEmpty) return;
+      await engine
+          .loadMultimodalProjector(candidates.first.path)
+          .timeout(const Duration(seconds: 180));
+      _projectorPath = candidates.first.path;
+    } on Object {
+      // 投影器不兼容时退回文本推理，由调用方按 hasProjector 判断能否收图。
+      _projectorPath = null;
+    }
+  }
+
   /// 读取文件头 4 字节校验 GGUF 魔数。返回 null 表示合法；否则返回可读错误。
   Future<String?> _checkGgufMagic(File f) => checkGgufMagicFile(f);
 
@@ -326,10 +354,19 @@ class LocalInference {
     String text, {
     String system = PromptKit.defaultSystem,
     int maxTokens = 512,
+    List<String> imagePaths = const <String>[],
   }) async {
     final engine = _engine;
     if (engine == null) {
       return const LocalInferenceResult(ok: false, error: '端侧模型尚未加载');
+    }
+    if (imagePaths.isNotEmpty && !hasProjector) {
+      return const LocalInferenceResult(
+        ok: false,
+        error:
+            '当前模型没有 mmproj 多模态投影器，无法读取图片。'
+            '请把同仓库的 mmproj*.gguf 一起下载到模型目录后重新运行。',
+      );
     }
     final GenerationPlan plan = planner.plan(
       system: system,
@@ -343,7 +380,17 @@ class LocalInference {
           role: LlamaChatRole.system,
           text: plan.stableSystem,
         ),
-        LlamaChatMessage.fromText(role: LlamaChatRole.user, text: text),
+        if (imagePaths.isEmpty)
+          LlamaChatMessage.fromText(role: LlamaChatRole.user, text: text)
+        else
+          LlamaChatMessage.withContent(
+            role: LlamaChatRole.user,
+            content: <LlamaContentPart>[
+              LlamaTextContent(text),
+              for (final String path in imagePaths)
+                LlamaImageContent(path: path),
+            ],
+          ),
       ];
       final completion = await engine.complete(
         messages,
@@ -394,18 +441,20 @@ class LocalInference {
     String modelPath,
     String text, {
     String system = PromptKit.defaultSystem,
+    List<String> imagePaths = const <String>[],
   }) async {
     final err = await load(modelPath);
     if (err != null) {
       return LocalInferenceResult(ok: false, error: err, modelPath: modelPath);
     }
-    return infer(text, system: system);
+    return infer(text, system: system, imagePaths: imagePaths);
   }
 
   Future<void> dispose() async {
     final e = _engine;
     _engine = null;
     _loadedPath = null;
+    _projectorPath = null;
     if (e != null) {
       try {
         await e.dispose();

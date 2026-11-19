@@ -18,7 +18,6 @@
 ///
 /// 绝不填充示例数据、绝不静默降级、绝不谎称已连接外部服务。
 
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -75,7 +74,10 @@ import 'package:tangram/services/update_service.dart';
 
 /// 后端一次 dispatch 的结果：结构化 payload + 可选的 hot-path 事件。
 class BackendReply {
-  const BackendReply(this.payload, {this.events = const <Map<String, dynamic>>[]});
+  const BackendReply(
+    this.payload, {
+    this.events = const <Map<String, dynamic>>[],
+  });
   final Map<String, dynamic> payload;
   final List<Map<String, dynamic>> events;
 }
@@ -117,8 +119,11 @@ class EmbeddedBackend implements QqShellRunner {
   late final SnapshotService snapshots = SnapshotService(store);
 
   /// Agent 应用市场：行业工作站模板安装 / 导入 / 导出。
-  late final AppPackageService appPackages =
-      AppPackageService(store, workflows, knowledge);
+  late final AppPackageService appPackages = AppPackageService(
+    store,
+    workflows,
+    knowledge,
+  );
 
   /// 团队协作沙箱：本机协作空间 + 角色权限 + 审计日志。
   late final TeamSpaceService team = TeamSpaceService(store);
@@ -134,10 +139,10 @@ class EmbeddedBackend implements QqShellRunner {
   ExperienceLibrary experienceLibrary() => ExperienceLibrary(store);
   AccountOps accountOps() => AccountOps(store, send: accountOpsSend);
   VideoStudio videoStudio() => VideoStudio(
-        store,
-        shell: (String command, String cwd) =>
-            _shellExec(<String, dynamic>{'command': command, 'cwd': cwd}),
-      );
+    store,
+    shell: (String command, String cwd) =>
+        _shellExec(<String, dynamic>{'command': command, 'cwd': cwd}),
+  );
 
   /// Creator 运行时：带上真实内核、对话与 shell，激活后立即可用。
   Future<CreatorRuntime> createCreatorRuntime() async {
@@ -158,11 +163,7 @@ class EmbeddedBackend implements QqShellRunner {
           };
         }
         final McpCallResult r = await client.callTool(tool, args);
-        return <String, dynamic>{
-          'ok': r.ok,
-          'text': r.text,
-          'error': r.error,
-        };
+        return <String, dynamic>{'ok': r.ok, 'text': r.text, 'error': r.error};
       },
     );
   }
@@ -170,10 +171,14 @@ class EmbeddedBackend implements QqShellRunner {
   /// 账号运营发布：按草稿里的渠道推送到已接入的真实 IM 通道；
   /// 未登录/未配置的渠道由 IM 网关如实返回错误，不伪造成功。
   Future<Map<String, dynamic>> accountOpsSend(
-      String channel, Map<String, dynamic> payload) async {
+    String channel,
+    Map<String, dynamic> payload,
+  ) async {
     final String grantKey = 'account.publish|$channel';
-    PolicyDecision decision =
-        (await _policyEngine()).evaluate(tool: 'account.publish', args: channel);
+    PolicyDecision decision = (await _policyEngine()).evaluate(
+      tool: 'account.publish',
+      args: channel,
+    );
     // ask 命中的一次性放行凭据：批准后重试同一渠道即直接放行，不再重复建单。
     if (decision == PolicyDecision.ask && await _consumeGrant(grantKey)) {
       decision = PolicyDecision.allow;
@@ -224,6 +229,7 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// Android「Debian 用户态（proot）」扩展包：真实下载/解包/proot 执行。
   late final ProotSandbox proot = ProotSandbox(store, downloads);
+
   /// MCP 真实接入：HTTP/SSE 传输的服务端工具会被注册进 [tools]，
   /// 由内置 AgentLoop 直接调用；stdio 传输移动端无法 spawn 进程，如实跳过。
   final Map<String, McpClient> _mcpClients = <String, McpClient>{};
@@ -256,18 +262,47 @@ class EmbeddedBackend implements QqShellRunner {
   static const String version = kAppVersion;
 
   static const List<String> controlDomains = <String>[
-    'capability_negotiation', 'rpc', 'chat', 'agent_command', 'code_task',
-    'model_route', 'model_store', 'distill', 'device_file', 'memory_event',
-    'proactive_task', 'security_approval', 'plugin_lifecycle',
-    'plugin_community', 'plugin_kernel', 'super_agent', 'im_event',
-    'knowledge_base', 'workflow', 'snapshot', 'model_group', 'app_market',
-    'team_space', 'compute', 'workspace_mapping', 'web_search',
-    'responsibility_trace', 'update_status',
-    'dependency_event', 'perception_event', 'reload', 'status', 'ping', 'echo',
+    'capability_negotiation',
+    'rpc',
+    'chat',
+    'agent_command',
+    'code_task',
+    'model_route',
+    'model_store',
+    'distill',
+    'device_file',
+    'memory_event',
+    'proactive_task',
+    'security_approval',
+    'plugin_lifecycle',
+    'plugin_community',
+    'plugin_kernel',
+    'super_agent',
+    'im_event',
+    'knowledge_base',
+    'workflow',
+    'snapshot',
+    'model_group',
+    'app_market',
+    'team_space',
+    'compute',
+    'workspace_mapping',
+    'web_search',
+    'responsibility_trace',
+    'update_status',
+    'dependency_event',
+    'perception_event',
+    'reload',
+    'status',
+    'ping',
+    'echo',
   ];
 
   static const List<String> hotPathTopics = <String>[
-    'stream_token', 'trajectory', 'download_progress', 'sandbox_result',
+    'stream_token',
+    'trajectory',
+    'download_progress',
+    'sandbox_result',
   ];
 
   Future<void> _initDefaults() async {
@@ -280,7 +315,9 @@ class EmbeddedBackend implements QqShellRunner {
     final rules = await store.readRecords('proactive_rules');
     if (rules.isEmpty) {
       await store.insert('proactive_rules', <String, dynamic>{
-        'title': '每日工作回顾', 'enabled': 1, 'ts': _now(),
+        'title': '每日工作回顾',
+        'enabled': 1,
+        'ts': _now(),
         'name': '每日工作回顾',
       });
     }
@@ -312,38 +349,43 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// 把内核所需能力绑定到本后端的真实实现。
   KernelHost _kernelHost() => KernelHost(
-        tools: tools,
-        chat: (Map<String, dynamic> p) => _chat(p),
-        shell: (String command, String cwd) => _shellExec(<String, dynamic>{
-          'command': command,
-          'cwd': cwd,
-        }),
-        cube: (String cube, Map<String, dynamic> args) async {
-          final r = await SandboxedShell.instance.exec(cube, args);
-          return r.toJson();
-        },
-        skills: () async => store.scanFiles('skills',
-            extensions: <String>{'.md', '.json'}),
-        mcpSync: () => _mcpSync(),
-        imStatus: () => <String, dynamic>{
-          'ok': true,
-          'adapters': im.adapters().map((a) => a.toJson()).toList(),
-        },
-        records: (String key) => store.readRecords(key),
-        insertRecord: (String key, Map<String, dynamic> record) =>
-            store.insert(key, record),
-        readJson: (String file) => store.readJson(file),
-        writeJson: (String file, Object? value) => store.writeJson(file, value),
-        writable: () => store.writable,
-        dataDir: () => store.root.path,
-        // 页面清单：插件内核与 Super Agent 是内置核心，不暴露操作页，
-        // 因此这里不再列出 plugins / kernel / super_agent。
-        uiPages: () => const <String>[
-          'training', 'persona', 'sandbox', 'store',
-          'workspace', 'model3d', 'channels', 'models', 'graph',
-        ],
-        sandboxEnvironment: () => _sandboxEnvironment(),
-      );
+    tools: tools,
+    chat: (Map<String, dynamic> p) => _chat(p),
+    shell: (String command, String cwd) =>
+        _shellExec(<String, dynamic>{'command': command, 'cwd': cwd}),
+    cube: (String cube, Map<String, dynamic> args) async {
+      final r = await SandboxedShell.instance.exec(cube, args);
+      return r.toJson();
+    },
+    skills: () async =>
+        store.scanFiles('skills', extensions: <String>{'.md', '.json'}),
+    mcpSync: () => _mcpSync(),
+    imStatus: () => <String, dynamic>{
+      'ok': true,
+      'adapters': im.adapters().map((a) => a.toJson()).toList(),
+    },
+    records: (String key) => store.readRecords(key),
+    insertRecord: (String key, Map<String, dynamic> record) =>
+        store.insert(key, record),
+    readJson: (String file) => store.readJson(file),
+    writeJson: (String file, Object? value) => store.writeJson(file, value),
+    writable: () => store.writable,
+    dataDir: () => store.root.path,
+    // 页面清单：插件内核与 Super Agent 是内置核心，不暴露操作页，
+    // 因此这里不再列出 plugins / kernel / super_agent。
+    uiPages: () => const <String>[
+      'training',
+      'persona',
+      'sandbox',
+      'store',
+      'workspace',
+      'model3d',
+      'channels',
+      'models',
+      'graph',
+    ],
+    sandboxEnvironment: () => _sandboxEnvironment(),
+  );
 
   Future<void> _bootKernel() async {
     final Directory kernelDir = store.sub('kernel');
@@ -401,15 +443,16 @@ class EmbeddedBackend implements QqShellRunner {
   }
 
   /// 目录映射分发：统一补上平台链接能力与每个 mapping 的 mode/link_target。
-  Future<Map<String, dynamic>> _workspaceMapping(
-      Map<String, dynamic> p) async {
+  Future<Map<String, dynamic>> _workspaceMapping(Map<String, dynamic> p) async {
     final Map<String, dynamic> result = await workspaceMappings.handle(
-        _action(p, 'list'), p);
+      _action(p, 'list'),
+      p,
+    );
     final bool bindSupported = WorkspaceMappingService.bindSupported;
     if (result['mappings'] is List) {
-      result['mappings'] = (result['mappings'] as List)
-          .whereType<Map>()
-          .map((Map e) {
+      result['mappings'] = (result['mappings'] as List).whereType<Map>().map((
+        Map e,
+      ) {
         final Map<String, dynamic> m = Map<String, dynamic>.from(e);
         m['bind_mode'] = (m['bind_mode'] ?? 'copy').toString();
         m['link_target'] = (m['link_target'] ?? '').toString();
@@ -444,11 +487,16 @@ class EmbeddedBackend implements QqShellRunner {
         'plugin_kernel' => await _onPluginKernel(payload),
         'super_agent' => await _onSuperAgent(payload),
         'knowledge_base' => await knowledge.handle(
-            _action(payload, 'list'), payload),
+          _action(payload, 'list'),
+          payload,
+        ),
         'workflow' => await workflows.handle(_action(payload, 'list'), payload),
         'snapshot' => await snapshots.handle(_action(payload, 'list'), payload),
         'model_group' => await _modelGroup(payload),
-        'app_market' => await appPackages.handle(_action(payload, 'list'), payload),
+        'app_market' => await appPackages.handle(
+          _action(payload, 'list'),
+          payload,
+        ),
         'team_space' => await team.handle(_action(payload, 'list'), payload),
         'compute' => await _onCompute(payload),
         'workspace_mapping' => await _workspaceMapping(payload),
@@ -465,16 +513,22 @@ class EmbeddedBackend implements QqShellRunner {
       };
       return BackendReply(result, events: drainEvents());
     } on Object catch (e) {
-      return BackendReply(_err('$topic 执行失败：${e.runtimeType}: $e'),
-          events: drainEvents());
+      return BackendReply(
+        _err('$topic 执行失败：${e.runtimeType}: $e'),
+        events: drainEvents(),
+      );
     }
   }
 
-  Map<String, dynamic> _ok([Map<String, dynamic>? extra]) =>
-      <String, dynamic>{'ok': true, ...?extra};
+  Map<String, dynamic> _ok([Map<String, dynamic>? extra]) => <String, dynamic>{
+    'ok': true,
+    ...?extra,
+  };
 
-  Map<String, dynamic> _err(String message) =>
-      <String, dynamic>{'ok': false, 'error': message};
+  Map<String, dynamic> _err(String message) => <String, dynamic>{
+    'ok': false,
+    'error': message,
+  };
 
   String _action(Map<String, dynamic> p, [String fallback = '']) =>
       (p['action'] ?? fallback).toString();
@@ -498,86 +552,94 @@ class EmbeddedBackend implements QqShellRunner {
   // ---- capability_negotiation：真实能力清单 ----
 
   Map<String, dynamic> _capabilities() => <String, dynamic>{
-        'ok': true,
-        'name': 'tangram-in-process-harness',
-        'version': version,
-        'transport': 'in-process-dart',
-        'runtime': 'Dart ${Platform.version.split(' ').first}',
-        'backend': 'pure-dart',
-        'python': 'not-used',
-        'control_domains': controlDomains,
-        'hot_path_topics': hotPathTopics,
-        'multimodal_channels': <String>['text'],
-        'realtime_categories': <String>['chat', 'tool', 'trajectory'],
-        'ready': true,
-        'tools': tools.names,
-        'streaming': true,
-        'local_inference': true,
-        'data_dir': store.root.path,
-        // 万物皆插件内核 + Super Agent：如实报告装配状态（未就绪不谎称）。
-        'plugin_kernel': <String, dynamic>{
-          'architecture': 'everything-is-a-plugin (Cordis-style)',
-          'booted': _kernel?.booted ?? false,
-          'mounted': _kernel?.mountedCount ?? 0,
-          'seams': _kernel?.seamCount ?? 0,
-          'run_modes': RunMode.values.map((RunMode m) => m.label).toList(),
-        },
-        'super_agent': <String, dynamic>{
-          'architecture': 'router-worker + triggers + two-stage-filter + watchdog',
-          'initialized': _superAgent?.initialized ?? false,
-          'observe_default': true,
-        },
-        'knowledge_base': <String, dynamic>{
-          'architecture': 'multi-library + local-bm25 + citation + snapshot',
-          'storage': 'app-private-json',
-          'cloud_upload': false,
-        },
-        'workflow': <String, dynamic>{
-          'architecture': 'sequential prompt/shell/knowledge steps + batch + daily trigger',
-          'storage': 'app-private-json',
-        },
-        'snapshot': <String, dynamic>{
-          'architecture': 'local file copies + sha256 manifest + auto pre-restore backup',
-          'cloud_enabled': false,
-        },
-        'model_group': <String, dynamic>{
-          'architecture': 'parallel members + cross-compare + moderator synthesis',
-          'max_members': 6,
-          'key_isolation': true,
-        },
-        'app_market': <String, dynamic>{
-          'architecture': 'persona + workflows + knowledge + permission preset bundle',
-          'payment_enabled': false,
-        },
-        'team_space': <String, dynamic>{
-          'architecture': 'local shared dir + roles + append-only audit log',
-          'cross_device_sync': false,
-        },
-        'creator': <String, dynamic>{
-          'architecture': 'declarative manifest + validate + hot activate into kernel',
-          'actions': <String>['prompt', 'http', 'shell'],
-        },
-        'experience': <String, dynamic>{
-          'architecture': 'local BM25 patterns + heuristic/model adaptation',
-        },
-        'account_ops': <String, dynamic>{
-          'architecture': 'credential-ref only + human approval + audit + real IM send',
-        },
-        'video_studio': <String, dynamic>{
-          'architecture': 'ffmpeg command builder + injected sandbox shell + job records',
-        },
-        'ui_customization': <String, dynamic>{
-          'architecture': 'theme/layout presets + import/export + global/project scope',
-        },
-        'compute': <String, dynamic>{
-          'architecture': 'hardware probe + quant/backend/route recommendation + queues',
-          'executes_models': false,
-        },
-        'workspace_mapping': <String, dynamic>{
-          'architecture': 'host dir <-> sandbox file sync with sensitive-path deny',
-          'bind_mount': false,
-        },
-      };
+    'ok': true,
+    'name': 'tangram-in-process-harness',
+    'version': version,
+    'transport': 'in-process-dart',
+    'runtime': 'Dart ${Platform.version.split(' ').first}',
+    'backend': 'pure-dart',
+    'python': 'not-used',
+    'control_domains': controlDomains,
+    'hot_path_topics': hotPathTopics,
+    'multimodal_channels': <String>['text'],
+    'realtime_categories': <String>['chat', 'tool', 'trajectory'],
+    'ready': true,
+    'tools': tools.names,
+    'streaming': true,
+    'local_inference': true,
+    'data_dir': store.root.path,
+    // 万物皆插件内核 + Super Agent：如实报告装配状态（未就绪不谎称）。
+    'plugin_kernel': <String, dynamic>{
+      'architecture': 'everything-is-a-plugin (Cordis-style)',
+      'booted': _kernel?.booted ?? false,
+      'mounted': _kernel?.mountedCount ?? 0,
+      'seams': _kernel?.seamCount ?? 0,
+      'run_modes': RunMode.values.map((RunMode m) => m.label).toList(),
+    },
+    'super_agent': <String, dynamic>{
+      'architecture': 'router-worker + triggers + two-stage-filter + watchdog',
+      'initialized': _superAgent?.initialized ?? false,
+      'observe_default': true,
+    },
+    'knowledge_base': <String, dynamic>{
+      'architecture': 'multi-library + local-bm25 + citation + snapshot',
+      'storage': 'app-private-json',
+      'cloud_upload': false,
+    },
+    'workflow': <String, dynamic>{
+      'architecture':
+          'sequential prompt/shell/knowledge steps + batch + daily trigger',
+      'storage': 'app-private-json',
+    },
+    'snapshot': <String, dynamic>{
+      'architecture':
+          'local file copies + sha256 manifest + auto pre-restore backup',
+      'cloud_enabled': false,
+    },
+    'model_group': <String, dynamic>{
+      'architecture': 'parallel members + cross-compare + moderator synthesis',
+      'max_members': 6,
+      'key_isolation': true,
+    },
+    'app_market': <String, dynamic>{
+      'architecture':
+          'persona + workflows + knowledge + permission preset bundle',
+      'payment_enabled': false,
+    },
+    'team_space': <String, dynamic>{
+      'architecture': 'local shared dir + roles + append-only audit log',
+      'cross_device_sync': false,
+    },
+    'creator': <String, dynamic>{
+      'architecture':
+          'declarative manifest + validate + hot activate into kernel',
+      'actions': <String>['prompt', 'http', 'shell'],
+    },
+    'experience': <String, dynamic>{
+      'architecture': 'local BM25 patterns + heuristic/model adaptation',
+    },
+    'account_ops': <String, dynamic>{
+      'architecture':
+          'credential-ref only + human approval + audit + real IM send',
+    },
+    'video_studio': <String, dynamic>{
+      'architecture':
+          'ffmpeg command builder + injected sandbox shell + job records',
+    },
+    'ui_customization': <String, dynamic>{
+      'architecture':
+          'theme/layout presets + import/export + global/project scope',
+    },
+    'compute': <String, dynamic>{
+      'architecture':
+          'hardware probe + quant/backend/route recommendation + queues',
+      'executes_models': false,
+    },
+    'workspace_mapping': <String, dynamic>{
+      'architecture': 'host dir <-> sandbox file sync with sensitive-path deny',
+      'bind_mount': false,
+    },
+  };
 
   // ---- rpc：真实策略 / 图 / 自检 / 激活指针 / 硬件 ----
 
@@ -595,8 +657,8 @@ class EmbeddedBackend implements QqShellRunner {
         final bool allowed = kind == 'module'
             ? !denied.contains(value.toLowerCase())
             : kind == 'url'
-                ? Uri.tryParse(value)?.hasScheme == true
-                : !value.contains('..');
+            ? Uri.tryParse(value)?.hasScheme == true
+            : !value.contains('..');
         return _ok(<String, dynamic>{
           'allowed': allowed,
           'reason': allowed ? '命中内置策略白名单' : '命中内置策略拒绝规则',
@@ -722,9 +784,7 @@ class EmbeddedBackend implements QqShellRunner {
     final Map<String, dynamic> caps = _capabilities();
     final dynamic rawKernel = caps['plugin_kernel'];
     final Map<String, dynamic> kernel = rawKernel is Map
-        ? rawKernel.map(
-            (Object? k, Object? v) => MapEntry(k.toString(), v),
-          )
+        ? rawKernel.map((Object? k, Object? v) => MapEntry(k.toString(), v))
         : <String, dynamic>{};
     final Map<String, dynamic> self = _selfTest();
     return <String, dynamic>{
@@ -757,16 +817,19 @@ class EmbeddedBackend implements QqShellRunner {
     int totalBytes = 0;
     var truncated = false;
     try {
-      await for (final FileSystemEntity entity
-          in store.root.list(followLinks: false)) {
+      await for (final FileSystemEntity entity in store.root.list(
+        followLinks: false,
+      )) {
         if (entity is! Directory) continue;
         int fileCount = 0;
         int bytes = 0;
         var dirTruncated = false;
         if (!truncated) {
           try {
-            await for (final FileSystemEntity child
-                in entity.list(recursive: true, followLinks: false)) {
+            await for (final FileSystemEntity child in entity.list(
+              recursive: true,
+              followLinks: false,
+            )) {
               if (child is! File) continue;
               if (totalFiles >= _kPerfFileLimit) {
                 truncated = true;
@@ -883,10 +946,12 @@ class EmbeddedBackend implements QqShellRunner {
     final q = <String, dynamic>{
       'cpu_percent': _asInt(p['cpu_percent'], cur['cpu_percent'] as int),
       'memory_mb': _asInt(p['memory_mb'], cur['memory_mb'] as int),
-      'timeout_seconds':
-          _asInt(p['timeout_seconds'], cur['timeout_seconds'] as int),
-      'action_on_exceed':
-          (p['action_on_exceed'] ?? cur['action_on_exceed']).toString(),
+      'timeout_seconds': _asInt(
+        p['timeout_seconds'],
+        cur['timeout_seconds'] as int,
+      ),
+      'action_on_exceed': (p['action_on_exceed'] ?? cur['action_on_exceed'])
+          .toString(),
     };
     if (q['cpu_percent'] < 1 || q['cpu_percent'] > 100) {
       return _err('CPU 上限需在 1~100 之间');
@@ -903,7 +968,10 @@ class EmbeddedBackend implements QqShellRunner {
       'environment': env.isEmpty ? await _sandboxEnvironment() : env,
       'updated_at': DateTime.now().toIso8601String(),
     });
-    return _ok(<String, dynamic>{'quota': q, 'environment': env.isEmpty ? await _sandboxEnvironment() : env});
+    return _ok(<String, dynamic>{
+      'quota': q,
+      'environment': env.isEmpty ? await _sandboxEnvironment() : env,
+    });
   }
 
   Future<Map<String, dynamic>> _graphQuery() async {
@@ -913,20 +981,27 @@ class EmbeddedBackend implements QqShellRunner {
     final wordRe = RegExp(r'[\u4e00-\u9fa5]{2,}|[A-Za-z]{3,}');
     for (final t in turns) {
       final text = (t['text'] ?? '').toString();
-      final words = wordRe.allMatches(text).map((m) => m.group(0)!).toSet().toList();
+      final words = wordRe
+          .allMatches(text)
+          .map((m) => m.group(0)!)
+          .toSet()
+          .toList();
       for (final w in words) {
         degree[w] = (degree[w] ?? 0) + 1;
       }
       for (var i = 0; i < words.length - 1; i++) {
         edges.add(<String, dynamic>{
-          'subject': words[i], 'predicate': 'co-occur', 'obj': words[i + 1],
+          'subject': words[i],
+          'predicate': 'co-occur',
+          'obj': words[i + 1],
         });
       }
     }
-    final nodes = degree.entries
-        .map((e) => <String, dynamic>{'name': e.key, 'degree': e.value})
-        .toList()
-      ..sort((a, b) => (b['degree'] as int).compareTo(a['degree'] as int));
+    final nodes =
+        degree.entries
+            .map((e) => <String, dynamic>{'name': e.key, 'degree': e.value})
+            .toList()
+          ..sort((a, b) => (b['degree'] as int).compareTo(a['degree'] as int));
     // 可扩展上限：默认 800 节点 / 2400 边，支持 >200 节点场景。
     // 前端图谱页已做视口裁剪、背面剔除、标签网格避让与分层，能承载该规模。
     return _ok(<String, dynamic>{
@@ -951,9 +1026,10 @@ class EmbeddedBackend implements QqShellRunner {
       'store_writable': store.writable,
       'safe_expression': SafeExpression.eval('2 + 3 * 4') == 14,
       'tool_registry': tools.length > 0,
-      'trajectory': TrajectorySnapshot('probe')
-          .append(TrajectoryCellKind.message, 'ok')
-          .length ==
+      'trajectory':
+          TrajectorySnapshot(
+            'probe',
+          ).append(TrajectoryCellKind.message, 'ok').length ==
           1,
       'cancel_token': _cancelTokenSelfTest(),
     };
@@ -1049,8 +1125,9 @@ class EmbeddedBackend implements QqShellRunner {
     try {
       if (Platform.isAndroid || Platform.isLinux) {
         final String info = await File('/proc/meminfo').readAsString();
-        final RegExpMatch? m =
-            RegExp(r'MemTotal:\s*(\d+)\s*kB').firstMatch(info);
+        final RegExpMatch? m = RegExp(
+          r'MemTotal:\s*(\d+)\s*kB',
+        ).firstMatch(info);
         final int kb = m != null ? int.tryParse(m.group(1)!) ?? 0 : 0;
         if (kb > 0) return kb / 1024 / 1024;
       } else if (Platform.isMacOS) {
@@ -1079,7 +1156,9 @@ class EmbeddedBackend implements QqShellRunner {
       'ok': true,
       'active': active['active'] ?? <String, dynamic>{'base': '', 'chat': ''},
       'models': files,
-      'quantization': files.isEmpty ? '' : _quantization(files.first['path'] as String),
+      'quantization': files.isEmpty
+          ? ''
+          : _quantization(files.first['path'] as String),
       'source': 'local-files',
     };
   }
@@ -1093,15 +1172,31 @@ class EmbeddedBackend implements QqShellRunner {
 
   // ---- chat / agent_command：真实 AgentLoop ----
 
+  /// 从输入区拼接的 `[图片] /abs/path` 标记里提取真实存在的图片路径。
+  /// 文件不存在时直接跳过，绝不把空路径交给视觉引擎。
+  List<String> _imagePathsFrom(String text) {
+    final Iterable<RegExpMatch> matches = RegExp(
+      r'^\[图片\]\s*(.+)$',
+      multiLine: true,
+    ).allMatches(text);
+    return <String>[
+      for (final RegExpMatch m in matches)
+        if (File(m.group(1)!.trim()).existsSync()) m.group(1)!.trim(),
+    ];
+  }
+
   Future<Map<String, dynamic>> _chat(Map<String, dynamic> p) async {
-    final text = (p['text'] ?? p['message'] ?? p['prompt'] ?? '').toString().trim();
+    final text = (p['text'] ?? p['message'] ?? p['prompt'] ?? '')
+        .toString()
+        .trim();
     // 会话边界：前端把当前会话 id 放进 metadata.conversationId，用于按会话
     // 隔离历史；未提供时退回 session_id，避免跨会话上下文串味。
     final dynamic meta = p['metadata'];
-    final String session = (p['session_id'] ??
-            (meta is Map ? meta['conversationId'] : null) ??
-            'default')
-        .toString();
+    final String session =
+        (p['session_id'] ??
+                (meta is Map ? meta['conversationId'] : null) ??
+                'default')
+            .toString();
     if (text.isEmpty) return _err('消息为空');
     // 每轮重置：该计数只用于判断"本轮云端是否已逐片投递"，不重置会让
     // 第二次对话的非流式路径误判为已投递而不再补分片。
@@ -1110,7 +1205,10 @@ class EmbeddedBackend implements QqShellRunner {
     final List<Map<String, dynamic>> history = _historyFrom(p);
 
     final turnId = await store.insert('turns', <String, dynamic>{
-      'session_id': session, 'role': 'user', 'text': text, 'ts': _now(),
+      'session_id': session,
+      'role': 'user',
+      'text': text,
+      'ts': _now(),
     });
 
     // 显式配置 OpenAI 兼容 API 时走真实网络推理；否则用内置 AgentLoop。
@@ -1133,18 +1231,20 @@ class EmbeddedBackend implements QqShellRunner {
     final bool freeApi = p['free'] == true;
     // 底座提示词单一真源：用户/人格未提供 system 时用 PromptKit 的结构化底座，
     // 而不是各处手写的单句「你是 TGA…」，保证行为要求一致且前缀稳定可缓存。
-    String effectiveSystem =
-        system.trim().isEmpty ? PromptKit.defaultSystem : system;
+    String effectiveSystem = system.trim().isEmpty
+        ? PromptKit.defaultSystem
+        : system;
     String modeSuffix = '';
     if (wantSearch) {
       // 问题 #4b：检索过程经 chat_status 热点事件真实上报，前端在
       // 流式气泡上方渲染状态条；results 解析自真实抓取摘要，绝不编造。
       _emit('chat_status', <String, dynamic>{
-        'phase': 'searching', 'query': text,
+        'phase': 'searching',
+        'query': text,
       });
       final results = await _webSearch(text);
       if (results.isEmpty) {
-effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
+        effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       } else {
         effectiveSystem += '\n\n【联网检索结果（真实抓取，需在回答中注明来源）】\n$results';
       }
@@ -1166,7 +1266,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     // 文件」。枚举失败静默跳过，不报错也不编造。
     final workspaceTree = _workspaceTreeBlock();
     if (workspaceTree.isNotEmpty) {
-      effectiveSystem += '\n\n【用户工作区文件（真实枚举）】\n$workspaceTree\n'
+      effectiveSystem +=
+          '\n\n【用户工作区文件（真实枚举）】\n$workspaceTree\n'
           '当用户问"工作区里有什么/能不能看见文件"时，依据此列表如实回答；'
           '可用 read_file 工具读取其中文件。';
     }
@@ -1200,7 +1301,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
     String reply;
     String engine;
-    if (apiBase.isNotEmpty && model.isNotEmpty &&
+    if (apiBase.isNotEmpty &&
+        model.isNotEmpty &&
         (apiKey.isNotEmpty || freeApi)) {
       // 1) 显式配置 OpenAI 兼容 API → 真实 HTTP 推理。
       String query = text;
@@ -1211,7 +1313,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           apiBase: apiBase,
           apiKey: apiKey,
           model: model,
-          text: '请把下面问题拆解为分步推理要点，只输出要点列表，'
+          text:
+              '请把下面问题拆解为分步推理要点，只输出要点列表，'
               '不要给出最终答案：\n$text',
           system: '你是严谨的推理规划器。',
           temperature: 0.3,
@@ -1220,7 +1323,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           history: history,
         );
         if (plan.ok) {
-          query = '参考以下推理要点，深入分析后作答：\n${plan.content}\n\n'
+          query =
+              '参考以下推理要点，深入分析后作答：\n${plan.content}\n\n'
               '问题：$text';
           // 把两遍推理的规划要点作为「思考过程」逐片真实发给 UI：
           // 前端 tangram_ai_provider 收到 thinking:true 的 stream_token
@@ -1253,7 +1357,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         text: query,
         system: wantThinking
             ? '请先在思考中拆解问题、检验假设、验证结论，再给出最终答案。'
-                '$effectiveSystem'
+                  '$effectiveSystem'
             : effectiveSystem,
         temperature: temperature,
         maxTokens: maxTokens,
@@ -1279,14 +1383,16 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         );
         engine = 'openai-compatible:$model$modeSuffix';
       } else {
-        reply = '外部推理调用失败：${remote.error}\n\n'
+        reply =
+            '外部推理调用失败：${remote.error}\n\n'
             '（已如实记录，未编造回答。可在模型选择器里切回内置引擎。）';
         engine = 'remote-failed';
       }
     } else if (localSelected) {
       // 2) 选中已下载的 GGUF 权重 → 端侧 llama.cpp 真推理（不编造回答）。
-      String localSystem =
-          effectiveSystem.trim().isEmpty ? PromptKit.defaultSystem : effectiveSystem;
+      String localSystem = effectiveSystem.trim().isEmpty
+          ? PromptKit.defaultSystem
+          : effectiveSystem;
       if (wantThinking) {
         localSystem = '${PromptKit.deepThinkPrefix}\n\n$localSystem';
       }
@@ -1299,14 +1405,23 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         }
         localSystem += past.toString();
       }
+      final String localText = text
+          .replaceAll(RegExp(r'^\[图片\].*$', multiLine: true), '')
+          .trim();
       final local = await LocalInference.instance.generate(
-          localPath, wantThinking ? '请深入思考后回答：$text' : text,
-          system: localSystem);
+        localPath,
+        wantThinking
+            ? '请深入思考后回答：${localText.isEmpty ? '请描述这张图片' : localText}'
+            : (localText.isEmpty ? '请描述这张图片' : localText),
+        system: localSystem,
+        imagePaths: _imagePathsFrom(text),
+      );
       if (local.ok) {
         reply = local.text;
         engine = 'llama.cpp[${local.modelPath.split('/').last}]$modeSuffix';
       } else {
-        reply = '端侧模型推理失败：${local.error}\n\n'
+        reply =
+            '端侧模型推理失败：${local.error}\n\n'
             '（已如实记录，未编造回答。请到「模型」页确认权重已下载完整，'
             '或在训练设置里配置 OpenAI 兼容 API。）';
         engine = 'local-inference-failed';
@@ -1318,18 +1433,25 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     }
 
     await store.insert('turns', <String, dynamic>{
-      'session_id': session, 'role': 'assistant', 'text': reply, 'ts': _now(),
+      'session_id': session,
+      'role': 'assistant',
+      'text': reply,
+      'ts': _now(),
     });
     await _appendTrace(<String, dynamic>{
-      'kind': 'chat', 'text': text, 'reply': reply, 'engine': engine, 'ts': _now(),
+      'kind': 'chat',
+      'text': text,
+      'reply': reply,
+      'engine': engine,
+      'ts': _now(),
     });
 
     // 流式 token 事件：云端真流式已在 onDelta 中逐片投递，不再重复整段；
     // 非流式路径（端侧 / 内置）仍按可见字符分片真实投递。
     // 注意：失败错误只作为一次性 reply 返回，不走这里分片，避免与前端兜底
     // 渲染各投一次、导致同一段错误在 UI 上重复显示两遍。
-    final bool failedEngine = engine == 'local-inference-failed' ||
-        engine == 'remote-failed';
+    final bool failedEngine =
+        engine == 'local-inference-failed' || engine == 'remote-failed';
     if (_streamedRemoteTokens < 1 && !failedEngine) {
       for (final chunk in _chunks(reply, 24)) {
         _emit('stream_token', <String, dynamic>{'token': chunk});
@@ -1384,14 +1506,18 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           e.uri.pathSegments.where((s) => s.isNotEmpty).last;
       String size(int bytes) {
         if (bytes < 1024) return '$bytes B';
-        if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+        if (bytes < 1024 * 1024)
+          return '${(bytes / 1024).toStringAsFixed(1)} KB';
         return '${(bytes / 1048576).toStringAsFixed(1)} MB';
       }
+
       void walk(Directory dir, String prefix, int depth) {
         if (depth > 2 || lines.length >= 80) return;
         final entries = dir.listSync(followLinks: false)
-          ..sort((FileSystemEntity a, FileSystemEntity b) =>
-              baseName(a).compareTo(baseName(b)));
+          ..sort(
+            (FileSystemEntity a, FileSystemEntity b) =>
+                baseName(a).compareTo(baseName(b)),
+          );
         for (final e in entries) {
           if (lines.length >= 80) return;
           final name = baseName(e);
@@ -1407,6 +1533,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           }
         }
       }
+
       walk(root, '', 1);
       return lines.join('\n');
     } on Object {
@@ -1453,8 +1580,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
   /// 跨会话长期记忆：turns 表真实落盘，取与本轮词项相关 / 最近的记录，
   /// 与当轮历史去重后注入 system，实现「新会话仍能召回长期事实」。
-  Future<String> _persistentMemoryBlock(String text, String session,
-      List<Map<String, dynamic>> history) async {
+  Future<String> _persistentMemoryBlock(
+    String text,
+    String session,
+    List<Map<String, dynamic>> history,
+  ) async {
     try {
       final turns = await store.readRecords('turns');
       if (turns.isEmpty) return '';
@@ -1462,7 +1592,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           .map((Map<String, dynamic> m) => m['content'].toString())
           .toSet();
       final List<String> terms = <String>{
-        ...text.toLowerCase().split(RegExp(r'[\s,，。？?！!、]+'))
+        ...text
+            .toLowerCase()
+            .split(RegExp(r'[\s,，。？?！!、]+'))
             .where((String s) => s.length >= 2),
       }.toList();
       int score(Map<String, dynamic> t) {
@@ -1473,9 +1605,12 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         }
         return s;
       }
+
       final List<Map<String, dynamic>> pool = turns.reversed.take(120).toList();
-      pool.sort((Map<String, dynamic> a, Map<String, dynamic> b) =>
-          score(b).compareTo(score(a)));
+      pool.sort(
+        (Map<String, dynamic> a, Map<String, dynamic> b) =>
+            score(b).compareTo(score(a)),
+      );
       final List<String> lines = <String>[];
       for (final Map<String, dynamic> t in pool) {
         if (lines.length >= 8) break;
@@ -1507,14 +1642,14 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         : 'apt/dpkg 原生可用（pkg 是 apt-get 的封装）、python3 / pip 可用';
     final String mode = android
         ? (proot.installed
-            ? '内置沙箱（安卓上唯一一套 Linux 用户态：proot + ${proot.distroLabel}；'
-                '$pkgHint，App 沙箱目录在 Linux 内是 /workspace）'
-            : '内置沙箱（安卓上唯一一套 Linux 用户态，当前尚未完成初始化；'
-                '首次执行命令会自动真实下载 proot + ${proot.distroLabel}，'
-                '装好前会如实返回进度）')
+              ? '内置沙箱（安卓上唯一一套 Linux 用户态：proot + ${proot.distroLabel}；'
+                    '$pkgHint，App 沙箱目录在 Linux 内是 /workspace）'
+              : '内置沙箱（安卓上唯一一套 Linux 用户态，当前尚未完成初始化；'
+                    '首次执行命令会自动真实下载 proot + ${proot.distroLabel}，'
+                    '装好前会如实返回进度）')
         : (env.contains('SSH')
-            ? '远端沙箱（SSH）：命令在远端 Linux 真实执行'
-            : '$env（系统真实 shell）');
+              ? '远端沙箱（SSH）：命令在远端 Linux 真实执行'
+              : '$env（系统真实 shell）');
     return '\n\n【你的 Linux 环境】$mode'
         '可以安装依赖、编译运行代码、读写文件、调用命令行工具。'
         '需要执行命令时，在回答中输出一个 tga-shell 代码块，格式严格为：\n'
@@ -1530,8 +1665,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   /// 模型发起 shell 工具调用的显式协议块。用专有标记而非通用 ```bash，
   /// 避免把回答里的普通代码示例误当成命令执行。
   static final RegExp _shellCallBlock = RegExp(
-      r'```tga-shell\s*\n([\s\S]*?)```',
-      caseSensitive: false);
+    r'```tga-shell\s*\n([\s\S]*?)```',
+    caseSensitive: false,
+  );
 
   /// 工具回环：真实执行模型给出的 shell 块，把输出回灌后让模型继续推理。
   /// 对不支持 function calling 的网关也生效；最多 3 轮防止死循环。
@@ -1548,12 +1684,14 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     required List<Map<String, dynamic>> history,
   }) async {
     final StringBuffer transcript = StringBuffer(first);
-    final List<Map<String, dynamic>> loopHistory =
-        <Map<String, dynamic>>[...history];
+    final List<Map<String, dynamic>> loopHistory = <Map<String, dynamic>>[
+      ...history,
+    ];
     String pending = first;
     for (int round = 0; round < 3; round++) {
-      final List<RegExpMatch> calls =
-          _shellCallBlock.allMatches(pending).toList();
+      final List<RegExpMatch> calls = _shellCallBlock
+          .allMatches(pending)
+          .toList();
       if (calls.isEmpty) break;
       final StringBuffer observations = StringBuffer();
       for (final RegExpMatch m in calls) {
@@ -1563,19 +1701,23 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           'phase': 'shell',
           'command': cmd.length > 200 ? cmd.substring(0, 200) : cmd,
         });
-        final ToolResult r =
-            await tools.run('shell', <String, dynamic>{'command': cmd});
+        final ToolResult r = await tools.run('shell', <String, dynamic>{
+          'command': cmd,
+        });
         final String out = r.ok ? r.content : '执行失败：${r.error}';
         observations.writeln('命令 `$cmd` 的真实输出：\n$out');
       }
       if (observations.isEmpty) break;
-      final String observationText =
-          '\n\n【沙箱执行结果（真实）】\n$observations\n';
+      final String observationText = '\n\n【沙箱执行结果（真实）】\n$observations\n';
       transcript.write(observationText);
       _emit('stream_token', <String, dynamic>{'token': observationText});
 
-      loopHistory.add(<String, dynamic>{'role': 'assistant', 'content': pending});
-      const String toolMsg = '以上是你刚才在沙箱里执行命令的真实输出。'
+      loopHistory.add(<String, dynamic>{
+        'role': 'assistant',
+        'content': pending,
+      });
+      const String toolMsg =
+          '以上是你刚才在沙箱里执行命令的真实输出。'
           '请据此继续完成任务并给出最终回答；如无必要，不要重复执行相同命令，'
           '也不要再输出 tga-shell 代码块。';
       final follow = await _remoteChat(
@@ -1637,7 +1779,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         .whereType<Map>()
         .map((Map e) => Map<String, dynamic>.from(e))
         .toList();
-    final String groupSystem = '你是多模型群聊中的一员。独立回答用户问题，'
+    final String groupSystem =
+        '你是多模型群聊中的一员。独立回答用户问题，'
         '先给结论再给依据；不确定的内容明确标注，不要编造事实。';
     final List<Map<String, dynamic>> replies = await Future.wait(
       members.map((Map<String, dynamic> m) async {
@@ -1699,8 +1842,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       }),
     );
     final List<Map<String, dynamic>> good = replies
-        .where((Map<String, dynamic> r) =>
-            r['ok'] == true && (r['reply'] ?? '').toString().trim().isNotEmpty)
+        .where(
+          (Map<String, dynamic> r) =>
+              r['ok'] == true &&
+              (r['reply'] ?? '').toString().trim().isNotEmpty,
+        )
         .toList();
     if (good.isEmpty) {
       return <String, dynamic>{
@@ -1715,10 +1861,14 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     for (int i = 0; i < good.length; i++) {
       final String reply = good[i]['reply'].toString();
       compare.writeln('【${i + 1}. ${good[i]['name']}】');
-      compare.writeln(reply.length > 3000 ? '${reply.substring(0, 3000)}…' : reply);
+      compare.writeln(
+        reply.length > 3000 ? '${reply.substring(0, 3000)}…' : reply,
+      );
     }
-    compare.writeln('请作为主持人：先列出一致结论，再指出分歧与各自依据，'
-        '最后给出你的裁决与仍不确定的部分；不要编造任何模型没说过的内容。');
+    compare.writeln(
+      '请作为主持人：先列出一致结论，再指出分歧与各自依据，'
+      '最后给出你的裁决与仍不确定的部分；不要编造任何模型没说过的内容。',
+    );
 
     String synthesis = '';
     String synthEngine = '';
@@ -1780,7 +1930,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     void Function(String delta)? onDelta,
   }) async {
     final uri = Uri.parse(
-        '${apiBase.replaceAll(RegExp(r'/+$'), '')}/chat/completions');
+      '${apiBase.replaceAll(RegExp(r'/+$'), '')}/chat/completions',
+    );
     final Map<String, String> headers = <String, String>{
       'Content-Type': 'application/json',
       // 免费端点（Kilo :free）实测不带 Authorization 头即可 200；
@@ -1813,13 +1964,18 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
             .timeout(const Duration(seconds: 90));
         if (resp.statusCode != 200) {
           final String raw = await utf8.decoder.bind(resp.stream).join();
-          return (ok: false, content: '',
-              error: 'HTTP ${resp.statusCode}：${_brief(raw)}');
+          return (
+            ok: false,
+            content: '',
+            error: 'HTTP ${resp.statusCode}：${_brief(raw)}',
+          );
         }
         final StringBuffer buf = StringBuffer();
         String carry = '';
         await for (final String chunk
-            in utf8.decoder.bind(resp.stream).timeout(const Duration(seconds: 90))) {
+            in utf8.decoder
+                .bind(resp.stream)
+                .timeout(const Duration(seconds: 90))) {
           carry += chunk;
           int nl;
           while ((nl = carry.indexOf('\n')) >= 0) {
@@ -1850,8 +2006,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         client.close();
       }
       final http.Response plain = await http
-          .post(uri, headers: headers,
-              body: jsonEncode(<String, dynamic>{...body, 'stream': false}))
+          .post(
+            uri,
+            headers: headers,
+            body: jsonEncode(<String, dynamic>{...body, 'stream': false}),
+          )
           .timeout(const Duration(seconds: 90));
       if (plain.statusCode != 200) {
         return (ok: false, content: '', error: 'HTTP ${plain.statusCode}');
@@ -1885,20 +2044,23 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     String session,
     Map<String, dynamic> p,
   ) async {
-    final trace = TrajectorySnapshot(text)
-        .append(TrajectoryCellKind.user, text);
+    final trace = TrajectorySnapshot(
+      text,
+    ).append(TrajectoryCellKind.user, text);
 
     // 1) 纯表达式（含常见数学问法）→ 真实求值工具
     final expr = _extractExpression(text);
     if (expr != null) {
-      final r = await tools.run('evaluate', <String, dynamic>{'expression': expr});
+      final r = await tools.run('evaluate', <String, dynamic>{
+        'expression': expr,
+      });
       final snap = trace
           .append(TrajectoryCellKind.tool, 'evaluate($expr)')
           .append(TrajectoryCellKind.result, r.content);
       _emit('trajectory', snap.toJson());
       return r.ok
           ? '计算结果：`$expr` = **${r.content}**\n\n'
-              '（由内置安全表达式求值器真实计算，沙箱内无 I/O、无副作用。）'
+                '（由内置安全表达式求值器真实计算，沙箱内无 I/O、无副作用。）'
           : '这个表达式没能求值：${r.error}';
     }
 
@@ -1923,8 +2085,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     _emit('trajectory', snap.toJson());
 
     final buf = StringBuffer();
-    buf.writeln('我是 **TGA 内置本地引擎**（纯 Dart AgentLoop），'
-        '当前没有加载外部大模型，所以不会编造一个看似聪明的答案。');
+    buf.writeln(
+      '我是 **TGA 内置本地引擎**（纯 Dart AgentLoop），'
+      '当前没有加载外部大模型，所以不会编造一个看似聪明的答案。',
+    );
     buf.writeln();
     if (hits.isNotEmpty) {
       buf.writeln('我在本地记忆里找到这些相关记录：');
@@ -1943,25 +2107,35 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     buf.writeln('- **记住事情**：输入 `/remember 项目X的截止日是周五`');
     buf.writeln('- **运行自测**：输入 `/selftest` 或 `运行测试`');
     buf.writeln();
-    buf.writeln('需要真正的语言模型对话，请在蒸馏面板配置 OpenAI 兼容 API 凭据，'
-        '或下载本地 GGUF 模型；配置后我会真实调用，绝不伪造回复。');
+    buf.writeln(
+      '需要真正的语言模型对话，请在蒸馏面板配置 OpenAI 兼容 API 凭据，'
+      '或下载本地 GGUF 模型；配置后我会真实调用，绝不伪造回复。',
+    );
     return buf.toString();
   }
 
   String? _extractExpression(String text) {
     var t = text.trim();
-    t = t.replaceAll(RegExp(r'^(请|帮我|计算|算一下|算算|求值|evaluate|calc)\s*[:：,，]?\s*',
-        caseSensitive: false), '');
+    t = t.replaceAll(
+      RegExp(
+        r'^(请|帮我|计算|算一下|算算|求值|evaluate|calc)\s*[:：,，]?\s*',
+        caseSensitive: false,
+      ),
+      '',
+    );
     t = t.replaceAll(RegExp(r'[?？。！!＝=]\s*$'), '').trim();
     // 允许数字、运算符、括号、白名单函数/变量、字符串、比较与三元。
-    final allowed = RegExp(r'^[\d\s\+\-\*/\%\(\)\.\,\?\:\<\>\!\&\|\"\x27A-Za-z_]+$');
+    final allowed = RegExp(
+      r'^[\d\s\+\-\*/\%\(\)\.\,\?\:\<\>\!\&\|\"\x27A-Za-z_]+$',
+    );
     if (!allowed.hasMatch(t)) return null;
     if (!RegExp(r'\d').hasMatch(t)) return null; // 至少有数字
     if (!RegExp(r'[\+\-\*/\%\(\)]').hasMatch(t)) return null; // 有运算
     // 排除可疑关键字
-    if (RegExp(r'\b(import|eval|exec|system|process|file|http|dart|new|var)\b',
-            caseSensitive: false)
-        .hasMatch(t)) {
+    if (RegExp(
+      r'\b(import|eval|exec|system|process|file|http|dart|new|var)\b',
+      caseSensitive: false,
+    ).hasMatch(t)) {
       return null;
     }
     try {
@@ -1989,20 +2163,30 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
   Future<String> _scrapeBing(String query) async {
     try {
-      final uri = Uri.https('cn.bing.com', '/search',
-          <String, String>{'q': query});
-      final resp = await http.get(uri, headers: <String, String>{
-        'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            ' (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-      }).timeout(const Duration(seconds: 8));
+      final uri = Uri.https('cn.bing.com', '/search', <String, String>{
+        'q': query,
+      });
+      final resp = await http
+          .get(
+            uri,
+            headers: <String, String>{
+              'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                  ' (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+              'Accept-Language': 'zh-CN,zh;q=0.9',
+            },
+          )
+          .timeout(const Duration(seconds: 8));
       if (resp.statusCode != 200) return '';
       final body = utf8.decode(resp.bodyBytes, allowMalformed: true);
       final itemRe = RegExp(
-          r'<li class="b_algo[^"]*">([\s\S]{0,1800}?)</li>', dotAll: true);
+        r'<li class="b_algo[^"]*">([\s\S]{0,1800}?)</li>',
+        dotAll: true,
+      );
       final linkRe = RegExp(
-          r'<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>', dotAll: true);
+        r'<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>',
+        dotAll: true,
+      );
       final snipRe = RegExp(r'<p[^>]*>([\s\S]*?)</p>', dotAll: true);
       final buf = StringBuffer();
       var n = 0;
@@ -2018,7 +2202,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         final snip = _stripTags(snipRe.firstMatch(block)?.group(1) ?? '');
         buf.writeln('$n. $title');
         if (snip.isNotEmpty) {
-          buf.writeln('   ${snip.length > 160 ? '${snip.substring(0, 160)}…' : snip}');
+          buf.writeln(
+            '   ${snip.length > 160 ? '${snip.substring(0, 160)}…' : snip}',
+          );
         }
         if (url.startsWith('http')) buf.writeln('   来源：$url');
       }
@@ -2030,27 +2216,39 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
   Future<String> _scrapeDdg(String query) async {
     try {
-      final uri = Uri.https('html.duckduckgo.com', '/html/',
-          <String, String>{'q': query});
+      final uri = Uri.https('html.duckduckgo.com', '/html/', <String, String>{
+        'q': query,
+      });
       final resp = await http
-          .get(uri, headers: <String, String>{
-            'User-Agent':
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
-          })
+          .get(
+            uri,
+            headers: <String, String>{
+              'User-Agent':
+                  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+            },
+          )
           .timeout(const Duration(seconds: 8));
       if (resp.statusCode != 200) return '';
       final body = utf8.decode(resp.bodyBytes, allowMalformed: true);
       final titleRe = RegExp(
-          r'<a[^>]*class="result__a"[^>]*>(.*?)</a>', dotAll: true);
+        r'<a[^>]*class="result__a"[^>]*>(.*?)</a>',
+        dotAll: true,
+      );
       final snipRe = RegExp(
-          r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>', dotAll: true);
+        r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
+        dotAll: true,
+      );
       final hrefRe = RegExp(
-          r'<a[^>]*class="result__a"[^>]*href="([^"]*)"', dotAll: true);
-      final titles = titleRe.allMatches(body)
+        r'<a[^>]*class="result__a"[^>]*href="([^"]*)"',
+        dotAll: true,
+      );
+      final titles = titleRe
+          .allMatches(body)
           .take(5)
           .map((m) => _stripTags(m.group(1)!))
           .toList();
-      final snips = snipRe.allMatches(body)
+      final snips = snipRe
+          .allMatches(body)
           .take(5)
           .map((m) => _stripTags(m.group(1)!))
           .toList();
@@ -2119,8 +2317,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           return ('sandbox_eval', <String, dynamic>{'expression': rest});
       }
     }
-    if (RegExp(r'你能做什么|有什么功能|能力|帮助|help', caseSensitive: false)
-            .hasMatch(t) &&
+    if (RegExp(r'你能做什么|有什么功能|能力|帮助|help', caseSensitive: false).hasMatch(t) &&
         t.length < 24) {
       return ('capabilities', <String, dynamic>{});
     }
@@ -2128,13 +2325,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         t.length < 20) {
       return ('self_test', <String, dynamic>{});
     }
-    if (RegExp(r'几点|现在时间|当前时间|今天几号|日期', caseSensitive: false)
-            .hasMatch(t) &&
+    if (RegExp(r'几点|现在时间|当前时间|今天几号|日期', caseSensitive: false).hasMatch(t) &&
         t.length < 20) {
       return ('current_time', <String, dynamic>{});
     }
-    if (RegExp(r'有哪些模型|模型列表|已下载模型', caseSensitive: false)
-            .hasMatch(t) &&
+    if (RegExp(r'有哪些模型|模型列表|已下载模型', caseSensitive: false).hasMatch(t) &&
         t.length < 20) {
       return ('list_models', <String, dynamic>{});
     }
@@ -2191,9 +2386,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
   List<String> _retrieve(String query, List<Map<String, dynamic>> turns) {
     final q = <String>{
-      ...RegExp(r'[\u4e00-\u9fa5]{2,}|[A-Za-z]{3,}|\d{2,}')
-          .allMatches(query)
-          .map((m) => m.group(0)!.toLowerCase()),
+      ...RegExp(
+        r'[\u4e00-\u9fa5]{2,}|[A-Za-z]{3,}|\d{2,}',
+      ).allMatches(query).map((m) => m.group(0)!.toLowerCase()),
     };
     if (q.isEmpty) return <String>[];
     final scored = <(String, int)>[];
@@ -2248,8 +2443,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           for (final t in tools.tools) {
             buf.writeln('- `${t.name}`（${t.tier.name}）：${t.description}');
           }
-          buf.writeln('\n控制域 ${controlDomains.length} 个：'
-              '${controlDomains.join('、')}');
+          buf.writeln(
+            '\n控制域 ${controlDomains.length} 个：'
+            '${controlDomains.join('、')}',
+          );
           return ToolResult.ok(buf.toString());
         },
       ),
@@ -2261,9 +2458,14 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           final r = await _selfTestAsync();
           final checks = r['checks'] as Map<String, dynamic>;
           final buf = StringBuffer(
-              '**内置自检：${r['status'] == 'ok' ? '全部通过' : '存在失败项'}**\n\n');
-          checks.forEach((k, v) => buf.writeln('- $k: ${v == true ? "通过" : "失败"}'));
-          buf.writeln('\n沙箱 cube：${SandboxedShell.instance.cubeNames.join('、')}');
+            '**内置自检：${r['status'] == 'ok' ? '全部通过' : '存在失败项'}**\n\n',
+          );
+          checks.forEach(
+            (k, v) => buf.writeln('- $k: ${v == true ? "通过" : "失败"}'),
+          );
+          buf.writeln(
+            '\n沙箱 cube：${SandboxedShell.instance.cubeNames.join('、')}',
+          );
           return ToolResult.ok(buf.toString());
         },
       ),
@@ -2296,9 +2498,14 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         description: '扫描本地真实已下载的模型文件',
         tier: ApprovalTier.read,
         execute: (args, _) async {
-          final files = store.scanFiles('models', extensions: <String>{'.gguf'});
-          final downloads = store.scanFiles('downloads',
-              extensions: <String>{'.gguf', '.bin'});
+          final files = store.scanFiles(
+            'models',
+            extensions: <String>{'.gguf'},
+          );
+          final downloads = store.scanFiles(
+            'downloads',
+            extensions: <String>{'.gguf', '.bin'},
+          );
           final buf = StringBuffer();
           buf.writeln('**本地模型（真实文件扫描）**');
           if (files.isEmpty) {
@@ -2315,16 +2522,23 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       ),
       AgentTool(
         name: 'model3d_generate',
-        description: '按用户描述生成 3D 模型并真实导出到沙箱 models3d/。'
+        description:
+            '按用户描述生成 3D 模型并真实导出到沙箱 models3d/。'
             '当前支持 cube（立方体）与 deer（品牌低模鹿），可导出 obj/stl；'
             '生成后会同时更新 3D 建模页当前模型。',
         tier: ApprovalTier.write,
         parameters: <String, dynamic>{
           'type': 'object',
           'properties': <String, dynamic>{
-            'kind': <String, dynamic>{'type': 'string', 'enum': <String>['cube', 'deer']},
+            'kind': <String, dynamic>{
+              'type': 'string',
+              'enum': <String>['cube', 'deer'],
+            },
             'scale': <String, dynamic>{'type': 'number'},
-            'format': <String, dynamic>{'type': 'string', 'enum': <String>['obj', 'stl']},
+            'format': <String, dynamic>{
+              'type': 'string',
+              'enum': <String>['obj', 'stl'],
+            },
             'name': <String, dynamic>{'type': 'string'},
           },
           'required': <String>['kind'],
@@ -2332,23 +2546,26 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         execute: (args, _) async {
           try {
             final String kind = (args['kind'] ?? 'cube').toString();
-            final double scale =
-                double.tryParse('${args['scale'] ?? 1}') ?? 1;
+            final double scale = double.tryParse('${args['scale'] ?? 1}') ?? 1;
             final String format = (args['format'] ?? 'stl').toString();
             final Map<String, dynamic> generated = await _model3dPrimitive(
-                <String, dynamic>{'kind': kind, 'scale': scale});
+              <String, dynamic>{'kind': kind, 'scale': scale},
+            );
             if (generated['ok'] != true) {
               return ToolResult.error(
-                  (generated['error'] ?? '模型生成失败').toString());
+                (generated['error'] ?? '模型生成失败').toString(),
+              );
             }
             final Map<String, dynamic> exported = await _model3dExport(
-                <String, dynamic>{
-                  'format': format,
-                  'name': (args['name'] ?? 'ai-$kind').toString(),
-                });
+              <String, dynamic>{
+                'format': format,
+                'name': (args['name'] ?? 'ai-$kind').toString(),
+              },
+            );
             if (exported['ok'] != true) {
               return ToolResult.error(
-                  (exported['error'] ?? '模型导出失败').toString());
+                (exported['error'] ?? '模型导出失败').toString(),
+              );
             }
             return ToolResult.ok(
               '已生成 $kind 模型并导出 ${exported['format']}：'
@@ -2376,7 +2593,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           final text = args['text'].toString().trim();
           if (text.isEmpty) return ToolResult.error('记忆内容为空');
           final id = await store.insert('turns', <String, dynamic>{
-            'session_id': 'memory', 'role': 'memory', 'text': text, 'ts': _now(),
+            'session_id': 'memory',
+            'role': 'memory',
+            'text': text,
+            'ts': _now(),
           });
           return ToolResult.ok('已写入本地记忆（记录 #$id）：\n> $text');
         },
@@ -2396,8 +2616,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           final turns = await store.readRecords('turns');
           final hits = _retrieve(q, turns);
           if (hits.isEmpty) {
-            return ToolResult.ok('本地记忆中没有与「${q.isEmpty ? '最近记录' : q}」'
-                '相关的内容。');
+            return ToolResult.ok(
+              '本地记忆中没有与「${q.isEmpty ? '最近记录' : q}」'
+              '相关的内容。',
+            );
           }
           final buf = StringBuffer('**检索到 ${hits.length} 条相关记忆**\n\n');
           for (final h in hits.take(8)) {
@@ -2408,7 +2630,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       ),
       AgentTool(
         name: 'web_search',
-        description: '联网搜索真实网页（DuckDuckGo HTML 优先，失败时回退中文维基百科），'
+        description:
+            '联网搜索真实网页（DuckDuckGo HTML 优先，失败时回退中文维基百科），'
             '返回真实标题、链接与摘要；无结果时如实返回空，绝不编造来源',
         tier: ApprovalTier.read,
         parameters: <String, dynamic>{
@@ -2434,8 +2657,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           final int limit = rawLimit is num
               ? rawLimit.toInt()
               : (int.tryParse(rawLimit?.toString() ?? '') ?? 8);
-          final Map<String, dynamic> r =
-              await webSearch.search(query, limit: limit);
+          final Map<String, dynamic> r = await webSearch.search(
+            query,
+            limit: limit,
+          );
           if (r['ok'] != true) {
             return ToolResult.error((r['error'] ?? '联网搜索失败').toString());
           }
@@ -2482,7 +2707,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
             <String, dynamic>{'expression': args['expression'].toString()},
           );
           return r.ok
-              ? ToolResult.ok(r.stdout.trim().isEmpty ? '(无输出)' : r.stdout.trim())
+              ? ToolResult.ok(
+                  r.stdout.trim().isEmpty ? '(无输出)' : r.stdout.trim(),
+                )
               : ToolResult.error(r.error ?? '沙箱执行失败');
         },
       ),
@@ -2494,13 +2721,16 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           await SandboxedShell.instance.ensureLoaded();
           final r = await SandboxedShell.instance.exec('run_test');
           return r.ok
-              ? ToolResult.ok(r.stdout.trim().isEmpty ? '测试通过' : r.stdout.trim())
+              ? ToolResult.ok(
+                  r.stdout.trim().isEmpty ? '测试通过' : r.stdout.trim(),
+                )
               : ToolResult.error(r.error ?? '沙箱执行失败');
         },
       ),
       AgentTool(
         name: 'shell',
-        description: '在真实 Linux 沙箱中执行命令（安装依赖、编译、读写文件、'
+        description:
+            '在真实 Linux 沙箱中执行命令（安装依赖、编译、读写文件、'
             '运行脚本），返回 stdout/stderr 与退出码；与终端页同一执行通道',
         tier: ApprovalTier.exec,
         parameters: <String, dynamic>{
@@ -2527,8 +2757,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
             return ToolResult.error((r['error'] ?? 'shell 执行失败').toString());
           }
           final String mode = r['real'] == true ? '真实 shell' : '内置解释器';
-          final String rc =
-              r['exit_code'] == null ? '' : '（exit ${r['exit_code']}）';
+          final String rc = r['exit_code'] == null
+              ? ''
+              : '（exit ${r['exit_code']}）';
           final String clipped = out.length > 6000
               ? '${out.substring(0, 6000)}\n…（输出已截断）'
               : out;
@@ -2544,7 +2775,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   String _formatValue(Object? v) {
     if (v is double) {
       if (v == v.roundToDouble()) return v.toInt().toString();
-      return v.toStringAsFixed(6).replaceAll(RegExp(r'0+$'), '').replaceAll(RegExp(r'\.$'), '');
+      return v
+          .toStringAsFixed(6)
+          .replaceAll(RegExp(r'0+$'), '')
+          .replaceAll(RegExp(r'\.$'), '');
     }
     return v.toString();
   }
@@ -2570,15 +2804,16 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         'isolate': true,
         'cubes': SandboxedShell.instance.cubeNames,
         'allowDegrade': false,
-        'note': '代码执行由内置纯 Dart SandboxedShell 在受限 Isolate 中完成，'
+        'note':
+            '代码执行由内置纯 Dart SandboxedShell 在受限 Isolate 中完成，'
             '能力契约见 assets/schema/cube_schema.json。',
       };
     }
     final cube = action == 'run' || action == 'eval'
         ? 'eval_expression'
         : action == 'run_test' || action == 'selftest'
-            ? 'run_test'
-            : null;
+        ? 'run_test'
+        : null;
     if (action == 'shell') return _shellExec(p);
     if (action == 'debian_status') {
       // 安装中：把最新流式进度作为 proot_progress hot-path 事件随本次
@@ -2589,13 +2824,14 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     }
     if (action == 'debian_install') {
       return await proot.install(
-          onProgress: (phase, received, total, bytesPerSec) =>
-              _emit('proot_progress', <String, dynamic>{
-                'phase': phase,
-                'received': received,
-                'total': total,
-                'speed': bytesPerSec,
-              }));
+        onProgress: (phase, received, total, bytesPerSec) =>
+            _emit('proot_progress', <String, dynamic>{
+              'phase': phase,
+              'received': received,
+              'total': total,
+              'speed': bytesPerSec,
+            }),
+      );
     }
     // 统一环境自检：一套 Linux 环境只报一次口径（前端与 Agent 共用）。
     if (action == 'env_report') return _envReport();
@@ -2605,13 +2841,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     if (action == 'model3d_export') return _model3dExport(p);
     if (action == 'model3d_primitive') return _model3dPrimitive(p);
     if (cube == null) return _err('未知 code_task 动作：$action');
-    final r = await SandboxedShell.instance.exec(
-      cube,
-      <String, dynamic>{
-        if (p['expression'] != null) 'expression': p['expression'].toString(),
-        if (p['code'] != null) 'expression': p['code'].toString(),
-      },
-    );
+    final r = await SandboxedShell.instance.exec(cube, <String, dynamic>{
+      if (p['expression'] != null) 'expression': p['expression'].toString(),
+      if (p['code'] != null) 'expression': p['code'].toString(),
+    });
     _emit('sandbox_result', r.toJson());
     return <String, dynamic>{
       'ok': r.ok,
@@ -2649,8 +2882,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     final String auditDetail = raw.length > 120 ? raw.substring(0, 120) : raw;
     final String preview = raw.length > 80 ? raw.substring(0, 80) : raw;
     final String grantKey = 'shell|$raw';
-    PolicyDecision decision =
-        (await _ensurePolicy()).evaluate(tool: 'shell', path: cwd, args: raw);
+    PolicyDecision decision = (await _ensurePolicy()).evaluate(
+      tool: 'shell',
+      path: cwd,
+      args: raw,
+    );
     // ask 命中的一次性放行凭据：批准后重试同一条命令直接执行，不再空转建单；
     // deny 不看凭据，仍如实拒绝。
     if (decision == PolicyDecision.ask && await _consumeGrant(grantKey)) {
@@ -2718,11 +2954,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
             'stdout': '',
             'error': st['installing'] == true
                 ? 'Linux 环境首次初始化中：正在真实下载 proot + '
-                    '${st['distro'] ?? 'Ubuntu 24.04 base'} rootfs'
-                    '（约 ${((st['total'] as num? ?? 30243739) / 1000000).round()}MB）。'
-                    '稍后重试即可；打开「沙箱」页可看实时进度。'
+                      '${st['distro'] ?? 'Ubuntu 24.04 base'} rootfs'
+                      '（约 ${((st['total'] as num? ?? 30243739) / 1000000).round()}MB）。'
+                      '稍后重试即可；打开「沙箱」页可看实时进度。'
                 : 'Linux 环境未就绪：${st['error'] ?? '安装未完成'}'
-                    '。请在「沙箱」页点「Linux 环境」重试安装。',
+                      '。请在「沙箱」页点「Linux 环境」重试安装。',
             'cwd': cwd,
             'cube': 'shell',
             'linux': true,
@@ -2734,7 +2970,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         return <String, dynamic>{
           'ok': false,
           'stdout': '',
-          'error': 'Linux 环境启动失败（proot 可执行文件不可用）。'
+          'error':
+              'Linux 环境启动失败（proot 可执行文件不可用）。'
               '请到「沙箱」页重新安装 Linux 环境后再试。',
           'cwd': cwd,
           'cube': 'shell',
@@ -2746,7 +2983,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     }
 
     String resolve(String rel) {
-      final base = rel.startsWith('/') ? '$root${rel.replaceAll(RegExp(r'/+'), '/')}'.replaceAll('//', '/') : '$root/$cwd/$rel';
+      final base = rel.startsWith('/')
+          ? '$root${rel.replaceAll(RegExp(r'/+'), '/')}'.replaceAll('//', '/')
+          : '$root/$cwd/$rel';
       final parts = base.split('/');
       final out = <String>[];
       for (final s in parts) {
@@ -2767,10 +3006,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     final args = sp < 0
         ? <String>[]
         : raw
-            .substring(sp + 1)
-            .split(RegExp(r'\s+'))
-            .where((s) => s.isNotEmpty)
-            .toList();
+              .substring(sp + 1)
+              .split(RegExp(r'\s+'))
+              .where((s) => s.isNotEmpty)
+              .toList();
     final buf = StringBuffer();
     String newCwd = cwd;
     var ok = true;
@@ -2784,11 +3023,13 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       case 'pwd':
         buf.writeln('$root/$cwd'.replaceAll('//', '/'));
       case 'ls':
-        final showLong = args.contains('-l') || args.contains('-la') ||
-            args.contains('-al');
-        final target = resolve(args.where((a) => !a.startsWith('-')).isEmpty
-            ? '.'
-            : args.firstWhere((a) => !a.startsWith('-')));
+        final showLong =
+            args.contains('-l') || args.contains('-la') || args.contains('-al');
+        final target = resolve(
+          args.where((a) => !a.startsWith('-')).isEmpty
+              ? '.'
+              : args.firstWhere((a) => !a.startsWith('-')),
+        );
         if (target.isEmpty) {
           fail('ls: 路径越界被拒绝');
           break;
@@ -2798,24 +3039,29 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           fail('ls: 无法访问 \'${args}\'：No such file or directory');
           break;
         }
-        final entries = dir
-            .listSync(followLinks: false)
-            .where((e) => !e.uri.pathSegments.last.startsWith('.tangram'))
-            .toList()
-          ..sort((a, b) {
-            final ad = a is Directory ? 0 : 1;
-            final bd = b is Directory ? 0 : 1;
-            if (ad != bd) return ad.compareTo(bd);
-            return a.uri.pathSegments.last.compareTo(b.uri.pathSegments.last);
-          });
+        final entries =
+            dir
+                .listSync(followLinks: false)
+                .where((e) => !e.uri.pathSegments.last.startsWith('.tangram'))
+                .toList()
+              ..sort((a, b) {
+                final ad = a is Directory ? 0 : 1;
+                final bd = b is Directory ? 0 : 1;
+                if (ad != bd) return ad.compareTo(bd);
+                return a.uri.pathSegments.last.compareTo(
+                  b.uri.pathSegments.last,
+                );
+              });
         for (final e in entries) {
           final name = e.uri.pathSegments.last;
           if (showLong) {
             final st = e.statSync();
             // 用文件真实修改时间，不再用当前时间伪造 mtime。
             final String mtime = st.modified.toIso8601String();
-            buf.writeln('${e is Directory ? "drwxr-xr-x" : "-rw-r--r--"} '
-                '${st.size.toString().padLeft(10)}  $mtime  $name${e is Directory ? "/" : ""}');
+            buf.writeln(
+              '${e is Directory ? "drwxr-xr-x" : "-rw-r--r--"} '
+              '${st.size.toString().padLeft(10)}  $mtime  $name${e is Directory ? "/" : ""}',
+            );
           } else {
             buf.writeln('$name${e is Directory ? "/" : ""}');
           }
@@ -2878,8 +3124,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           File(t).createSync(recursive: true);
         }
       case 'rm':
-        final recursive = args.contains('-r') || args.contains('-rf') ||
-            args.contains('-fr');
+        final recursive =
+            args.contains('-r') || args.contains('-rf') || args.contains('-fr');
         final targetArg = args.where((a) => !a.startsWith('-')).toList();
         if (targetArg.isEmpty) {
           fail('rm: 缺少目标');
@@ -2942,9 +3188,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         if (cmd == 'head') {
           buf.writeln(lines.take(10).join('\n'));
         } else {
-          buf.writeln(lines.length <= 10
-              ? lines.join('\n')
-              : lines.sublist(lines.length - 10).join('\n'));
+          buf.writeln(
+            lines.length <= 10
+                ? lines.join('\n')
+                : lines.sublist(lines.length - 10).join('\n'),
+          );
         }
       case 'wc':
         if (args.isEmpty) {
@@ -2957,15 +3205,19 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           break;
         }
         final txt = File(t).readAsStringSync();
-        buf.writeln('${txt.split('\n').length} ${txt.split(RegExp(r'\s+')).where((s) => s.isNotEmpty).length} ${txt.length} ${args.last}');
+        buf.writeln(
+          '${txt.split('\n').length} ${txt.split(RegExp(r'\s+')).where((s) => s.isNotEmpty).length} ${txt.length} ${args.last}',
+        );
       case 'date':
         buf.writeln(DateTime.now().toString());
       case 'whoami':
         buf.writeln('tga');
       case 'uname':
-        buf.writeln('${Platform.operatingSystem} tangram-sandbox '
-            '${Platform.operatingSystemVersion} '
-            '${Uri.base.scheme == "file" ? Platform.localHostname : "device"}');
+        buf.writeln(
+          '${Platform.operatingSystem} tangram-sandbox '
+          '${Platform.operatingSystemVersion} '
+          '${Uri.base.scheme == "file" ? Platform.localHostname : "device"}',
+        );
       case 'clear':
         // 由前端识别：stdout 返回标记，页面清空屏幕。
         buf.writeln('\x1bclear\x1b');
@@ -2981,23 +3233,29 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         buf.writeln('pwd ls [-l] cd cat echo mkdir touch rm [-r] mv cp');
         buf.writeln('head tail wc date whoami uname clear help');
         buf.writeln('表达式求值请直接输入算式，如 2+3*4');
-        buf.writeln('注：本终端默认把命令交给系统真实 shell 执行，'
-            'apt/pkg/pip/curl 等系统命令按本机真实情况响应。');
+        buf.writeln(
+          '注：本终端默认把命令交给系统真实 shell 执行，'
+          'apt/pkg/pip/curl 等系统命令按本机真实情况响应。',
+        );
         if (Platform.isAndroid) {
           final String distro = proot.distroLabel;
-          buf.writeln(proot.installed
-              ? '当前运行在唯一那套 Linux 用户态（proot + $distro）：'
-                  '${proot.profile == 'alpine' ? 'apk' : 'apt/dpkg（pkg 封装）'}'
-                  ' / python / pip 真实执行。'
-              : 'Linux 环境尚未安装：点右上角图标真实下载'
-                  '（proot + $distro rootfs，约 '
-                  '${(proot.status()['total'] as num? ?? 30243739) ~/ 1000000}MB）。');
+          buf.writeln(
+            proot.installed
+                ? '当前运行在唯一那套 Linux 用户态（proot + $distro）：'
+                      '${proot.profile == 'alpine' ? 'apk' : 'apt/dpkg（pkg 封装）'}'
+                      ' / python / pip 真实执行。'
+                : 'Linux 环境尚未安装：点右上角图标真实下载'
+                      '（proot + $distro rootfs，约 '
+                      '${(proot.status()['total'] as num? ?? 30243739) ~/ 1000000}MB）。',
+          );
         }
       default:
         // 表达式兜底：2+3*4 之类直接走真实求值（受限 Isolate）。
         if (RegExp(r'^[\d\s\+\-\*\/\%\(\)\.\,]+$').hasMatch(raw)) {
-          final r = await SandboxedShell.instance
-              .exec('eval_expression', <String, dynamic>{'expression': raw});
+          final r = await SandboxedShell.instance.exec(
+            'eval_expression',
+            <String, dynamic>{'expression': raw},
+          );
           ok = r.ok;
           buf.write(r.ok ? r.stdout : r.error);
           buf.writeln();
@@ -3088,8 +3346,13 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       final MeshLoadResult r = Mesh3D.parseBytes(f.path, bytes);
       _mesh3d = r.mesh;
       _mesh3dName = f.uri.pathSegments.last;
-      return _model3dPayload(r.mesh,
-          format: r.format, name: _mesh3dName, path: f.path, note: r.note);
+      return _model3dPayload(
+        r.mesh,
+        format: r.format,
+        name: _mesh3dName,
+        path: f.path,
+        note: r.note,
+      );
     } on MeshFormatException catch (e) {
       return _err('$e');
     } on Object catch (e) {
@@ -3101,12 +3364,18 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   Future<Map<String, dynamic>> _model3dInfo(Map<String, dynamic> p) async {
     final String rawPath = (p['path'] ?? '').toString().trim();
     if (rawPath.isNotEmpty) {
-      final Map<String, dynamic> r =
-          await _model3dImport(<String, dynamic>{'path': rawPath});
+      final Map<String, dynamic> r = await _model3dImport(<String, dynamic>{
+        'path': rawPath,
+      });
       if (r['ok'] != true) return r;
-      final Map<String, dynamic> stats =
-          (r['stats'] as Map).map((k, v) => MapEntry(k.toString(), v));
-      return _ok(<String, dynamic>{'name': r['name'], 'format': r['format'], 'stats': stats});
+      final Map<String, dynamic> stats = (r['stats'] as Map).map(
+        (k, v) => MapEntry(k.toString(), v),
+      );
+      return _ok(<String, dynamic>{
+        'name': r['name'],
+        'format': r['format'],
+        'stats': stats,
+      });
     }
     final Mesh3D? mesh = _mesh3d;
     if (mesh == null) return _err('还没有载入模型；先生成或导入一个模型');
@@ -3150,15 +3419,17 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   Future<Map<String, dynamic>> _startLinuxInstall() async {
     final Map<String, dynamic> st = proot.status();
     if (st['installed'] == true || st['installing'] == true) return st;
-    unawaited(proot.install(
-      onProgress: (phase, received, total, bytesPerSec) =>
-          _emit('proot_progress', <String, dynamic>{
-        'phase': phase,
-        'received': received,
-        'total': total,
-        'speed': bytesPerSec,
-      }),
-    ));
+    unawaited(
+      proot.install(
+        onProgress: (phase, received, total, bytesPerSec) =>
+            _emit('proot_progress', <String, dynamic>{
+              'phase': phase,
+              'received': received,
+              'total': total,
+              'speed': bytesPerSec,
+            }),
+      ),
+    );
     return proot.status();
   }
 
@@ -3171,7 +3442,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   Future<Map<String, dynamic>> _envReport() async {
     // distro 统一读 /etc/os-release 的 PRETTY_NAME（Ubuntu/Alpine 都有）；
     // 包管理器同时探测 apk 与 apt-get，由解析层按 apk > apt 取真实值。
-    const String probe = "echo \"kernel:\$(uname -srm)\"; "
+    const String probe =
+        "echo \"kernel:\$(uname -srm)\"; "
         "echo \"uid:\$(id -u)\"; "
         "echo \"distro:\$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null)\"; "
         "echo \"disk:\$(df -Pk / | tail -1)\"; "
@@ -3183,8 +3455,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         "echo \"writable:\$(touch /root/.tga_env_probe 2>/dev/null && echo yes || echo no)\"";
 
     if (Platform.isAndroid) {
-      final String pkgName =
-          proot.profile == 'alpine' ? 'apk' : 'apt/dpkg（pkg 为封装）';
+      final String pkgName = proot.profile == 'alpine'
+          ? 'apk'
+          : 'apt/dpkg（pkg 为封装）';
       if (!proot.installed) {
         final Map<String, dynamic> st = await _startLinuxInstall();
         return <String, dynamic>{
@@ -3199,14 +3472,16 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           'installing': st['installing'] == true,
           'step': (st['step'] ?? 'idle').toString(),
           if (st['error'] != null) 'error': st['error'],
-          'note': '安卓端只有这一套 Linux 用户态（proot + ${proot.distroLabel}）；'
+          'note':
+              '安卓端只有这一套 Linux 用户态（proot + ${proot.distroLabel}）；'
               '首次使用会真实下载并解包，装好后 $pkgName / python / pip '
               '都在用户态执行。',
         };
       }
       final Map<String, dynamic>? r = await proot.run(probe, '.');
-      final Map<String, dynamic> report =
-          _parseEnvReport((r?['stdout'] ?? '').toString());
+      final Map<String, dynamic> report = _parseEnvReport(
+        (r?['stdout'] ?? '').toString(),
+      );
       report['ok'] = r?['ok'] == true;
       report['linux_installed'] = true;
       report['single_environment'] = true;
@@ -3228,10 +3503,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         ? <String>['/c', 'ver']
         : <String>['-c', probe.replaceAll('/root/', '/tmp/')];
     try {
-      final ProcessResult pr =
-          await Process.run(shell, args).timeout(const Duration(seconds: 20));
-      final Map<String, dynamic> report =
-          _parseEnvReport('${pr.stdout}');
+      final ProcessResult pr = await Process.run(
+        shell,
+        args,
+      ).timeout(const Duration(seconds: 20));
+      final Map<String, dynamic> report = _parseEnvReport('${pr.stdout}');
       report['ok'] = pr.exitCode == 0;
       report['single_environment'] = true;
       report['platform'] = Platform.operatingSystem;
@@ -3277,8 +3553,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
     int? totalMb;
     int? freeMb;
-    final List<String> df =
-        (kv['disk'] ?? '').split(RegExp(r'\s+')).where((e) => e.isNotEmpty).toList();
+    final List<String> df = (kv['disk'] ?? '')
+        .split(RegExp(r'\s+'))
+        .where((e) => e.isNotEmpty)
+        .toList();
     if (df.length >= 4) {
       final int? totalK = int.tryParse(df[1]);
       final int? freeK = int.tryParse(df[3]);
@@ -3302,7 +3580,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       },
       'node_ready': tool('node').isNotEmpty,
       if (tool('node').isEmpty)
-        'node_hint': '沙箱未检测到 Node.js；QQ 沙箱直连（dsh-qqbot）依赖 node/npm，'
+        'node_hint':
+            '沙箱未检测到 Node.js；QQ 沙箱直连（dsh-qqbot）依赖 node/npm，'
             '扫码前会尝试在 Linux 用户态用系统包管理器真实补装。',
       'writable': kv['writable'] == 'yes',
     };
@@ -3312,7 +3591,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   /// 返回 null 表示真实 shell 不可用（调用方回退内置解释器）。
   /// 命令输出/退出码全部来自真实进程，绝不加工、绝不模拟成功。
   Future<Map<String, dynamic>?> _realShellExec(
-      String raw, String root, String cwd) async {
+    String raw,
+    String root,
+    String cwd,
+  ) async {
     // 安卓端已统一到唯一那套 Linux 环境（proot）：宿主 toybox shell 不参与
     // 执行，避免出现第二套环境（uid=10541）与 proot（uid=0）互相矛盾。
     if (Platform.isAndroid) return null;
@@ -3344,7 +3626,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     }
 
     // 用唯一标记把「真实输出」与「新 cwd/退出码」分离（POSIX shell 通用）。
-    final String marker = '__TGA_END_${DateTime.now().microsecondsSinceEpoch}__';
+    final String marker =
+        '__TGA_END_${DateTime.now().microsecondsSinceEpoch}__';
     final String script =
         'cd ${_shellQuote(cwdAbs)} 2>/dev/null; $raw; __rc=\$?; '
         'printf "\\n$marker%s$marker\$__rc\\n" "\$(pwd -P 2>/dev/null)"; '
@@ -3373,21 +3656,26 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
     // allowMalformed:true：真实命令可能输出非 UTF-8 字节（二进制/区域编码），
     // 严格解码会抛 FormatException 被误报成「执行失败」。宽松解码保留可读文本。
-    final Future<String> outF =
-        proc.stdout.transform(const Utf8Decoder(allowMalformed: true)).join();
-    final Future<String> errF =
-        proc.stderr.transform(const Utf8Decoder(allowMalformed: true)).join();
+    final Future<String> outF = proc.stdout
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .join();
+    final Future<String> errF = proc.stderr
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .join();
     int exitCode = 124;
     try {
       exitCode = await proc.exitCode.timeout(const Duration(seconds: 60));
     } on TimeoutException {
       proc.kill(ProcessSignal.sigkill);
     }
-    final String stdoutAll =
-        await outF.timeout(const Duration(seconds: 3),
-            onTimeout: () => '');
-    final String stderrAll =
-        await errF.timeout(const Duration(seconds: 3), onTimeout: () => '');
+    final String stdoutAll = await outF.timeout(
+      const Duration(seconds: 3),
+      onTimeout: () => '',
+    );
+    final String stderrAll = await errF.timeout(
+      const Duration(seconds: 3),
+      onTimeout: () => '',
+    );
 
     String out = stdoutAll;
     String newCwd = cwd;
@@ -3396,10 +3684,13 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       final int last = stdoutAll.lastIndexOf(marker);
       if (first >= 0 && last > first) {
         out = stdoutAll.substring(0, first);
-        final String tail =
-            stdoutAll.substring(last + marker.length).trim(); // <rc>
-        final String mid =
-            stdoutAll.substring(first + marker.length, last); // <pwd>
+        final String tail = stdoutAll
+            .substring(last + marker.length)
+            .trim(); // <rc>
+        final String mid = stdoutAll.substring(
+          first + marker.length,
+          last,
+        ); // <pwd>
         final int rc = int.tryParse(tail) ?? exitCode;
         exitCode = rc;
         final String pwd = mid.trim();
@@ -3443,7 +3734,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     String command, {
     String cwd = '.',
   }) async {
-    final r = await _shellExec(<String, dynamic>{'command': command, 'cwd': cwd});
+    final r = await _shellExec(<String, dynamic>{
+      'command': command,
+      'cwd': cwd,
+    });
     return r;
   }
 
@@ -3473,17 +3767,29 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       if (!prootTmp.existsSync()) prootTmp.createSync(recursive: true);
       final Directory appSandbox = store.sub('sandbox');
       if (!appSandbox.existsSync()) appSandbox.createSync(recursive: true);
-      final String guestCwd =
-          cwd == '.' ? '/root' : (cwd.startsWith('/') ? cwd : '/root/$cwd');
+      final String guestCwd = cwd == '.'
+          ? '/root'
+          : (cwd.startsWith('/') ? cwd : '/root/$cwd');
       final String script = 'cd ${_shellQuote(guestCwd)} 2>/dev/null; $command';
       try {
         proc = await Process.start(
           proot.prootBin.path,
           <String>[
-            '-0', '-l', '-r', proot.rootfsDir.path,
-            '-b', '/dev', '-b', '/proc', '-b', '/sys',
-            '-b', '${appSandbox.path}:/workspace',
-            '/bin/sh', '-c', script,
+            '-0',
+            '-l',
+            '-r',
+            proot.rootfsDir.path,
+            '-b',
+            '/dev',
+            '-b',
+            '/proc',
+            '-b',
+            '/sys',
+            '-b',
+            '${appSandbox.path}:/workspace',
+            '/bin/sh',
+            '-c',
+            script,
           ],
           workingDirectory: proot.extDir.path,
           includeParentEnvironment: false,
@@ -3491,7 +3797,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
             'LD_LIBRARY_PATH': proot.extDir.path,
             'PROOT_TMP_DIR': '${proot.extDir.path}/proot_tmp',
             'HOME': '/root',
-            'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+            'PATH':
+                '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
             'TERM': 'xterm-256color',
             'LANG': 'C.UTF-8',
             'PROOT_NO_SECCOMP': '1',
@@ -3510,8 +3817,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       final Directory sandboxDir = store.sub('sandbox');
       await sandboxDir.create(recursive: true);
       final String root = sandboxDir.path;
-      final String cwdAbs =
-          cwd.startsWith('/') ? cwd : '$root/${cwd == '.' ? '' : cwd}';
+      final String cwdAbs = cwd.startsWith('/')
+          ? cwd
+          : '$root/${cwd == '.' ? '' : cwd}';
       if (!Directory(cwdAbs).existsSync()) {
         await Directory(cwdAbs).create(recursive: true);
       }
@@ -3520,7 +3828,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           shell,
           Platform.isWindows
               ? <String>['/c', 'cd /d "$cwdAbs" && $command']
-              : <String>['-c', 'cd ${_shellQuote(cwdAbs)} 2>/dev/null; $command'],
+              : <String>[
+                  '-c',
+                  'cd ${_shellQuote(cwdAbs)} 2>/dev/null; $command',
+                ],
           workingDirectory: cwdAbs,
           includeParentEnvironment: true,
           environment: <String, String>{
@@ -3538,10 +3849,12 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     proc.stdout.transform(utf8.decoder).listen((String s) => buf.write(s));
     proc.stderr.transform(utf8.decoder).listen((String s) => buf.write(s));
     final _ManagedProc mp = _ManagedProc(buf);
-    unawaited(proc.exitCode.then((int c) {
-      mp.alive = false;
-      mp.exitCode = c;
-    }));
+    unawaited(
+      proc.exitCode.then((int c) {
+        mp.alive = false;
+        mp.exitCode = c;
+      }),
+    );
     mp.killFn = () => proc.kill(ProcessSignal.sigkill);
     _qqProcs['qq_sandbox'] = mp;
     return mp;
@@ -3573,7 +3886,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       final name = (s['name'] ?? '').toString();
       final transport = (s['transport'] ?? 'stdio').toString().toLowerCase();
       final url = (s['url'] ?? '').toString();
-      final httpLike = transport.contains('http') ||
+      final httpLike =
+          transport.contains('http') ||
           transport == 'sse' ||
           transport == 'streamable';
       if (!httpLike || !url.startsWith('http')) {
@@ -3594,21 +3908,25 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         for (final t in list) {
           final full = 'mcp.$name.${t.name}';
           if (tools.contains(full)) continue;
-          tools.register(AgentTool(
-            name: full,
-            description: '[MCP:$name] ${t.description}',
-            parameters: t.inputSchema,
-            tier: ApprovalTier.write,
-            execute: (args, token) async {
-              final r = await client.callTool(t.name, args);
-              return r.ok ? ToolResult.ok(r.text) : ToolResult.error(r.error);
-            },
-          ));
+          tools.register(
+            AgentTool(
+              name: full,
+              description: '[MCP:$name] ${t.description}',
+              parameters: t.inputSchema,
+              tier: ApprovalTier.write,
+              execute: (args, token) async {
+                final r = await client.callTool(t.name, args);
+                return r.ok ? ToolResult.ok(r.text) : ToolResult.error(r.error);
+              },
+            ),
+          );
           _mcpToolNames.add(full);
           toolNames.add(t.name);
         }
         connected.add(<String, dynamic>{
-          'name': name, 'server': title, 'tools': toolNames,
+          'name': name,
+          'server': title,
+          'tools': toolNames,
         });
       } on Object catch (e) {
         client.dispose();
@@ -3689,14 +4007,16 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   // ---- model_store：真实硬件 / 内置目录 / 分片下载 ----
 
   /// 内置可下载模型目录（真实开源仓库元信息；size 以 HEAD 实测为准）。
-  static const List<Map<String, dynamic>> builtinCatalog = <Map<String, dynamic>>[
+  static const List<Map<String, dynamic>>
+  builtinCatalog = <Map<String, dynamic>>[
     <String, dynamic>{
       'id': 'qwen2.5-0.5b-q4',
       'name': 'Qwen2.5 0.5B Instruct (Q4_K_M)',
       'source': 'ModelScope 魔搭社区',
       'params': '0.5B',
       'quantization': 'Q4_K_M',
-      'url': 'https://www.modelscope.cn/models/Qwen/Qwen2.5-0.5B-Instruct-GGUF/'
+      'url':
+          'https://www.modelscope.cn/models/Qwen/Qwen2.5-0.5B-Instruct-GGUF/'
           'resolve/master/qwen2.5-0.5b-instruct-q4_k_m.gguf',
     },
     <String, dynamic>{
@@ -3705,7 +4025,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       'source': 'ModelScope 魔搭社区',
       'params': '1.1B',
       'quantization': 'Q4_K_M',
-      'url': 'https://www.modelscope.cn/models/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/'
+      'url':
+          'https://www.modelscope.cn/models/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/'
           'resolve/master/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',
     },
     <String, dynamic>{
@@ -3714,7 +4035,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       'source': 'ModelScope 魔搭社区',
       'params': '1.5B',
       'quantization': 'Q4_K_M',
-      'url': 'https://www.modelscope.cn/models/Qwen/Qwen2.5-1.5B-Instruct-GGUF/'
+      'url':
+          'https://www.modelscope.cn/models/Qwen/Qwen2.5-1.5B-Instruct-GGUF/'
           'resolve/master/qwen2.5-1.5b-instruct-q4_k_m.gguf',
     },
   ];
@@ -3753,8 +4075,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         if (token.isNotEmpty) {
           req.headers['Authorization'] = 'Bearer $token';
         }
-        final resp = await http.Response.fromStream(await req.send())
-            .timeout(const Duration(seconds: 45));
+        final resp = await http.Response.fromStream(
+          await req.send(),
+        ).timeout(const Duration(seconds: 45));
         if (resp.statusCode == 200) {
           return jsonDecode(utf8.decode(resp.bodyBytes));
         }
@@ -3773,20 +4096,29 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         return await _hardware();
       case 'search' || 'catalog' || 'list':
         final q = (p['query'] ?? '').toString().trim().toLowerCase();
-        final local = store.scanFiles('downloads',
-            extensions: <String>{'.gguf', '.bin'});
+        final local = store.scanFiles(
+          'downloads',
+          extensions: <String>{'.gguf', '.bin'},
+        );
         final models = builtinCatalog
-            .where((m) => q.isEmpty ||
-                m['name'].toString().toLowerCase().contains(q) ||
-                m['id'].toString().contains(q))
-            .map((m) => <String, dynamic>{
-                  ...m,
-                  // 必须与完整模型 id 对应才算已下载；旧实现只比 id 首段
-                  // （如 qwen2），会把同前缀的另一个模型误报为已下载。
-                  'downloaded': local.any((f) =>
+            .where(
+              (m) =>
+                  q.isEmpty ||
+                  m['name'].toString().toLowerCase().contains(q) ||
+                  m['id'].toString().contains(q),
+            )
+            .map(
+              (m) => <String, dynamic>{
+                ...m,
+                // 必须与完整模型 id 对应才算已下载；旧实现只比 id 首段
+                // （如 qwen2），会把同前缀的另一个模型误报为已下载。
+                'downloaded': local.any(
+                  (f) =>
                       f['name'].toString() == '${m['id']}.gguf' ||
-                      f['name'].toString().contains(m['id'].toString())),
-                })
+                      f['name'].toString().contains(m['id'].toString()),
+                ),
+              },
+            )
             .toList();
         return <String, dynamic>{
           'source': 'ModelScope 魔搭社区',
@@ -3803,8 +4135,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         if (targetUrl.isEmpty) {
           return _err('未提供下载 URL，且内置目录里没有模型 $id');
         }
-        final expectedSha256 =
-            (p['expected_sha256'] ?? '').toString().trim().toLowerCase();
+        final expectedSha256 = (p['expected_sha256'] ?? '')
+            .toString()
+            .trim()
+            .toLowerCase();
         final job = await downloads.start(
           targetUrl,
           filename: match.isNotEmpty ? '$id.gguf' : null,
@@ -3825,295 +4159,328 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           if (job.error != null) 'error': job.error,
           'note': '真实 HTTP 分片下载（Range + 断点续传），进度按落盘字节回写。',
         };
-      case 'ms_search': {
-        // 魔搭社区真实模型搜索：PUT /api/v1/dolphin/models（实测可用；
-        // GET 风格端点全部 404）。返回真实仓库、下载量与任务标签。
-        final q = (p['query'] ?? '').toString().trim();
-        try {
-          final req = http.Request(
-              'PUT', Uri.parse('https://www.modelscope.cn/api/v1/dolphin/models'))
-            ..headers['Content-Type'] = 'application/json'
-            ..headers['User-Agent'] =
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0'
-            ..body = jsonEncode(<String, dynamic>{
-              // 2026-11-14 curl 实测：真正的搜索参数是 Name；只传 Query 会被
-              // 忽略并返回热门榜（旧实现的 bug：搜什么都出同样的榜单）。
-              // Query 字段保留，兼容接口未来恢复该参数名的可能。
-              'Name': q,
-              'Query': q,
-              'PageSize': 20,
-              'PageNumber': 1,
-              'Sort': 'Default',
-            });
-          final resp = await http.Response.fromStream(await req.send())
-              .timeout(const Duration(seconds: 12));
-          if (resp.statusCode != 200) {
-            return _err('魔搭搜索失败：HTTP ${resp.statusCode}');
-          }
-          final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
-          final models = <Map<String, dynamic>>[];
-          if (decoded is Map &&
-              decoded['Data'] is Map &&
-              (decoded['Data'] as Map)['Model'] is Map) {
-            final list =
-                ((decoded['Data'] as Map)['Model'] as Map)['Models'];
-            if (list is List) {
-              for (final e in list.whereType<Map>()) {
-                final owner = (e['Path'] ?? e['Namespace'] ?? '').toString();
-                final name = (e['Name'] ?? '').toString();
-                if (owner.isEmpty || name.isEmpty) continue;
-                final tasks = (e['Tasks'] is List)
-                    ? (e['Tasks'] as List)
-                        .whereType<Map>()
-                        .map((t) => (t['ChineseName'] ?? t['Name'] ?? '')
-                            .toString())
-                        .where((s) => s.isNotEmpty)
-                        .toList()
-                    : <String>[];
-                models.add(<String, dynamic>{
-                  'path': '$owner/$name',
-                  'name': name,
-                  'chinese_name': (e['ChineseName'] ?? '').toString(),
-                  'owner': owner,
-                  'downloads': e['Downloads'] is int ? e['Downloads'] : 0,
-                  'likes': e['Likes'] is int ? e['Likes'] : 0,
-                  'tasks': tasks,
-                  'tags': (e['Tags'] is List)
-                      ? (e['Tags'] as List).map((t) => t.toString()).toList()
-                      : <String>[],
-                });
+      case 'ms_search':
+        {
+          // 魔搭社区真实模型搜索：PUT /api/v1/dolphin/models（实测可用；
+          // GET 风格端点全部 404）。返回真实仓库、下载量与任务标签。
+          final q = (p['query'] ?? '').toString().trim();
+          try {
+            final req =
+                http.Request(
+                    'PUT',
+                    Uri.parse(
+                      'https://www.modelscope.cn/api/v1/dolphin/models',
+                    ),
+                  )
+                  ..headers['Content-Type'] = 'application/json'
+                  ..headers['User-Agent'] =
+                      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0'
+                  ..body = jsonEncode(<String, dynamic>{
+                    // 2026-11-14 curl 实测：真正的搜索参数是 Name；只传 Query 会被
+                    // 忽略并返回热门榜（旧实现的 bug：搜什么都出同样的榜单）。
+                    // Query 字段保留，兼容接口未来恢复该参数名的可能。
+                    'Name': q,
+                    'Query': q,
+                    'PageSize': 20,
+                    'PageNumber': 1,
+                    'Sort': 'Default',
+                  });
+            final resp = await http.Response.fromStream(
+              await req.send(),
+            ).timeout(const Duration(seconds: 12));
+            if (resp.statusCode != 200) {
+              return _err('魔搭搜索失败：HTTP ${resp.statusCode}');
+            }
+            final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
+            final models = <Map<String, dynamic>>[];
+            if (decoded is Map &&
+                decoded['Data'] is Map &&
+                (decoded['Data'] as Map)['Model'] is Map) {
+              final list = ((decoded['Data'] as Map)['Model'] as Map)['Models'];
+              if (list is List) {
+                for (final e in list.whereType<Map>()) {
+                  final owner = (e['Path'] ?? e['Namespace'] ?? '').toString();
+                  final name = (e['Name'] ?? '').toString();
+                  if (owner.isEmpty || name.isEmpty) continue;
+                  final tasks = (e['Tasks'] is List)
+                      ? (e['Tasks'] as List)
+                            .whereType<Map>()
+                            .map(
+                              (t) => (t['ChineseName'] ?? t['Name'] ?? '')
+                                  .toString(),
+                            )
+                            .where((s) => s.isNotEmpty)
+                            .toList()
+                      : <String>[];
+                  models.add(<String, dynamic>{
+                    'path': '$owner/$name',
+                    'name': name,
+                    'chinese_name': (e['ChineseName'] ?? '').toString(),
+                    'owner': owner,
+                    'downloads': e['Downloads'] is int ? e['Downloads'] : 0,
+                    'likes': e['Likes'] is int ? e['Likes'] : 0,
+                    'tasks': tasks,
+                    'tags': (e['Tags'] is List)
+                        ? (e['Tags'] as List).map((t) => t.toString()).toList()
+                        : <String>[],
+                  });
+                }
               }
             }
+            return <String, dynamic>{
+              'ok': true,
+              'source': 'modelscope.cn',
+              'models': models,
+              'total': models.length,
+            };
+          } on Object catch (e) {
+            return _err('魔搭搜索失败：$e');
           }
-          return <String, dynamic>{
-            'ok': true, 'source': 'modelscope.cn',
-            'models': models, 'total': models.length,
-          };
-        } on Object catch (e) {
-          return _err('魔搭搜索失败：$e');
         }
-      }
-      case 'ms_files': {
-        // 真实仓库文件列表（递归），只回 .gguf —— 端侧推理可直接下载。
-        final mp = (p['model_path'] ?? '').toString().trim();
-        if (mp.isEmpty || mp.contains('..')) return _err('缺少 model_path');
-        try {
-          final uri = Uri.https('www.modelscope.cn',
-              '/api/v1/models/$mp/repo/files', <String, String>{
-            'Revision': 'master',
-            'Recursive': 'true',
-          });
-          final resp = await http.get(uri, headers: <String, String>{
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0) Chrome/124.0',
-          }).timeout(const Duration(seconds: 12));
-          if (resp.statusCode != 200) {
-            return _err('读取文件列表失败：HTTP ${resp.statusCode}');
-          }
-          final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
-          final files = <Map<String, dynamic>>[];
-          if (decoded is Map && decoded['Data'] is Map) {
-            final raw = (decoded['Data'] as Map)['Files'];
-            if (raw is List) {
-              for (final f in raw.whereType<Map>()) {
-                final path = (f['Path'] ?? f['Name'] ?? '').toString();
-                if (!path.toLowerCase().endsWith('.gguf')) continue;
-                files.add(<String, dynamic>{
-                  'path': path,
-                  'name': path.split('/').last,
-                  'size': f['Size'] is int ? f['Size'] : 0,
-                });
+      case 'ms_files':
+        {
+          // 真实仓库文件列表（递归），只回 .gguf —— 端侧推理可直接下载。
+          final mp = (p['model_path'] ?? '').toString().trim();
+          if (mp.isEmpty || mp.contains('..')) return _err('缺少 model_path');
+          try {
+            final uri = Uri.https(
+              'www.modelscope.cn',
+              '/api/v1/models/$mp/repo/files',
+              <String, String>{'Revision': 'master', 'Recursive': 'true'},
+            );
+            final resp = await http
+                .get(
+                  uri,
+                  headers: <String, String>{
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0) Chrome/124.0',
+                  },
+                )
+                .timeout(const Duration(seconds: 12));
+            if (resp.statusCode != 200) {
+              return _err('读取文件列表失败：HTTP ${resp.statusCode}');
+            }
+            final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
+            final files = <Map<String, dynamic>>[];
+            if (decoded is Map && decoded['Data'] is Map) {
+              final raw = (decoded['Data'] as Map)['Files'];
+              if (raw is List) {
+                for (final f in raw.whereType<Map>()) {
+                  final path = (f['Path'] ?? f['Name'] ?? '').toString();
+                  if (!path.toLowerCase().endsWith('.gguf')) continue;
+                  files.add(<String, dynamic>{
+                    'path': path,
+                    'name': path.split('/').last,
+                    'size': f['Size'] is int ? f['Size'] : 0,
+                  });
+                }
               }
             }
+            files.sort(
+              (a, b) => (a['size'] as int).compareTo(b['size'] as int),
+            );
+            return <String, dynamic>{'ok': true, 'files': files};
+          } on Object catch (e) {
+            return _err('读取文件列表失败：$e');
           }
-          files.sort((a, b) =>
-              (a['size'] as int).compareTo(b['size'] as int));
-          return <String, dynamic>{'ok': true, 'files': files};
-        } on Object catch (e) {
-          return _err('读取文件列表失败：$e');
         }
-      }
-      case 'ms_download': {
-        // 真实下载魔搭 GGUF：resolve/master 直链 → DownloadManager
-        // 分片 + 断点续传，进度按落盘字节回写。
-        final mp = (p['model_path'] ?? '').toString().trim();
-        final file = (p['file'] ?? '').toString().trim();
-        if (mp.isEmpty || file.isEmpty || file.contains('..') ||
-            mp.contains('..')) {
-          return _err('缺少 model_path / file');
-        }
-        final url =
-            'https://www.modelscope.cn/models/$mp/resolve/master/$file';
-        final safeName =
-            '${mp.split('/').last}-${file.split('/').last}'.replaceAll(
-                RegExp(r'[^A-Za-z0-9._-]'), '_');
-        final expectedSha256 =
-            (p['expected_sha256'] ?? '').toString().trim().toLowerCase();
-        final job = await downloads.start(url,
+      case 'ms_download':
+        {
+          // 真实下载魔搭 GGUF：resolve/master 直链 → DownloadManager
+          // 分片 + 断点续传，进度按落盘字节回写。
+          final mp = (p['model_path'] ?? '').toString().trim();
+          final file = (p['file'] ?? '').toString().trim();
+          if (mp.isEmpty ||
+              file.isEmpty ||
+              file.contains('..') ||
+              mp.contains('..')) {
+            return _err('缺少 model_path / file');
+          }
+          final url =
+              'https://www.modelscope.cn/models/$mp/resolve/master/$file';
+          final safeName = '${mp.split('/').last}-${file.split('/').last}'
+              .replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+          final expectedSha256 = (p['expected_sha256'] ?? '')
+              .toString()
+              .trim()
+              .toLowerCase();
+          final job = await downloads.start(
+            url,
             filename: safeName,
             chunks: 4,
-            expectedBytes:
-                (p['size'] is num) ? (p['size'] as num).toInt() : 0,
-            expectedSha256: expectedSha256.isEmpty ? null : expectedSha256);
-        _emit('download_progress', downloads.progress(job));
-        return <String, dynamic>{
-          'ok': job.status != 'failed', 'job_id': job.id,
-          'status': job.status,
-          'target': job.target, 'filename': safeName,
-          'resumable': job.resumable,
-          'sha256': job.actualSha256,
-          'expected_sha256': job.expectedSha256,
-          if (job.error != null) 'error': job.error,
-          'note': '真实 HTTP 分片下载（Range + 断点续传）。',
-        };
-      }
-      case 'hf_search': {
-        final q = (p['query'] ?? '').toString().trim();
-        if (q.isEmpty) return _err('请输入模型名或 HuggingFace 链接');
-        final token = (p['token'] ?? '').toString().trim();
-        final parsed = _parseHfRepo(q);
-        if (parsed != null) {
-          return <String, dynamic>{
-            'ok': true,
-            'source': 'huggingface.co',
-            'repo': parsed,
-            'models': <Map<String, dynamic>>[
-              <String, dynamic>{
-                'id': parsed,
-                'path': parsed,
-                'name': parsed.split('/').last,
-                'owner': parsed.split('/').first,
-                'downloads': 0,
-                'likes': 0,
-                'pipeline_tag': '',
-                'from_link': true,
-              }
-            ],
-          };
-        }
-        try {
-          final decoded = await _hfGetJson(
-            '/api/models?search=${Uri.encodeQueryComponent(q)}'
-            '&limit=20&sort=downloads&direction=-1',
-            token: token,
+            expectedBytes: (p['size'] is num) ? (p['size'] as num).toInt() : 0,
+            expectedSha256: expectedSha256.isEmpty ? null : expectedSha256,
           );
-          if (decoded is! List) return _err('抱脸搜索返回非预期结构');
-          final models = <Map<String, dynamic>>[];
-          for (final e in decoded.whereType<Map>()) {
-            final id = (e['id'] ?? e['modelId'] ?? '').toString();
-            if (id.isEmpty) continue;
-            models.add(<String, dynamic>{
-              'id': id,
-              'path': id,
-              'name': id.split('/').last,
-              'owner': id.contains('/') ? id.split('/').first : '',
-              'downloads': e['downloads'] is num
-                  ? (e['downloads'] as num).toInt()
-                  : 0,
-              'likes':
-                  e['likes'] is num ? (e['likes'] as num).toInt() : 0,
-              'pipeline_tag': (e['pipeline_tag'] ?? '').toString(),
-              'tags': e['tags'] is List
-                  ? (e['tags'] as List).map((t) => t.toString()).toList()
-                  : <String>[],
-              'updated': (e['lastModified'] ?? '').toString(),
-            });
-          }
+          _emit('download_progress', downloads.progress(job));
           return <String, dynamic>{
-            'ok': true,
-            'source': 'huggingface.co',
-            'models': models,
-            'total': models.length,
+            'ok': job.status != 'failed',
+            'job_id': job.id,
+            'status': job.status,
+            'target': job.target,
+            'filename': safeName,
+            'resumable': job.resumable,
+            'sha256': job.actualSha256,
+            'expected_sha256': job.expectedSha256,
+            if (job.error != null) 'error': job.error,
+            'note': '真实 HTTP 分片下载（Range + 断点续传）。',
           };
-        } on Object catch (e) {
-          return _err('抱脸搜索失败：$e');
         }
-      }
-      case 'hf_files': {
-        final repo = _parseHfRepo(
-                (p['repo'] ?? p['url'] ?? p['model_path'] ?? '').toString()) ??
-            '';
-        if (repo.isEmpty || !repo.contains('/')) {
-          return _err('缺少 HuggingFace 仓库（owner/repo）');
-        }
-        final token = (p['token'] ?? '').toString().trim();
-        try {
-          final decoded = await _hfGetJson(
-            '/api/models/$repo/tree/main?recursive=true&expand=true',
-            token: token,
-          );
-          if (decoded is! List) return _err('抱脸文件列表返回非预期结构');
-          final files = <Map<String, dynamic>>[];
-          for (final f in decoded.whereType<Map>()) {
-            final path = (f['path'] ?? '').toString();
-            final type = (f['type'] ?? '').toString();
-            if (type != 'file' || !path.toLowerCase().endsWith('.gguf')) {
-              continue;
-            }
-            files.add(<String, dynamic>{
-              'path': path,
-              'name': path.split('/').last,
-              'size': f['size'] is num ? (f['size'] as num).toInt() : 0,
-            });
+      case 'hf_search':
+        {
+          final q = (p['query'] ?? '').toString().trim();
+          if (q.isEmpty) return _err('请输入模型名或 HuggingFace 链接');
+          final token = (p['token'] ?? '').toString().trim();
+          final parsed = _parseHfRepo(q);
+          if (parsed != null) {
+            return <String, dynamic>{
+              'ok': true,
+              'source': 'huggingface.co',
+              'repo': parsed,
+              'models': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'id': parsed,
+                  'path': parsed,
+                  'name': parsed.split('/').last,
+                  'owner': parsed.split('/').first,
+                  'downloads': 0,
+                  'likes': 0,
+                  'pipeline_tag': '',
+                  'from_link': true,
+                },
+              ],
+            };
           }
-          files.sort((a, b) => (a['size'] as int).compareTo(b['size'] as int));
-          return <String, dynamic>{
-            'ok': true,
-            'repo': repo,
-            'files': files,
-            if (files.isEmpty)
-              'note': '该仓库没有 GGUF 文件，需要先在电脑上转换后再上传/导入。',
-          };
-        } on Object catch (e) {
-          return _err('读取抱脸文件列表失败：$e');
-        }
-      }
-      case 'hf_download': {
-        final repo = _parseHfRepo(
-                (p['repo'] ?? p['url'] ?? p['model_path'] ?? '').toString()) ??
-            '';
-        final file = (p['file'] ?? p['file_path'] ?? '').toString().trim();
-        if (repo.isEmpty || file.isEmpty || file.contains('..')) {
-          return _err('缺少 HuggingFace repo / file');
-        }
-        final safeName =
-            '${repo.split('/').last}-${file.split('/').last}'.replaceAll(
-                RegExp(r'[^A-Za-z0-9._-]'), '_');
-        final expectedSha256 =
-            (p['expected_sha256'] ?? '').toString().trim().toLowerCase();
-        DownloadJob? job;
-        Object? lastError;
-        for (final host in <String>['hf-mirror.com', 'huggingface.co']) {
-          final url = 'https://$host/$repo/resolve/main/$file?download=true';
           try {
-            job = await downloads.start(
-              url,
-              filename: safeName,
-              chunks: 4,
-              expectedBytes:
-                  (p['size'] is num) ? (p['size'] as num).toInt() : 0,
-              expectedSha256: expectedSha256.isEmpty ? null : expectedSha256,
+            final decoded = await _hfGetJson(
+              '/api/models?search=${Uri.encodeQueryComponent(q)}'
+              '&limit=20&sort=downloads&direction=-1',
+              token: token,
             );
-            if (job.status != 'failed') break;
-            lastError = job.error;
+            if (decoded is! List) return _err('抱脸搜索返回非预期结构');
+            final models = <Map<String, dynamic>>[];
+            for (final e in decoded.whereType<Map>()) {
+              final id = (e['id'] ?? e['modelId'] ?? '').toString();
+              if (id.isEmpty) continue;
+              models.add(<String, dynamic>{
+                'id': id,
+                'path': id,
+                'name': id.split('/').last,
+                'owner': id.contains('/') ? id.split('/').first : '',
+                'downloads': e['downloads'] is num
+                    ? (e['downloads'] as num).toInt()
+                    : 0,
+                'likes': e['likes'] is num ? (e['likes'] as num).toInt() : 0,
+                'pipeline_tag': (e['pipeline_tag'] ?? '').toString(),
+                'tags': e['tags'] is List
+                    ? (e['tags'] as List).map((t) => t.toString()).toList()
+                    : <String>[],
+                'updated': (e['lastModified'] ?? '').toString(),
+              });
+            }
+            return <String, dynamic>{
+              'ok': true,
+              'source': 'huggingface.co',
+              'models': models,
+              'total': models.length,
+            };
           } on Object catch (e) {
-            lastError = e;
+            return _err('抱脸搜索失败：$e');
           }
         }
-        if (job == null) return _err('抱脸下载启动失败：$lastError');
-        _emit('download_progress', downloads.progress(job));
-        return <String, dynamic>{
-          'ok': job.status != 'failed',
-          'job_id': job.id,
-          'repo': repo,
-          'file': file,
-          'status': job.status,
-          'target': job.target,
-          'filename': safeName,
-          'resumable': job.resumable,
-          if (job.error != null) 'error': job.error,
-          'note': 'HuggingFace 直链，失败自动切 hf-mirror.com；Range 分片 + 断点续传。',
-        };
-      }
+      case 'hf_files':
+        {
+          final repo =
+              _parseHfRepo(
+                (p['repo'] ?? p['url'] ?? p['model_path'] ?? '').toString(),
+              ) ??
+              '';
+          if (repo.isEmpty || !repo.contains('/')) {
+            return _err('缺少 HuggingFace 仓库（owner/repo）');
+          }
+          final token = (p['token'] ?? '').toString().trim();
+          try {
+            final decoded = await _hfGetJson(
+              '/api/models/$repo/tree/main?recursive=true&expand=true',
+              token: token,
+            );
+            if (decoded is! List) return _err('抱脸文件列表返回非预期结构');
+            final files = <Map<String, dynamic>>[];
+            for (final f in decoded.whereType<Map>()) {
+              final path = (f['path'] ?? '').toString();
+              final type = (f['type'] ?? '').toString();
+              if (type != 'file' || !path.toLowerCase().endsWith('.gguf')) {
+                continue;
+              }
+              files.add(<String, dynamic>{
+                'path': path,
+                'name': path.split('/').last,
+                'size': f['size'] is num ? (f['size'] as num).toInt() : 0,
+              });
+            }
+            files.sort(
+              (a, b) => (a['size'] as int).compareTo(b['size'] as int),
+            );
+            return <String, dynamic>{
+              'ok': true,
+              'repo': repo,
+              'files': files,
+              if (files.isEmpty) 'note': '该仓库没有 GGUF 文件，需要先在电脑上转换后再上传/导入。',
+            };
+          } on Object catch (e) {
+            return _err('读取抱脸文件列表失败：$e');
+          }
+        }
+      case 'hf_download':
+        {
+          final repo =
+              _parseHfRepo(
+                (p['repo'] ?? p['url'] ?? p['model_path'] ?? '').toString(),
+              ) ??
+              '';
+          final file = (p['file'] ?? p['file_path'] ?? '').toString().trim();
+          if (repo.isEmpty || file.isEmpty || file.contains('..')) {
+            return _err('缺少 HuggingFace repo / file');
+          }
+          final safeName = '${repo.split('/').last}-${file.split('/').last}'
+              .replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+          final expectedSha256 = (p['expected_sha256'] ?? '')
+              .toString()
+              .trim()
+              .toLowerCase();
+          DownloadJob? job;
+          Object? lastError;
+          for (final host in <String>['hf-mirror.com', 'huggingface.co']) {
+            final url = 'https://$host/$repo/resolve/main/$file?download=true';
+            try {
+              job = await downloads.start(
+                url,
+                filename: safeName,
+                chunks: 4,
+                expectedBytes: (p['size'] is num)
+                    ? (p['size'] as num).toInt()
+                    : 0,
+                expectedSha256: expectedSha256.isEmpty ? null : expectedSha256,
+              );
+              if (job.status != 'failed') break;
+              lastError = job.error;
+            } on Object catch (e) {
+              lastError = e;
+            }
+          }
+          if (job == null) return _err('抱脸下载启动失败：$lastError');
+          _emit('download_progress', downloads.progress(job));
+          return <String, dynamic>{
+            'ok': job.status != 'failed',
+            'job_id': job.id,
+            'repo': repo,
+            'file': file,
+            'status': job.status,
+            'target': job.target,
+            'filename': safeName,
+            'resumable': job.resumable,
+            if (job.error != null) 'error': job.error,
+            'note': 'HuggingFace 直链，失败自动切 hf-mirror.com；Range 分片 + 断点续传。',
+          };
+        }
       case 'download_status' || 'status':
         final jobId = (p['job_id'] ?? '').toString();
         final job = downloads.job(jobId);
@@ -4137,15 +4504,20 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     switch (action) {
       case 'version':
         return <String, dynamic>{
-          'ok': true, 'action': action,
-          'data': <String, dynamic>{'version': version, 'equation': 'agent = model + harness'},
+          'ok': true,
+          'action': action,
+          'data': <String, dynamic>{
+            'version': version,
+            'equation': 'agent = model + harness',
+          },
         };
       case 'describe':
         final traces = await store.readRecords('work_traces');
         final turns = await store.readRecords('turns');
         final pairs = _qaPairsFrom(turns);
         return <String, dynamic>{
-          'ok': true, 'action': action,
+          'ok': true,
+          'action': action,
           'data': <String, dynamic>{
             'equation': 'agent = model + harness',
             'version': version,
@@ -4162,7 +4534,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         };
       case 'catalog':
         return <String, dynamic>{
-          'ok': true, 'action': action,
+          'ok': true,
+          'action': action,
           'data': <String, dynamic>{
             'base_models': builtinCatalog,
             'own_models': _ownModels(),
@@ -4170,57 +4543,76 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         };
       case 'models':
         return <String, dynamic>{
-          'ok': true, 'action': action,
+          'ok': true,
+          'action': action,
           'data': <String, dynamic>{
             'base_models': builtinCatalog,
             'own_models': _ownModels(),
           },
         };
-      case 'traces': {
-        // 真实分页：limit（1..500，默认 100）/ offset（>=0）/ query（大小写
-        // 不敏感包含匹配 task/text/reply/source）/ since（秒级 ts 下界）。
-        final int limit = _asInt(p['limit'], 100).clamp(1, 500).toInt();
-        final int rawOffset = _asInt(p['offset'], 0);
-        final int offset = rawOffset < 0 ? 0 : rawOffset;
-        final String query = (p['query'] ?? '').toString().trim().toLowerCase();
-        final double since = _asDouble(p['since'], 0);
-        double tsOf(Map<String, dynamic> r) {
-          final dynamic v = r['ts'];
-          if (v is num) return v.toDouble();
-          if (v is String) return double.tryParse(v) ?? 0;
-          return 0;
-        }
+      case 'traces':
+        {
+          // 真实分页：limit（1..500，默认 100）/ offset（>=0）/ query（大小写
+          // 不敏感包含匹配 task/text/reply/source）/ since（秒级 ts 下界）。
+          final int limit = _asInt(p['limit'], 100).clamp(1, 500).toInt();
+          final int rawOffset = _asInt(p['offset'], 0);
+          final int offset = rawOffset < 0 ? 0 : rawOffset;
+          final String query = (p['query'] ?? '')
+              .toString()
+              .trim()
+              .toLowerCase();
+          final double since = _asDouble(p['since'], 0);
+          double tsOf(Map<String, dynamic> r) {
+            final dynamic v = r['ts'];
+            if (v is num) return v.toDouble();
+            if (v is String) return double.tryParse(v) ?? 0;
+            return 0;
+          }
 
-        final List<Map<String, dynamic>> matched = (await store
-                .readRecords('work_traces'))
-            .where((Map<String, dynamic> r) {
-          if (tsOf(r) < since) return false;
-          if (query.isEmpty) return true;
-          return <String>['task', 'text', 'reply', 'source'].any(
-            (String k) => (r[k] ?? '').toString().toLowerCase().contains(query),
-          );
-        }).toList()
-          ..sort((Map<String, dynamic> a, Map<String, dynamic> b) =>
-              tsOf(b).compareTo(tsOf(a)));
-        final List<Map<String, dynamic>> page =
-            matched.skip(offset).take(limit).toList();
-        return <String, dynamic>{
-          'ok': true, 'action': action, 'data': page,
-          'total': matched.length, 'limit': limit, 'offset': offset,
-        };
-      }
+          final List<Map<String, dynamic>> matched =
+              (await store.readRecords('work_traces')).where((
+                Map<String, dynamic> r,
+              ) {
+                if (tsOf(r) < since) return false;
+                if (query.isEmpty) return true;
+                return <String>['task', 'text', 'reply', 'source'].any(
+                  (String k) =>
+                      (r[k] ?? '').toString().toLowerCase().contains(query),
+                );
+              }).toList()..sort(
+                (Map<String, dynamic> a, Map<String, dynamic> b) =>
+                    tsOf(b).compareTo(tsOf(a)),
+              );
+          final List<Map<String, dynamic>> page = matched
+              .skip(offset)
+              .take(limit)
+              .toList();
+          return <String, dynamic>{
+            'ok': true,
+            'action': action,
+            'data': page,
+            'total': matched.length,
+            'limit': limit,
+            'offset': offset,
+          };
+        }
       case 'work':
         final task = (p['task'] ?? p['text'] ?? '').toString().trim();
         if (task.isEmpty) return _err('工作轨迹内容为空');
         final id = await _appendTrace(<String, dynamic>{
-          'kind': 'work', 'task': task, 'ts': _now(),
+          'kind': 'work',
+          'task': task,
+          'ts': _now(),
           'source': (p['source'] ?? 'manual').toString(),
         });
         final traces = await store.readRecords('work_traces');
         return <String, dynamic>{
-          'ok': true, 'action': action,
+          'ok': true,
+          'action': action,
           'data': <String, dynamic>{
-            'completion': task, 'traces': traces.length, 'id': id,
+            'completion': task,
+            'traces': traces.length,
+            'id': id,
           },
         };
       case 'run':
@@ -4230,8 +4622,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         // 真实蒸馏需要模型权重与教师输出；不具备时明确拒绝，不产出假模型。
         final traces = await store.readRecords('work_traces');
         return <String, dynamic>{
-          'ok': false, 'action': action,
-          'error': '蒸馏需要真实基底模型权重与教师输出。当前已采集 '
+          'ok': false,
+          'action': action,
+          'error':
+              '蒸馏需要真实基底模型权重与教师输出。当前已采集 '
               '${traces.length} 条真实工作轨迹，但未加载权重；'
               '请先下载 GGUF 基底模型或配置 API 教师凭据，不会伪造模型产物。',
           'data': <String, dynamic>{'traces': traces.length},
@@ -4240,14 +4634,19 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         final id = (p['model_id'] ?? p['id'] ?? '').toString();
         final match = builtinCatalog.where((m) => m['id'] == id).toList();
         if (match.isEmpty) return _err('内置目录里没有模型 $id');
-        final expectedSha256 =
-            (p['expected_sha256'] ?? '').toString().trim().toLowerCase();
-        final job = await downloads.start(match.first['url'].toString(),
-            filename: '$id.gguf',
-            chunks: 4,
-            expectedSha256: expectedSha256.isEmpty ? null : expectedSha256);
+        final expectedSha256 = (p['expected_sha256'] ?? '')
+            .toString()
+            .trim()
+            .toLowerCase();
+        final job = await downloads.start(
+          match.first['url'].toString(),
+          filename: '$id.gguf',
+          chunks: 4,
+          expectedSha256: expectedSha256.isEmpty ? null : expectedSha256,
+        );
         return <String, dynamic>{
-          'ok': job.status != 'failed', 'action': action,
+          'ok': job.status != 'failed',
+          'action': action,
           'data': <String, dynamic>{
             'job_id': job.id,
             'target': job.target,
@@ -4272,13 +4671,62 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
   /// 中文常见双字停用词（统计话题簇时剔除，避免「什么/怎么」霸榜）。
   static const Set<String> _cjkStopwords = <String>{
-    '什么', '怎么', '如何', '可以', '这个', '那个', '一个', '一下',
-    '请问', '帮我', '给我', '觉得', '知道', '希望', '需要', '想要',
-    '问题', '东西', '时候', '现在', '然后', '已经', '还是', '或者',
-    '因为', '所以', '如果', '但是', '就是', '不是', '有什', '为什',
-    '哪些', '多少', '是否', '应该', '可能', '一样', '一直', '有点',
-    '好的', '谢谢', '你帮', '我帮', '我们', '你们', '他们', '这样',
-    '那样', '有没', '没什', '能不', '是不', '对什', '关于', '使用',
+    '什么',
+    '怎么',
+    '如何',
+    '可以',
+    '这个',
+    '那个',
+    '一个',
+    '一下',
+    '请问',
+    '帮我',
+    '给我',
+    '觉得',
+    '知道',
+    '希望',
+    '需要',
+    '想要',
+    '问题',
+    '东西',
+    '时候',
+    '现在',
+    '然后',
+    '已经',
+    '还是',
+    '或者',
+    '因为',
+    '所以',
+    '如果',
+    '但是',
+    '就是',
+    '不是',
+    '有什',
+    '为什',
+    '哪些',
+    '多少',
+    '是否',
+    '应该',
+    '可能',
+    '一样',
+    '一直',
+    '有点',
+    '好的',
+    '谢谢',
+    '你帮',
+    '我帮',
+    '我们',
+    '你们',
+    '他们',
+    '这样',
+    '那样',
+    '有没',
+    '没什',
+    '能不',
+    '是不',
+    '对什',
+    '关于',
+    '使用',
   };
 
   /// 对 turns 表的真实对话语料做统计蒸馏：
@@ -4295,7 +4743,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   /// 把 turns 按 session 配成 user→assistant 问答对。
   /// describe 与 run 共用，UI 显示的可蒸馏轮数与实际执行条件才一致。
   static List<Map<String, dynamic>> _qaPairsFrom(
-      List<Map<String, dynamic>> turns) {
+    List<Map<String, dynamic>> turns,
+  ) {
     final pending = <String, Map<String, dynamic>>{};
     final pairs = <Map<String, dynamic>>[];
     for (final t in turns) {
@@ -4325,8 +4774,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     final allPairs = _qaPairsFrom(turns);
     if (allPairs.length < _minDistillPairs) {
       return <String, dynamic>{
-        'ok': false, 'action': 'run',
-        'error': '可蒸馏问答对不足（当前 ${allPairs.length} 对，'
+        'ok': false,
+        'action': 'run',
+        'error':
+            '可蒸馏问答对不足（当前 ${allPairs.length} 对，'
             '至少需 $_minDistillPairs 对一问一答）',
         'data': <String, dynamic>{
           'pairs': allPairs.length,
@@ -4372,23 +4823,25 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       topics.add(<String, dynamic>{
         'keyword': kw,
         'count': matched.length,
-        'examples': matched
-            .take(3)
-            .map((p) {
-              final q = p['question'].toString().replaceAll('\n', ' ');
-              return q.length <= 60 ? q : '${q.substring(0, 60)}…';
-            })
-            .toList(),
+        'examples': matched.take(3).map((p) {
+          final q = p['question'].toString().replaceAll('\n', ' ');
+          return q.length <= 60 ? q : '${q.substring(0, 60)}…';
+        }).toList(),
       });
     }
 
     // ---- 3) 高频问答对：真实抽取，截断存储 ----
-    final qaPairs = corpus.reversed.take(60).toList().reversed
-        .map((p) => <String, dynamic>{
-              'question': _clipText(p['question'].toString(), 300),
-              'answer': _clipText(p['answer'].toString(), 300),
-              'ts': p['ts'],
-            })
+    final qaPairs = corpus.reversed
+        .take(60)
+        .toList()
+        .reversed
+        .map(
+          (p) => <String, dynamic>{
+            'question': _clipText(p['question'].toString(), 300),
+            'answer': _clipText(p['answer'].toString(), 300),
+            'ts': p['ts'],
+          },
+        )
         .toList();
 
     // ---- 4) 用户偏好摘要 + 语料统计（全部真实计数）----
@@ -4403,9 +4856,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       aChars += a.length;
       if (q.length < 15) shortQ += 1;
       sessions.add(p['session_id'].toString());
-      cjkChars += RegExp(r'[\u4e00-\u9fff]').allMatches(q).length +
+      cjkChars +=
+          RegExp(r'[\u4e00-\u9fff]').allMatches(q).length +
           RegExp(r'[\u4e00-\u9fff]').allMatches(a).length;
-      asciiWords += RegExp(r'[A-Za-z0-9_]+').allMatches(q).length +
+      asciiWords +=
+          RegExp(r'[A-Za-z0-9_]+').allMatches(q).length +
           RegExp(r'[A-Za-z0-9_]+').allMatches(a).length;
       final ts = p['ts'];
       if (ts is num) {
@@ -4424,12 +4879,14 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     final preferences = <String, dynamic>{
       'avg_question_chars': avgQ,
       'avg_answer_chars': avgA,
-      'short_question_ratio':
-          double.parse((shortQ / corpus.length).toStringAsFixed(2)),
+      'short_question_ratio': double.parse(
+        (shortQ / corpus.length).toStringAsFixed(2),
+      ),
       'sessions': sessions.length,
       'active_days': days.length,
       'top_interests': topInterests,
-      'summary': '你平均每次提问 $avgQ 字、助手平均回复 $avgA 字；'
+      'summary':
+          '你平均每次提问 $avgQ 字、助手平均回复 $avgA 字；'
           '话题集中在 ${topInterests.join('、')}',
     };
 
@@ -4439,13 +4896,15 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     final day = '${now.year}-${two(now.month)}-${two(now.day)}';
     var name = 'tga-distill-$day.json';
     if (File('${store.sub('models').path}/$name').existsSync()) {
-      name = 'tga-distill-$day-${two(now.hour)}${two(now.minute)}'
+      name =
+          'tga-distill-$day-${two(now.hour)}${two(now.minute)}'
           '${two(now.second)}.json';
     }
     final pack = <String, dynamic>{
       'type': 'tga-knowledge-pack',
       'title': '知识蒸馏包（统计抽取，非神经网络权重）',
-      'disclaimer': '本文件由 TGA harness 对真实对话语料做统计蒸馏产出，'
+      'disclaimer':
+          '本文件由 TGA harness 对真实对话语料做统计蒸馏产出，'
           '内容是话题簇/问答对/偏好摘要等知识条目，不是模型权重。',
       'generated_at': now.toIso8601String(),
       'harness_version': version,
@@ -4466,7 +4925,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     await store.writeJson('models/$name', pack);
 
     return <String, dynamic>{
-      'ok': true, 'action': 'run',
+      'ok': true,
+      'action': 'run',
       'data': <String, dynamic>{
         'file': '${store.sub('models').path}/$name',
         'name': name,
@@ -4483,10 +4943,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   }
 
   static String _dayOfTs(double tsSeconds) =>
-      DateTime.fromMillisecondsSinceEpoch((tsSeconds * 1000).round())
-          .toLocal()
-          .toIso8601String()
-          .substring(0, 10);
+      DateTime.fromMillisecondsSinceEpoch(
+        (tsSeconds * 1000).round(),
+      ).toLocal().toIso8601String().substring(0, 10);
 
   /// 判断 models/ 下的 JSON 是否是知识蒸馏包（按文件内 type 标记识别，
   /// 重命名后依然能被识别；解析失败一律不算，不虚构条目）。
@@ -4505,29 +4964,33 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     final out = <Map<String, dynamic>>[
       ...store
           .scanFiles('models', extensions: <String>{'.gguf'})
-          .map((f) => <String, dynamic>{
-                'name': f['name'],
-                'path': f['path'],
-                'size': f['size'],
-                'modified': f['modified'],
-                'version': version,
-                'source': 'local',
-                'kind': 'gguf',
-              }),
+          .map(
+            (f) => <String, dynamic>{
+              'name': f['name'],
+              'path': f['path'],
+              'size': f['size'],
+              'modified': f['modified'],
+              'version': version,
+              'source': 'local',
+              'kind': 'gguf',
+            },
+          ),
       // 知识蒸馏包：models/ 下带 tga-knowledge-pack 标记的真实 JSON 文件。
       ...store
           .scanFiles('models', extensions: <String>{'.json'})
           .where((f) => _isKnowledgePack(f['path'].toString()))
-          .map((f) => <String, dynamic>{
-                'name': f['name'],
-                'path': f['path'],
-                'size': f['size'],
-                'modified': f['modified'],
-                'version': version,
-                'source': 'distill',
-                'kind': 'knowledge',
-                'label': '知识蒸馏包',
-              }),
+          .map(
+            (f) => <String, dynamic>{
+              'name': f['name'],
+              'path': f['path'],
+              'size': f['size'],
+              'modified': f['modified'],
+              'version': version,
+              'source': 'distill',
+              'kind': 'knowledge',
+              'label': '知识蒸馏包',
+            },
+          ),
     ];
     return out;
   }
@@ -4539,14 +5002,20 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     final f = File('${store.sub('models').path}/$name');
     if (!f.existsSync()) return _err('模型文件不存在：$name');
     f.deleteSync();
-    return <String, dynamic>{'ok': true, 'action': 'delete_model',
-      'data': <String, dynamic>{'name': name}};
+    return <String, dynamic>{
+      'ok': true,
+      'action': 'delete_model',
+      'data': <String, dynamic>{'name': name},
+    };
   }
 
   Future<Map<String, dynamic>> _renameModel(String old, String next) async {
-    if (old.isEmpty || next.isEmpty ||
-        old.contains('/') || next.contains('/') ||
-        old.contains('..') || next.contains('..')) {
+    if (old.isEmpty ||
+        next.isEmpty ||
+        old.contains('/') ||
+        next.contains('/') ||
+        old.contains('..') ||
+        next.contains('..')) {
       return _err('非法模型名称');
     }
     final src = File('${store.sub('models').path}/$old');
@@ -4554,8 +5023,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     if (!src.existsSync()) return _err('模型文件不存在：$old');
     if (dst.existsSync()) return _err('目标名称已存在：$next');
     await src.rename(dst.path);
-    return <String, dynamic>{'ok': true, 'action': 'rename_model',
-      'data': <String, dynamic>{'name': next}};
+    return <String, dynamic>{
+      'ok': true,
+      'action': 'rename_model',
+      'data': <String, dynamic>{'name': next},
+    };
   }
 
   Future<int> _appendTrace(Map<String, dynamic> record) =>
@@ -4566,7 +5038,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   Future<Map<String, dynamic>> _deviceFile(Map<String, dynamic> p) async {
     final action = _action(p, 'status');
     final args = p['args'] is Map
-        ? (p['args'] as Map).map((dynamic k, dynamic v) => MapEntry(k.toString(), v))
+        ? (p['args'] as Map).map(
+            (dynamic k, dynamic v) => MapEntry(k.toString(), v),
+          )
         : <String, dynamic>{};
     final root = store.sub('sandbox').path;
 
@@ -4597,20 +5071,23 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           if (!dir.existsSync()) return _err('目录不存在：${dir.path}');
           data = dir
               .listSync(followLinks: false)
-              .map((e) => <String, dynamic>{
-                    'name': e.uri.pathSegments.where((s) => s.isNotEmpty).last,
-                    'path': e.path,
-                    'is_directory': e is Directory,
-                    'size': e is File ? e.statSync().size : 0,
-                    'modified': e.statSync().modified.toIso8601String(),
-                  })
+              .map(
+                (e) => <String, dynamic>{
+                  'name': e.uri.pathSegments.where((s) => s.isNotEmpty).last,
+                  'path': e.path,
+                  'is_directory': e is Directory,
+                  'size': e is File ? e.statSync().size : 0,
+                  'modified': e.statSync().modified.toIso8601String(),
+                },
+              )
               .toList();
         case 'read':
           final f = File(resolve((args['path'] ?? '').toString()));
           if (!f.existsSync()) return _err('文件不存在：${f.path}');
           if (f.lengthSync() > 1024 * 1024) return _err('文件超过 1MB 读取上限');
           data = <String, dynamic>{
-            'path': f.path, 'content': await f.readAsString(),
+            'path': f.path,
+            'content': await f.readAsString(),
           };
         case 'write':
           final f = File(resolve((args['path'] ?? '').toString()));
@@ -4622,20 +5099,24 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           await d.create(recursive: true);
           data = <String, dynamic>{'path': d.path};
         case 'copy':
-          await File(resolve(args['from'].toString()))
-              .copy(resolve(args['to'].toString()));
+          await File(
+            resolve(args['from'].toString()),
+          ).copy(resolve(args['to'].toString()));
           data = <String, dynamic>{'ok': true};
         case 'move':
-          await File(resolve(args['from'].toString()))
-              .rename(resolve(args['to'].toString()));
+          await File(
+            resolve(args['from'].toString()),
+          ).rename(resolve(args['to'].toString()));
           data = <String, dynamic>{'ok': true};
         case 'rename':
-          await File(resolve(args['path'].toString()))
-              .rename(resolve(args['new_name'].toString()));
+          await File(
+            resolve(args['path'].toString()),
+          ).rename(resolve(args['new_name'].toString()));
           data = <String, dynamic>{'ok': true};
         case 'delete':
           final target = resolve((args['path'] ?? '').toString());
-          final entity = FileSystemEntity.typeSync(target) ==
+          final entity =
+              FileSystemEntity.typeSync(target) ==
                   FileSystemEntityType.directory
               ? Directory(target)
               : File(target);
@@ -4649,30 +5130,46 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
               .listSync(recursive: true, followLinks: false)
               .where((e) => e.path.toLowerCase().contains(kw))
               .take(200)
-              .map((e) => <String, dynamic>{'path': e.path,
-                'is_directory': e is Directory})
+              .map(
+                (e) => <String, dynamic>{
+                  'path': e.path,
+                  'is_directory': e is Directory,
+                },
+              )
               .toList();
         case 'largest_files':
           final dir = Directory(resolve((args['path'] ?? '').toString()));
           if (!dir.existsSync()) return _err('目录不存在：${dir.path}');
-          final files = dir
-              .listSync(recursive: true, followLinks: false)
-              .whereType<File>()
-              .map((f) => <String, dynamic>{
-                    'path': f.path, 'size': f.statSync().size})
-              .toList()
-            ..sort((a, b) => (b['size'] as int).compareTo(a['size'] as int));
+          final files =
+              dir
+                  .listSync(recursive: true, followLinks: false)
+                  .whereType<File>()
+                  .map(
+                    (f) => <String, dynamic>{
+                      'path': f.path,
+                      'size': f.statSync().size,
+                    },
+                  )
+                  .toList()
+                ..sort(
+                  (a, b) => (b['size'] as int).compareTo(a['size'] as int),
+                );
           data = files.take(20).toList();
         default:
           return _err('未知 device_file 动作：$action');
       }
       return <String, dynamic>{
-        'ok': true, 'op': action, 'data': data, 'error': '',
+        'ok': true,
+        'op': action,
+        'data': data,
+        'error': '',
         'needs_permission': false,
       };
     } on Object catch (e) {
       return <String, dynamic>{
-        'ok': false, 'op': action, 'error': '$e',
+        'ok': false,
+        'op': action,
+        'error': '$e',
         'needs_permission': false,
       };
     }
@@ -4688,17 +5185,21 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           <String, List<Map<String, dynamic>>>{};
       for (final t in turns) {
         final ts = t['ts'];
-        final millis = ts is num ? (ts * 1000).round() : DateTime.now().millisecondsSinceEpoch;
-        final day = DateTime.fromMillisecondsSinceEpoch(millis)
-            .toLocal()
-            .toIso8601String()
-            .substring(0, 10);
+        final millis = ts is num
+            ? (ts * 1000).round()
+            : DateTime.now().millisecondsSinceEpoch;
+        final day = DateTime.fromMillisecondsSinceEpoch(
+          millis,
+        ).toLocal().toIso8601String().substring(0, 10);
         days.putIfAbsent(day, () => <Map<String, dynamic>>[]).add(t);
       }
-      final out = days.entries
-          .map((e) => <String, dynamic>{'day': e.key, 'entries': e.value})
-          .toList()
-        ..sort((a, b) => (b['day'] as String).compareTo(a['day'] as String));
+      final out =
+          days.entries
+              .map((e) => <String, dynamic>{'day': e.key, 'entries': e.value})
+              .toList()
+            ..sort(
+              (a, b) => (b['day'] as String).compareTo(a['day'] as String),
+            );
       return <String, dynamic>{'days': out};
     }
     if (action == 'delete_day') {
@@ -4710,11 +5211,12 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       var deleted = 0;
       for (final t in turns) {
         final ts = t['ts'];
-        final millis = ts is num ? (ts * 1000).round() : DateTime.now().millisecondsSinceEpoch;
-        final d = DateTime.fromMillisecondsSinceEpoch(millis)
-            .toLocal()
-            .toIso8601String()
-            .substring(0, 10);
+        final millis = ts is num
+            ? (ts * 1000).round()
+            : DateTime.now().millisecondsSinceEpoch;
+        final d = DateTime.fromMillisecondsSinceEpoch(
+          millis,
+        ).toLocal().toIso8601String().substring(0, 10);
         if (d == day) {
           deleted++;
         } else {
@@ -4736,16 +5238,18 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       case 'list':
         return _ok(<String, dynamic>{
           'rules': rules
-              .map((r) => <String, dynamic>{
-                    'id': r['id'],
-                    'title': r['title'] ?? r['name'] ?? '规则',
-                    'name': r['name'] ?? r['title'] ?? '规则',
-                    'enabled': r['enabled'] == true || r['enabled'] == 1,
-                    // 规则由 App 内 TaskScheduler 执行：每 30s 轮询，
-                    // 仅在 App 进程存活期间触发（平台限制，如实说明）。
-                    'scheduled': true,
-                    'ts': r['ts'],
-                  })
+              .map(
+                (r) => <String, dynamic>{
+                  'id': r['id'],
+                  'title': r['title'] ?? r['name'] ?? '规则',
+                  'name': r['name'] ?? r['title'] ?? '规则',
+                  'enabled': r['enabled'] == true || r['enabled'] == 1,
+                  // 规则由 App 内 TaskScheduler 执行：每 30s 轮询，
+                  // 仅在 App 进程存活期间触发（平台限制，如实说明）。
+                  'scheduled': true,
+                  'ts': r['ts'],
+                },
+              )
               .toList(),
           'timers': <String>[],
           'scheduler': 'in-app',
@@ -4755,7 +5259,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         final title = (p['title'] ?? p['name'] ?? '').toString().trim();
         if (title.isEmpty) return _err('规则标题为空');
         final id = await store.insert('proactive_rules', <String, dynamic>{
-          'title': title, 'name': title, 'enabled': 1, 'ts': _now(),
+          'title': title,
+          'name': title,
+          'enabled': 1,
+          'ts': _now(),
         });
         return _ok(<String, dynamic>{'id': id});
       case 'set_rule':
@@ -4763,8 +5270,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         final enabled = p['enabled'] == true;
         for (final r in rules) {
           if ((r['name'] ?? r['title']).toString() == name) {
-            await store.update('proactive_rules', r['id'] as int,
-                <String, dynamic>{'enabled': enabled ? 1 : 0});
+            await store.update(
+              'proactive_rules',
+              r['id'] as int,
+              <String, dynamic>{'enabled': enabled ? 1 : 0},
+            );
             return _ok();
           }
         }
@@ -4788,7 +5298,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
               .toList();
           if (found.isNotEmpty) target = found.first['id'] as int;
         }
-        return <String, dynamic>{'ok': await store.remove('proactive_rules', target)};
+        return <String, dynamic>{
+          'ok': await store.remove('proactive_rules', target),
+        };
       default:
         return _err('未知 proactive_task 动作：$action');
     }
@@ -4829,7 +5341,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   /// 并重复建单，审批永远空转。
   Future<bool> _consumeGrant(String grantKey) async {
     if (grantKey.isEmpty) return false;
-    final List<Map<String, dynamic>> rows = await store.readRecords('approvals');
+    final List<Map<String, dynamic>> rows = await store.readRecords(
+      'approvals',
+    );
     for (int i = rows.length - 1; i >= 0; i--) {
       final Map<String, dynamic> r = rows[i];
       if (r['status'] != 'approved' ||
@@ -4840,11 +5354,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       final Object? rawId = r['id'];
       final int id = rawId is int ? rawId : int.tryParse('$rawId') ?? 0;
       if (id <= 0) continue;
-      if (!await store.update(
-        'approvals',
-        id,
-        <String, dynamic>{'consumed': 1},
-      )) {
+      if (!await store.update('approvals', id, <String, dynamic>{
+        'consumed': 1,
+      })) {
         return false;
       }
       await _auditLog().append(
@@ -4863,8 +5375,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   Future<bool> _workspaceGuard(String tool, String path) async {
     final String action = 'workspace.$tool';
     final String grantKey = 'workspace|$tool|$path';
-    PolicyDecision decision =
-        (await _policyEngine()).evaluate(tool: action, path: path);
+    PolicyDecision decision = (await _policyEngine()).evaluate(
+      tool: action,
+      path: path,
+    );
     // ask 命中的一次性放行凭据：批准后重试同一文件动作直接放行，不再空转建单。
     if (decision == PolicyDecision.ask && await _consumeGrant(grantKey)) {
       decision = PolicyDecision.allow;
@@ -4885,9 +5399,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         'consumed': 0,
         'ts': _now(),
       });
-      throw WorkspaceGuardDenied(
-        '操作需要审批：$path（审批 ID：$id，请在安全中心批准后重试）',
-      );
+      throw WorkspaceGuardDenied('操作需要审批：$path（审批 ID：$id，请在安全中心批准后重试）');
     }
     return false;
   }
@@ -4917,7 +5429,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       case 'request':
         final id = await store.insert('approvals', <String, dynamic>{
           'action': (p['name'] ?? '未命名操作').toString(),
-          'status': 'pending', 'ts': _now(),
+          'status': 'pending',
+          'ts': _now(),
         });
         return _ok(<String, dynamic>{'id': id});
       case 'approve' || 'deny':
@@ -4937,9 +5450,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       case 'policy_list':
         final policy = await _ensurePolicy();
         return _ok(<String, dynamic>{
-          'rules': policy.rules
-              .map((PermissionRule r) => r.toJson())
-              .toList(),
+          'rules': policy.rules.map((PermissionRule r) => r.toJson()).toList(),
           'fallback': policy.fallback.name,
         });
 
@@ -4947,12 +5458,18 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         final raw = <String, dynamic>{};
         final supplied = p['rule'];
         if (supplied is Map) {
-          raw.addAll(supplied.map(
-            (Object? k, Object? v) => MapEntry(k.toString(), v),
-          ));
+          raw.addAll(
+            supplied.map((Object? k, Object? v) => MapEntry(k.toString(), v)),
+          );
         }
         for (final String key in const <String>[
-          'id', 'tool', 'path', 'args', 'decision', 'enabled', 'note',
+          'id',
+          'tool',
+          'path',
+          'args',
+          'decision',
+          'enabled',
+          'note',
         ]) {
           if (p.containsKey(key)) raw[key] = p[key];
         }
@@ -5034,8 +5551,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           }
         }
         return _ok(<String, dynamic>{
-          'decision':
-              policy.evaluate(tool: tool, path: path, args: args).name,
+          'decision': policy.evaluate(tool: tool, path: path, args: args).name,
           'matched': matched,
         });
 
@@ -5087,7 +5603,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       for (final f in files) {
         var declared = '';
         try {
-          final content = await store.file('plugins/${f['name']}').readAsString();
+          final content = await store
+              .file('plugins/${f['name']}')
+              .readAsString();
           final j = jsonDecode(content);
           if (j is Map) declared = (j['version'] ?? '').toString();
         } on Object {
@@ -5113,12 +5631,18 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       if (name.isEmpty || name.contains('/') || name.contains('..')) {
         return _err('非法插件名称');
       }
-      final f = store.file('plugins/${name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')}.json');
-      await f.writeAsString(jsonEncode(<String, dynamic>{
-        'name': name, 'version': version,
-        'installed_at': DateTime.now().toIso8601String(),
-        'source': 'local',
-      }), flush: true);
+      final f = store.file(
+        'plugins/${name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')}.json',
+      );
+      await f.writeAsString(
+        jsonEncode(<String, dynamic>{
+          'name': name,
+          'version': version,
+          'installed_at': DateTime.now().toIso8601String(),
+          'source': 'local',
+        }),
+        flush: true,
+      );
       return _ok(<String, dynamic>{'name': name});
     }
     if (action == 'uninstall') {
@@ -5143,19 +5667,27 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     // 是真实内置能力，但这不是一个「市场」，kind/source 如实标注。
     const List<Map<String, dynamic>> items = <Map<String, dynamic>>[
       <String, dynamic>{
-        'name': 'model-download', 'kind': '技能', 'source': '内置',
+        'name': 'model-download',
+        'kind': '技能',
+        'source': '内置',
         'description': '模型下载：分片 + 断点续传 + 校验',
       },
       <String, dynamic>{
-        'name': 'safe-expression', 'kind': '工具', 'source': '内置',
+        'name': 'safe-expression',
+        'kind': '工具',
+        'source': '内置',
         'description': '受限表达式求值，无 I/O',
       },
       <String, dynamic>{
-        'name': 'local-memory', 'kind': '工具', 'source': '内置',
+        'name': 'local-memory',
+        'kind': '工具',
+        'source': '内置',
         'description': '本地记忆写入与检索',
       },
       <String, dynamic>{
-        'name': 'trajectory', 'kind': '技能', 'source': '内置',
+        'name': 'trajectory',
+        'kind': '技能',
+        'source': '内置',
         'description': '工作轨迹采集与快照导出',
       },
     ];
@@ -5168,13 +5700,23 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       if (found.isEmpty) return _err('内置目录里没有插件：$name');
       // 真安装：在 plugins 池落一条本地注册记录（与 plugin_lifecycle
       // install 同一落点）；旧实现什么都不写就报 ok，是假安装成功。
-      final f = store.file('plugins/${name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')}.json');
-      await f.writeAsString(jsonEncode(<String, dynamic>{
-        'name': name, 'version': version,
-        'installed_at': DateTime.now().toIso8601String(),
-        'source': '内置目录',
-      }), flush: true);
-      return _ok(<String, dynamic>{'name': name, 'source': '内置', 'installed': true});
+      final f = store.file(
+        'plugins/${name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')}.json',
+      );
+      await f.writeAsString(
+        jsonEncode(<String, dynamic>{
+          'name': name,
+          'version': version,
+          'installed_at': DateTime.now().toIso8601String(),
+          'source': '内置目录',
+        }),
+        flush: true,
+      );
+      return _ok(<String, dynamic>{
+        'name': name,
+        'source': '内置',
+        'installed': true,
+      });
     }
     // 从本地文件添加插件：content 为用户通过文件选择器读到的 JSON 文本。
     if (action == 'install_local') {
@@ -5191,14 +5733,22 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       }
       if (parsed is! Map) return _err('插件 JSON 顶层必须是对象');
       final safe = name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
-      await store.file('plugins/$safe.json').writeAsString(
-          jsonEncode(<String, dynamic>{
-            ...parsed.map((k, v) => MapEntry(k.toString(), v)),
-            'name': (parsed['name'] ?? name).toString(),
-            'installed_at': DateTime.now().toIso8601String(),
-            'source': '本地文件',
-          }), flush: true);
-      return _ok(<String, dynamic>{'name': name, 'source': '本地文件', 'installed': true});
+      await store
+          .file('plugins/$safe.json')
+          .writeAsString(
+            jsonEncode(<String, dynamic>{
+              ...parsed.map((k, v) => MapEntry(k.toString(), v)),
+              'name': (parsed['name'] ?? name).toString(),
+              'installed_at': DateTime.now().toIso8601String(),
+              'source': '本地文件',
+            }),
+            flush: true,
+          );
+      return _ok(<String, dynamic>{
+        'name': name,
+        'source': '本地文件',
+        'installed': true,
+      });
     }
     // 技能：扫描随包/用户安装的 skills 目录（.md / .json 清单）。
     // 问题 #25：正确解析 YAML frontmatter 取 name/description（旧实现拿
@@ -5230,43 +5780,58 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           'enabled': !disabled.contains(fileName),
         });
       }
-      return _ok(<String, dynamic>{'skills': skills, 'dir': store.sub('skills').path});
+      return _ok(<String, dynamic>{
+        'skills': skills,
+        'dir': store.sub('skills').path,
+      });
     }
     // 启用/停用技能：持久化到 skill_state.json（真实生效——对话只注入
     // 已启用技能，见 _chat → _enabledSkillPool）。name 为技能文件名。
     if (action == 'skill_set_enabled') {
       final fileName = (p['name'] ?? '').toString().trim();
-      if (fileName.isEmpty || fileName.contains('/') || fileName.contains('..')) {
+      if (fileName.isEmpty ||
+          fileName.contains('/') ||
+          fileName.contains('..')) {
         return _err('非法技能名称');
       }
       final enabled = p['enabled'] == true;
       final cfg = await store.readJson('skill_state.json');
-      final set = <String>{...(cfg['disabled'] is List
-          ? (cfg['disabled'] as List).map((dynamic e) => e.toString())
-          : <String>[])};
+      final set = <String>{
+        ...(cfg['disabled'] is List
+            ? (cfg['disabled'] as List).map((dynamic e) => e.toString())
+            : <String>[]),
+      };
       if (enabled) {
         set.remove(fileName);
       } else {
         set.add(fileName);
       }
-      await store.writeJson('skill_state.json',
-          <String, dynamic>{'disabled': set.toList()..sort()});
+      await store.writeJson('skill_state.json', <String, dynamic>{
+        'disabled': set.toList()..sort(),
+      });
       return _ok(<String, dynamic>{'name': fileName, 'enabled': enabled});
     }
     // 编辑技能：读取 / 保存技能文件真实文本（⋮ 菜单「编辑」用）。
     if (action == 'skill_read') {
       final fileName = (p['name'] ?? '').toString().trim();
-      if (fileName.isEmpty || fileName.contains('/') || fileName.contains('..')) {
+      if (fileName.isEmpty ||
+          fileName.contains('/') ||
+          fileName.contains('..')) {
         return _err('非法技能名称');
       }
       final f = store.file('skills/$fileName');
       if (!await f.exists()) return _err('技能文件不存在：$fileName');
-      return _ok(<String, dynamic>{'name': fileName, 'content': await f.readAsString()});
+      return _ok(<String, dynamic>{
+        'name': fileName,
+        'content': await f.readAsString(),
+      });
     }
     if (action == 'skill_save') {
       final fileName = (p['name'] ?? '').toString().trim();
       final content = (p['content'] ?? '').toString();
-      if (fileName.isEmpty || fileName.contains('/') || fileName.contains('..')) {
+      if (fileName.isEmpty ||
+          fileName.contains('/') ||
+          fileName.contains('..')) {
         return _err('非法技能名称');
       }
       if (!fileName.endsWith('.md') && !fileName.endsWith('.json')) {
@@ -5285,13 +5850,18 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       if (name.isEmpty || name.contains('/') || name.contains('..')) {
         return _err('非法技能名称');
       }
-      final safe = name.replaceAll(RegExp(r'[^A-Za-z0-9._\u4e00-\u9fa5-]'), '_');
+      final safe = name.replaceAll(
+        RegExp(r'[^A-Za-z0-9._\u4e00-\u9fa5-]'),
+        '_',
+      );
       final ext = (safe.endsWith('.md') || safe.endsWith('.json')) ? '' : '.md';
       final f = store.file('skills/$safe$ext');
       if (!await f.parent.exists()) await f.parent.create(recursive: true);
       await f.writeAsString(content, flush: true);
       return _ok(<String, dynamic>{
-        'name': safe, 'path': f.path, 'installed': true,
+        'name': safe,
+        'path': f.path,
+        'installed': true,
       });
     }
     if (action == 'skill_remove') {
@@ -5310,13 +5880,18 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       if (ok) {
         // 删除后清理停用状态，避免残留脏记录。
         final cfg = await store.readJson('skill_state.json');
-        final set = (cfg['disabled'] is List
-                ? (cfg['disabled'] as List).map((dynamic e) => e.toString()).toSet()
-                : <String>{})
-            .where((String e) => e != '$name.md' && e != '$name.json')
-            .toList()
-          ..sort();
-        await store.writeJson('skill_state.json', <String, dynamic>{'disabled': set});
+        final set =
+            (cfg['disabled'] is List
+                    ? (cfg['disabled'] as List)
+                          .map((dynamic e) => e.toString())
+                          .toSet()
+                    : <String>{})
+                .where((String e) => e != '$name.md' && e != '$name.json')
+                .toList()
+              ..sort();
+        await store.writeJson('skill_state.json', <String, dynamic>{
+          'disabled': set,
+        });
       }
       return <String, dynamic>{'ok': ok, 'name': name};
     }
@@ -5334,15 +5909,18 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       final cfg = await store.readJson('mcp_servers.json');
       final servers = <Map<String, dynamic>>[
         ...((cfg['servers'] is List)
-            ? (cfg['servers'] as List).whereType<Map>().map((e) =>
-                Map<String, dynamic>.from(e))
+            ? (cfg['servers'] as List).whereType<Map>().map(
+                (e) => Map<String, dynamic>.from(e),
+              )
             : <Map<String, dynamic>>[]),
       ];
       final entry = <String, dynamic>{
         'name': name,
         'transport': (p['transport'] ?? 'stdio').toString(),
         'command': (p['command'] ?? '').toString(),
-        'args': (p['args'] is List) ? (p['args'] as List).map((e) => e.toString()).toList() : <String>[],
+        'args': (p['args'] is List)
+            ? (p['args'] as List).map((e) => e.toString()).toList()
+            : <String>[],
         'url': (p['url'] ?? '').toString(),
         'updated_at': DateTime.now().toIso8601String(),
       };
@@ -5352,25 +5930,33 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       } else {
         servers.add(entry);
       }
-      await store.writeJson('mcp_servers.json', <String, dynamic>{'servers': servers});
+      await store.writeJson('mcp_servers.json', <String, dynamic>{
+        'servers': servers,
+      });
       // 保存即真实重连：新服务的工具立刻注册进 AgentLoop。
       return _ok(<String, dynamic>{
-        'name': name, 'count': servers.length,
+        'name': name,
+        'count': servers.length,
         'mcp_status': await _mcpSync(),
       });
     }
     if (action == 'mcp_remove') {
       final name = (p['name'] ?? '').toString().trim();
       final cfg = await store.readJson('mcp_servers.json');
-      final servers = ((cfg['servers'] is List)
-              ? (cfg['servers'] as List).whereType<Map>().map(
-                  (e) => Map<String, dynamic>.from(e))
-              : <Map<String, dynamic>>[])
-          .where((s) => (s['name'] ?? '') != name)
-          .toList();
-      await store.writeJson('mcp_servers.json', <String, dynamic>{'servers': servers});
+      final servers =
+          ((cfg['servers'] is List)
+                  ? (cfg['servers'] as List).whereType<Map>().map(
+                      (e) => Map<String, dynamic>.from(e),
+                    )
+                  : <Map<String, dynamic>>[])
+              .where((s) => (s['name'] ?? '') != name)
+              .toList();
+      await store.writeJson('mcp_servers.json', <String, dynamic>{
+        'servers': servers,
+      });
       return _ok(<String, dynamic>{
-        'count': servers.length, 'mcp_status': await _mcpSync(),
+        'count': servers.length,
+        'mcp_status': await _mcpSync(),
       });
     }
     // 手动重连全部 MCP 服务并返回真实状态（供插件社区页展示）。
@@ -5395,12 +5981,12 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   };
 
   Map<String, String> _githubHeaders() => <String, String>{
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'tangram-agent',
-        if (UpdateService.githubToken.isNotEmpty)
-          'Authorization': 'Bearer ${UpdateService.githubToken}',
-      };
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'tangram-agent',
+    if (UpdateService.githubToken.isNotEmpty)
+      'Authorization': 'Bearer ${UpdateService.githubToken}',
+  };
 
   /// 发现区数据源：GitHub 仓库搜索（远端关键词过滤，不是本地过滤）
   /// + 官方注册表（发布通道仓库 raw plugins.json，文件不存在如实跳过）。
@@ -5410,13 +5996,13 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     final kind = _discoverTopics.containsKey(kindRaw) ? kindRaw : 'plugin';
     final kw = (p['query'] ?? '').toString().trim();
     final topic = _discoverTopics[kind]!;
-    final uri = Uri.https('api.github.com', '/search/repositories',
-        <String, String>{
-      'q': kw.isEmpty ? 'topic:$topic' : '$kw topic:$topic',
-      'sort': 'stars',
-      'order': 'desc',
-      'per_page': '20',
-    });
+    final uri =
+        Uri.https('api.github.com', '/search/repositories', <String, String>{
+          'q': kw.isEmpty ? 'topic:$topic' : '$kw topic:$topic',
+          'sort': 'stars',
+          'order': 'desc',
+          'per_page': '20',
+        });
     final items = <Map<String, dynamic>>[];
     String? searchError;
     try {
@@ -5467,20 +6053,27 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   /// 官方注册表：读发布通道仓库（与 UpdateService 同一 owner/repo 常量）
   /// 的 raw plugins.json。文件不存在（404）/网络失败一律如实跳过，不编造。
   Future<List<Map<String, dynamic>>> _registryPlugins() async {
-    final uri = Uri.parse('https://raw.githubusercontent.com/'
-        '${UpdateService.repoOwner}/${UpdateService.repoName}/main/plugins.json');
+    final uri = Uri.parse(
+      'https://raw.githubusercontent.com/'
+      '${UpdateService.repoOwner}/${UpdateService.repoName}/main/plugins.json',
+    );
     try {
-      final resp = await http.get(uri, headers: <String, String>{
-        if (UpdateService.githubToken.isNotEmpty)
-          'Authorization': 'Bearer ${UpdateService.githubToken}',
-      }).timeout(const Duration(seconds: 10));
+      final resp = await http
+          .get(
+            uri,
+            headers: <String, String>{
+              if (UpdateService.githubToken.isNotEmpty)
+                'Authorization': 'Bearer ${UpdateService.githubToken}',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
       if (resp.statusCode != 200) return <Map<String, dynamic>>[];
       final decoded = jsonDecode(utf8.decode(resp.bodyBytes));
       final list = decoded is List
           ? decoded
           : (decoded is Map && decoded['plugins'] is List
-              ? decoded['plugins'] as List
-              : null);
+                ? decoded['plugins'] as List
+                : null);
       if (list == null) return <Map<String, dynamic>>[];
       return list.whereType<Map>().map((Map<dynamic, dynamic> e) {
         final m = e.map((dynamic k, dynamic v) => MapEntry(k.toString(), v));
@@ -5490,9 +6083,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           'description': (m['description'] ?? '').toString(),
           'stars': m['stars'] is num ? (m['stars'] as num).toInt() : 0,
           'updated': (m['updated'] ?? '').toString(),
-          'url': (m['url'] ?? (repo.isEmpty
-                  ? ''
-                  : 'https://github.com/$repo'))
+          'url': (m['url'] ?? (repo.isEmpty ? '' : 'https://github.com/$repo'))
               .toString(),
           'repo': repo,
           'branch': (m['branch'] ?? 'main').toString(),
@@ -5511,14 +6102,17 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   /// 技能写 skills/*.md（skills_list 与启用链路可识别），插件清单写
   /// plugins/<safe>.json（与 plugin_lifecycle 同一落点，「已安装」可见可卸载）。
   /// 网络不可达与仓库确无文件分开如实上报，不再把超时误报成 404。
-  Future<Map<String, dynamic>> _installRepoPlugin(Map<String, dynamic> p) async {
+  Future<Map<String, dynamic>> _installRepoPlugin(
+    Map<String, dynamic> p,
+  ) async {
     final String repo = (p['repo'] ?? '').toString().trim();
     if (!RegExp(r'^[\w.\-]+/[\w.\-]+$').hasMatch(repo)) {
       return _err('非法仓库名：$repo');
     }
     final String branchRaw = (p['branch'] ?? '').toString().trim();
-    final String branch =
-        RegExp(r'^[\w.\-]+$').hasMatch(branchRaw) ? branchRaw : 'main';
+    final String branch = RegExp(r'^[\w.\-]+$').hasMatch(branchRaw)
+        ? branchRaw
+        : 'main';
     final String name = (p['name'] ?? repo).toString().trim();
     if (name.isEmpty) return _err('插件名称为空');
     final String safe = name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
@@ -5533,7 +6127,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       final http.Response tree = await http
           .get(
             Uri.parse(
-                'https://api.github.com/repos/$repo/git/trees/$branch?recursive=1'),
+              'https://api.github.com/repos/$repo/git/trees/$branch?recursive=1',
+            ),
             headers: <String, String>{
               'Accept': 'application/vnd.github+json',
               'User-Agent': 'tangram-agent',
@@ -5568,8 +6163,12 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     Future<Map<String, dynamic>> fetch(String path) async {
       try {
         final http.Response r = await http
-            .get(Uri.parse('https://raw.githubusercontent.com/$repo/$branch/$path'),
-                headers: auth)
+            .get(
+              Uri.parse(
+                'https://raw.githubusercontent.com/$repo/$branch/$path',
+              ),
+              headers: auth,
+            )
             .timeout(const Duration(seconds: 8));
         return <String, dynamic>{
           'path': path,
@@ -5583,8 +6182,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       }
     }
 
-    final List<Map<String, dynamic>> fetched =
-        await Future.wait(paths.map(fetch));
+    final List<Map<String, dynamic>> fetched = await Future.wait(
+      paths.map(fetch),
+    );
     final Map<String, String> contents = <String, String>{};
     int netErrors = 0;
     int notFound = 0;
@@ -5599,10 +6199,12 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       }
     }
     if (contents.isEmpty) {
-      return _err(netErrors > 0 && notFound == 0
-          ? '无法连接 raw.githubusercontent.com（$netErrors 个文件超时或网络错误），未安装'
-          : '仓库 $repo 未找到 SKILL.md / plugin.json / README.md'
-              '（$notFound 个 404），未安装');
+      return _err(
+        netErrors > 0 && notFound == 0
+            ? '无法连接 raw.githubusercontent.com（$netErrors 个文件超时或网络错误），未安装'
+            : '仓库 $repo 未找到 SKILL.md / plugin.json / README.md'
+                  '（$notFound 个 404），未安装',
+      );
     }
 
     int skills = 0;
@@ -5617,7 +6219,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           final dynamic j = jsonDecode(body);
           if (j is Map) {
             manifest = j.map(
-                (dynamic k, dynamic v) => MapEntry(k.toString(), v));
+              (dynamic k, dynamic v) => MapEntry(k.toString(), v),
+            );
           }
         } on Object {
           manifest = <String, dynamic>{};
@@ -5625,8 +6228,7 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         continue;
       }
       // 技能 .md 原样落盘（保留 frontmatter），文件名展平子目录避免重名。
-      final String flat =
-          path.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+      final String flat = path.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
       final File target = store.file('skills/${safe}_$flat.md');
       if (!await target.parent.exists()) {
         await target.parent.create(recursive: true);
@@ -5636,15 +6238,18 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     }
 
     final File record = store.file('plugins/$safe.json');
-    await record.writeAsString(jsonEncode(<String, dynamic>{
-      ...manifest,
-      'name': name,
-      'version': (manifest['version'] ?? '').toString(),
-      'source': 'GitHub:$repo/$branch',
-      'repo': repo,
-      'skills': skills,
-      'installed_at': DateTime.now().toIso8601String(),
-    }), flush: true);
+    await record.writeAsString(
+      jsonEncode(<String, dynamic>{
+        ...manifest,
+        'name': name,
+        'version': (manifest['version'] ?? '').toString(),
+        'source': 'GitHub:$repo/$branch',
+        'repo': repo,
+        'skills': skills,
+        'installed_at': DateTime.now().toIso8601String(),
+      }),
+      flush: true,
+    );
     return _ok(<String, dynamic>{
       'name': name,
       'repo': repo,
@@ -5660,7 +6265,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   /// 解析技能文件：.md 取 YAML frontmatter 的 name/description（剥掉
   /// --- 头），无 frontmatter 时回退首个非标题正文行；.json 读清单字段。
   static ({String name, String description}) _parseSkillDoc(
-      String fileName, String text) {
+    String fileName,
+    String text,
+  ) {
     var name = fileName.split('.').first;
     var description = '';
     if (fileName.toLowerCase().endsWith('.json')) {
@@ -5726,8 +6333,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   /// 停用 = 不进对话技能池，真实生效）。无启用技能时返回空串不注入。
   Future<String> _enabledSkillPool() async {
     try {
-      final files =
-          store.scanFiles('skills', extensions: <String>{'.md', '.json'});
+      final files = store.scanFiles(
+        'skills',
+        extensions: <String>{'.md', '.json'},
+      );
       final disabled = await _skillDisabled();
       final buf = StringBuffer();
       var count = 0;
@@ -5804,8 +6413,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       }
       // 选中本地权重：扫描 downloads/ 下真实存在的 .gguf 文件。
       if (selectedId.startsWith('local:')) {
-        final files = store.scanFiles('downloads',
-            extensions: <String>{'.gguf', '.bin'});
+        final files = store.scanFiles(
+          'downloads',
+          extensions: <String>{'.gguf', '.bin'},
+        );
         final name = selectedId.substring('local:'.length);
         for (final f in files) {
           if ((f['name'] ?? '').toString() == name) {
@@ -5824,12 +6435,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
   // ---- 其余域 ----
 
-  Future<Map<String, dynamic>> _responsibilityTrace() async => _ok(
-        <String, dynamic>{
-          'traces': await store.readRecords('work_traces'),
-          'file': store.file('work_traces.json').path,
-        },
-      );
+  Future<Map<String, dynamic>> _responsibilityTrace() async =>
+      _ok(<String, dynamic>{
+        'traces': await store.readRecords('work_traces'),
+        'file': store.file('work_traces.json').path,
+      });
 
   /// 真实更新源：GET GitHub Releases API releases/latest
   /// （UpdateService.checkLatest，http 包 + 15s 超时，按需调用、不阻塞启动）。
@@ -5858,13 +6468,20 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   }
 
   Map<String, dynamic> _dependencyEvent() => <String, dynamic>{
-        'ok': true,
-        'installed': <String>['dart:core', 'dart:io', 'dart:isolate',
-          'path_provider', 'http', 'flutter_secure_storage'],
-        'missing': <String>[],
-        'note': '纯 Dart 内嵌后端只依赖 Flutter SDK 与随包 pub 依赖；'
-            '无 Python、无 CPython、无 Chaquopy。',
-      };
+    'ok': true,
+    'installed': <String>[
+      'dart:core',
+      'dart:io',
+      'dart:isolate',
+      'path_provider',
+      'http',
+      'flutter_secure_storage',
+    ],
+    'missing': <String>[],
+    'note':
+        '纯 Dart 内嵌后端只依赖 Flutter SDK 与随包 pub 依赖；'
+        '无 Python、无 CPython、无 Chaquopy。',
+  };
 
   /// 感知采集：真实读取本机状态（时钟/时区/平台/CPU/内存/网卡/磁盘）。
   ///
@@ -5895,21 +6512,29 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         includeLoopback: false,
       );
       data['network_interfaces'] = ifaces
-          .map((NetworkInterface i) => <String, dynamic>{
-                'name': i.name,
-                'addresses': i.addresses
-                    .map((dynamic a) => a.address.toString())
-                    .toList(),
-              })
+          .map(
+            (NetworkInterface i) => <String, dynamic>{
+              'name': i.name,
+              'addresses': i.addresses
+                  .map((dynamic a) => a.address.toString())
+                  .toList(),
+            },
+          )
           .toList();
     } on Object {
       data['network_interfaces'] = <dynamic>[];
       data['network_error'] = '网卡枚举被平台拒绝或未授权，如实留空';
     }
     data['not_collected'] = <String>[
-      '屏幕内容', '摄像头', '麦克风波形', '传感器', '位置', '无障碍',
+      '屏幕内容',
+      '摄像头',
+      '麦克风波形',
+      '传感器',
+      '位置',
+      '无障碍',
     ];
-    data['note'] = '以上均为本机真实读数。屏幕/传感器/位置等需要系统权限，'
+    data['note'] =
+        '以上均为本机真实读数。屏幕/传感器/位置等需要系统权限，'
         '本应用未申请，未采集的数据一律不编造；需要时请在系统设置授权后接入对应插件。';
     return data;
   }
@@ -5942,11 +6567,13 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
   /// 用真实 `df -k` 读工作区所在磁盘剩余空间（KB）；不支持/失败返回 null。
   Future<int?> _diskFreeKb() async {
-    if (!Platform.isLinux && !Platform.isAndroid && !Platform.isMacOS) return null;
+    if (!Platform.isLinux && !Platform.isAndroid && !Platform.isMacOS)
+      return null;
     try {
-      final ProcessResult r = await Process.run(
-        'df', <String>['-k', store.root.path],
-      ).timeout(const Duration(seconds: 5));
+      final ProcessResult r = await Process.run('df', <String>[
+        '-k',
+        store.root.path,
+      ]).timeout(const Duration(seconds: 5));
       if (r.exitCode != 0) return null;
       final List<String> lines = '${r.stdout}'.trim().split('\n');
       if (lines.length < 2) return null;
@@ -5960,21 +6587,21 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
   }
 
   Map<String, dynamic> _reload() => <String, dynamic>{
-        'ok': true,
-        'reloaded': true,
-        'message': '内嵌后端常驻，无需重载；策略与文件在下次请求时重新读取。',
-      };
+    'ok': true,
+    'reloaded': true,
+    'message': '内嵌后端常驻，无需重载；策略与文件在下次请求时重新读取。',
+  };
 
   Map<String, dynamic> _status() => <String, dynamic>{
-        'status': 'ok',
-        'pid': 0,
-        'transport': 'in-process-dart',
-        'handlers': controlDomains.map((d) => 'control/$d').toList(),
-        'tools': tools.length,
-        'debug': kDebugMode,
-        'kernel_booted': _kernel?.booted ?? false,
-        'kernel_mounted': _kernel?.mountedCount ?? 0,
-      };
+    'status': 'ok',
+    'pid': 0,
+    'transport': 'in-process-dart',
+    'handlers': controlDomains.map((d) => 'control/$d').toList(),
+    'tools': tools.length,
+    'debug': kDebugMode,
+    'kernel_booted': _kernel?.booted ?? false,
+    'kernel_mounted': _kernel?.mountedCount ?? 0,
+  };
 
   Future<void> dispose() async {
     // 先等后台预热/装配收敛：否则 dispose 返回后 fire-and-forget 仍在写盘，
