@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -430,7 +431,21 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
                   child: ClipRRect(
                     borderRadius: BorderRadius.vertical(
                         top: Radius.circular(Tga.rCard)),
-                    child: _buildMap(route, current),
+                    child: Stack(
+                      children: <Widget>[
+                        Positioned.fill(child: _buildMap(route, current)),
+                        if (state == 'running' || state == 'paused')
+                          Positioned(
+                            left: 12,
+                            bottom: 12,
+                            child: _JoystickPad(
+                              onMove: (double speed, double bearing) {
+                                _runtime.manual(speed, bearing);
+                              },
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
                 Padding(
@@ -729,4 +744,90 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
   }
 }
 
-/// 轻量轨迹绘制（不依赖任何地图 SDK）：折线 + 起点/终点 + 当前位置。
+/// 悬浮摇杆：拖动改变速度/方向，松手归零。
+/// 速度映射 0..6 m/s，方向 0=北、顺时针；叠加在路线当前位置上。
+class _JoystickPad extends StatefulWidget {
+  const _JoystickPad({required this.onMove});
+
+  final void Function(double speed, double bearing) onMove;
+
+  @override
+  State<_JoystickPad> createState() => _JoystickPadState();
+}
+
+class _JoystickPadState extends State<_JoystickPad> {
+  static const double _radius = 34;
+  Offset _offset = Offset.zero;
+
+  void _update(Offset delta) {
+    Offset next = _offset + delta;
+    final double len = next.distance;
+    if (len > _radius) next = next / len * _radius;
+    setState(() => _offset = next);
+    final double speed = (len.clamp(0.0, _radius) / _radius) * 6.0;
+    final double bearing =
+        math.atan2(next.dx, -next.dy) * 180.0 / math.pi;
+    widget.onMove(speed, (bearing + 360) % 360);
+  }
+
+  void _release() {
+    setState(() => _offset = Offset.zero);
+    widget.onMove(0, 0);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onPanUpdate: (DragUpdateDetails d) => _update(d.delta),
+      onPanEnd: (_) => _release(),
+      onPanCancel: _release,
+      child: Container(
+        width: 92,
+        height: 92,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.white.withValues(alpha: 0.88),
+          border: Border.all(color: const Color(0x334C6FFF), width: 1),
+          boxShadow: <BoxShadow>[
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.10),
+              blurRadius: 12,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Stack(
+          alignment: Alignment.center,
+          children: <Widget>[
+            Container(
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                    color: const Color(0x224C6FFF), width: 1),
+              ),
+            ),
+            Transform.translate(
+              offset: _offset,
+              child: Container(
+                width: 40,
+                height: 40,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(
+                    colors: <Color>[Color(0xFF6C8BFF), Color(0xFF4C6FFF)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                ),
+                child: const Icon(Icons.open_with_rounded,
+                    size: 18, color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

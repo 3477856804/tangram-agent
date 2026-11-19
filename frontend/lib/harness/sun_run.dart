@@ -545,6 +545,12 @@ class SunRunEngine {
   double _speed = 0;
   double _distanceM = 0;
   double _elapsedSec = 0;
+  // 悬浮摇杆：手动速度/方向与相对路线的位移。
+  bool _manualActive = false;
+  double _manualSpeed = 0;
+  double _manualBearing = 0;
+  double _manualE = 0;
+  double _manualN = 0;
   double _paceFactor = 1;
   double _targetPaceFactor = 1;
   double _nextPaceChange = 0;
@@ -601,6 +607,14 @@ class SunRunEngine {
     if (_state == 'paused') _state = 'running';
   }
 
+  /// 悬浮摇杆：速度 m/s + 方位角（0=北，顺时针）。speed=0 即松手停止。
+  /// 手动位移叠加在路线当前位置上，不会改写路线本身。
+  void manual(double speed, double bearing) {
+    _manualActive = speed > 0.05;
+    _manualSpeed = speed.clamp(0.0, 12.0).toDouble();
+    _manualBearing = ((bearing % 360) + 360) % 360;
+  }
+
   /// 推进 [dtSec] 秒。暂停时只让速度衰减，距离/时长不增长。
   SunRunFix tick(double dtSec) {
     final double dt = dtSec.isFinite ? dtSec.clamp(0.0, 10.0).toDouble() : 0.0;
@@ -645,10 +659,15 @@ class SunRunEngine {
     }
 
     final double targetSpeed =
-        _baseSpeed * fatigue * _paceFactor * (stopping ? 0.0 : 1.0);
+        _manualActive ? _manualSpeed : _baseSpeed * fatigue * _paceFactor * (stopping ? 0.0 : 1.0);
     _approachSpeed(targetSpeed, dt);
 
     _distanceM += _speed * dt;
+    if (_manualActive && _speed > 0.05) {
+      final double rad = _manualBearing * math.pi / 180.0;
+      _manualE += math.sin(rad) * _speed * dt;
+      _manualN += math.cos(rad) * _speed * dt;
+    }
     if (_distanceM >= _targetDistanceM) {
       _distanceM = _targetDistanceM;
       _speed = 0;
@@ -714,8 +733,10 @@ class SunRunEngine {
 
   SunRunFix _buildFix() {
     final Map<String, double> base = route.pointAt(_distanceM);
-    final double east = _noiseE + (_burstRemaining > 0 ? _burstE : 0);
-    final double north = _noiseN + (_burstRemaining > 0 ? _burstN : 0);
+    final double east = _noiseE + _manualE +
+        (_burstRemaining > 0 ? _burstE : 0);
+    final double north = _noiseN + _manualN +
+        (_burstRemaining > 0 ? _burstN : 0);
     final _LocalFrame frame = _LocalFrame(config.startLat, config.startLng);
     final Map<String, double> shifted = frame.toLatLng(
       (base['lng']! - config.startLng) * frame.mPerDegLng + east,
@@ -733,8 +754,11 @@ class SunRunEngine {
     final double cn0 = (_cn0 + _rngGps.range(-2, 2)).clamp(26.0, 46.0).toDouble();
     final double bearing = _speed < 0.3
         ? 0.0
-        : (base['bearing']! +
-                (_rngGps.nextDouble() < 0.5 ? -1 : 1) * _rngGps.range(1, 3)) %
+        : (_manualActive
+                ? _manualBearing
+                : base['bearing']! +
+                    (_rngGps.nextDouble() < 0.5 ? -1 : 1) *
+                        _rngGps.range(1, 3)) %
             360;
 
     return SunRunFix(
@@ -832,6 +856,8 @@ class SunRunRuntime {
         return _resume();
       case 'stop':
         return _stop();
+      case 'manual':
+        return _manual(args);
       case 'status':
         return _status();
       case 'history':
@@ -853,6 +879,19 @@ class SunRunRuntime {
   Future<Map<String, dynamic>> resume() async => _resume();
 
   Future<Map<String, dynamic>> stop() => _stop();
+
+  /// 悬浮摇杆输入：speed m/s、bearing 度；松手传 speed=0。
+  Map<String, dynamic> manual(double speed, double bearing) {
+    final SunRunEngine? engine = _engine;
+    if (engine == null) {
+      return <String, dynamic>{'ok': false, 'error': '没有进行中的会话'};
+    }
+    engine.manual(speed, bearing);
+    _lastFix = engine.currentFix?.toJson() ?? const <String, dynamic>{};
+    final Map<String, dynamic> fix = _lastFix;
+    if (fix.isNotEmpty) unawaited(SunRunNative.update(fix));
+    return <String, dynamic>{'ok': true, 'state': _state, ..._livePayload()};
+  }
 
   Map<String, dynamic> status() => _status();
 
@@ -986,6 +1025,12 @@ class SunRunRuntime {
       if (_lastError.isNotEmpty) 'error': _lastError,
       'session': summary,
     };
+  }
+
+  Map<String, dynamic> _manual(Map<String, dynamic> args) {
+    final double speed = (args['speed'] as num?)?.toDouble() ?? 0;
+    final double bearing = (args['bearing'] as num?)?.toDouble() ?? 0;
+    return manual(speed, bearing);
   }
 
   Map<String, dynamic> _status() {
