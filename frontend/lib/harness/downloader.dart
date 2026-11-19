@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/services.dart';
 import 'package:tangram/harness/store.dart';
 
 final RegExp _sha256Pattern = RegExp(r'^[0-9a-f]{64}$');
@@ -115,6 +116,7 @@ class DownloadManager {
     String? filename,
     int chunks = 4,
     String? expectedSha256,
+    int expectedBytes = 0,
   }) async {
     final name = (filename?.isNotEmpty == true)
         ? filename!
@@ -159,6 +161,12 @@ class DownloadManager {
       total = 0;
       _lastProbeError = '$e';
     }
+    // CDN 的 HEAD 有时返回错误/重定向页大小（例如 117MB），
+    // 以目录里的真实文件大小为准，否则进度会假 100% 后连接断开。
+    if (expectedBytes > total) {
+      total = expectedBytes;
+      resumable = true;
+    }
 
     final int n = (resumable && chunks > 1 && total > 1024 * 1024)
         ? chunks.clamp(1, 8)
@@ -173,6 +181,7 @@ class DownloadManager {
     );
     job.expectedSha256 = expected;
     _jobs[id] = job;
+    unawaited(_setKeepAlive(true));
     unawaited(_run(job));
     return job;
   }
@@ -232,6 +241,23 @@ class DownloadManager {
       job.status = 'failed';
       job.error = '$e';
     }
+    if (!_jobs.values.any((DownloadJob j) => j.status == 'running')) {
+      unawaited(_setKeepAlive(false));
+    }
+  }
+
+  /// Android 前台服务保活：让 Dart 下载在退到后台后继续跑。
+  static const MethodChannel _keepAlive =
+      MethodChannel('tga/model_download');
+
+  Future<void> _setKeepAlive(bool on) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _keepAlive.invokeMethod<void>(
+          on ? 'startKeepAlive' : 'stopKeepAlive');
+    } on Object {
+      // 原生层缺失时退化为普通前台下载，不阻断任务。
+    }
   }
 
   Future<void> _downloadWhole(DownloadJob job) async {
@@ -265,21 +291,47 @@ class DownloadManager {
       if (existing >= end - start + 1) return; // 该分片已完成
       offset = start + existing; // 从真实落盘字节续传
     }
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
-    try {
-      final req = await client.getUrl(Uri.parse(job.url));
-      req.headers.set('range', 'bytes=$offset-$end');
-      req.followRedirects = true;
-      final resp = await req.close().timeout(const Duration(seconds: 30));
-      if (resp.statusCode != 206 && resp.statusCode != 200) {
-        throw HttpException('分片 $index HTTP ${resp.statusCode}',
-            uri: Uri.parse(job.url));
+    for (var attempt = 0; attempt < 4; attempt++) {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 15);
+      IOSink? sink;
+      try {
+        final req = await client.getUrl(Uri.parse(job.url));
+        req.headers.set('range', 'bytes=$offset-$end');
+        req.followRedirects = true;
+        final resp = await req.close().timeout(const Duration(seconds: 30));
+        if (resp.statusCode != 206 && resp.statusCode != 200) {
+          throw HttpException('分片 $index HTTP ${resp.statusCode}',
+              uri: Uri.parse(job.url));
+        }
+        // 服务器忽略 Range 返回 200 时，不能在旧分片后追加，必须重写。
+        if (resp.statusCode == 200 && offset > start) {
+          offset = start;
+          if (part.existsSync()) await part.delete();
+        }
+        sink = part.openWrite(mode: FileMode.append);
+        await sink.addStream(resp);
+        await sink.close();
+        sink = null;
+        return;
+      } on Object catch (e) {
+        try {
+          await sink?.close();
+        } on Object {
+          // 关闭失败继续重试。
+        }
+        if (attempt >= 3) {
+          throw HttpException('分片 $index 下载失败：$e',
+              uri: Uri.parse(job.url));
+        }
+        // 连接被 CDN 提前关闭时，等 1/2/4 秒后从已落盘字节继续。
+        await Future<void>.delayed(Duration(seconds: 1 << attempt));
+        final existing = part.existsSync() ? part.lengthSync() : 0;
+        if (existing >= end - start + 1) return;
+        offset = start + existing;
+      } finally {
+        client.close(force: true);
       }
-      final sink = part.openWrite(mode: FileMode.append);
-      await sink.addStream(resp);
-      await sink.close();
-    } finally {
-      client.close(force: true);
     }
   }
 

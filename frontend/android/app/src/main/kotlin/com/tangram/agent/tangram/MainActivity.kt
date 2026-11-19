@@ -34,6 +34,27 @@ class MainActivity : FlutterActivity() {
         DeviceFileAccessPlugin(this).register(flutterEngine)
         // 爱阳光跑：系统位置注入原生桥（GPS/Network/Fused 测试 Provider）
         SunRunNativePlugin(this).register(flutterEngine)
+        // 模型下载保活：前台服务，避免退到后台后 Dart 下载被挂起
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger, "tga/model_download"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "startKeepAlive" -> {
+                    val intent = Intent(this, ModelDownloadKeepAliveService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(intent)
+                    } else {
+                        startService(intent)
+                    }
+                    result.success(true)
+                }
+                "stopKeepAlive" -> {
+                    stopService(Intent(this, ModelDownloadKeepAliveService::class.java))
+                    result.success(true)
+                }
+                else -> result.notImplemented()
+            }
+        }
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger, CHANNEL
         ).setMethodCallHandler { call, result ->

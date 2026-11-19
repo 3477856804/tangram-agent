@@ -3887,6 +3887,8 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         final job = await downloads.start(url,
             filename: safeName,
             chunks: 4,
+            expectedBytes:
+                (p['size'] is num) ? (p['size'] as num).toInt() : 0,
             expectedSha256: expectedSha256.isEmpty ? null : expectedSha256);
         _emit('download_progress', downloads.progress(job));
         return <String, dynamic>{

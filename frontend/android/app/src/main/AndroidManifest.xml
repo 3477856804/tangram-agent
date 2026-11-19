@@ -48,6 +48,10 @@
             android:name=".SunRunMockService"
             android:exported="false"
             android:foregroundServiceType="location" />
+        <!-- 模型下载保活前台服务 -->
+        <service
+            android:name=".ModelDownloadKeepAliveService"
+            android:exported="false" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

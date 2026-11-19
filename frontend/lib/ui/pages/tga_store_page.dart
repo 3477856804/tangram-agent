@@ -954,6 +954,7 @@ class _MsFilesSheetState extends State<_MsFilesSheet>
         'action': 'ms_download',
         'model_path': _repoPath,
         'file': f.path,
+        'size': f.size,
       });
       final dynamic p = env.payload;
       if (p is Map && p['ok'] == true) {
