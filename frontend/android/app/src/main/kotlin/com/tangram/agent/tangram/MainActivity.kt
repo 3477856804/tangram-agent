@@ -52,6 +52,20 @@ class MainActivity : FlutterActivity() {
                     stopService(Intent(this, ModelDownloadKeepAliveService::class.java))
                     result.success(true)
                 }
+                "updateProgress" -> {
+                    // Dart 侧下载进度（模型名 + 百分比 + 已下载/总量）→ 通知栏实时刷新。
+                    val name = call.argument<String>("model_name")
+                    val percent = (call.argument<Number>("percent")?.toInt())
+                        ?: -1
+                    val downloaded = (call.argument<Number>("downloaded")?.toLong())
+                        ?: 0L
+                    val total = (call.argument<Number>("total")?.toLong()) ?: 0L
+                    val done = (call.argument<Boolean>("done")) ?: false
+                    ModelDownloadKeepAliveService.updateProgress(
+                        name, percent, downloaded, total, done
+                    )
+                    result.success(true)
+                }
                 else -> result.notImplemented()
             }
         }

@@ -203,6 +203,15 @@ class DownloadManager {
   String? get lastProbeError => _lastProbeError;
 
   Future<void> _run(DownloadJob job) async {
+    // 进度上报定时器：Android 上每 400ms 把真实落盘字节刷到通知栏，
+    // 让「模型名 + 百分比 + 已下载/总量」在下拉通知里实时可见。
+    Timer? notifyTimer;
+    if (Platform.isAndroid) {
+      unawaited(_reportNotification(job));
+      notifyTimer = Timer.periodic(const Duration(milliseconds: 400), (_) {
+        if (job.status == 'running') unawaited(_reportNotification(job));
+      });
+    }
     try {
       final sidecar = File('${job.target}.tangram_dl.json');
       // 恢复断点：sidecar 存在且 url/size 一致时保留 .partN 续传。
@@ -253,6 +262,15 @@ class DownloadManager {
     } on Object catch (e) {
       job.status = 'failed';
       job.error = '$e';
+    } finally {
+      notifyTimer?.cancel();
+      // 终态刷新：仅当没有其它仍在下载的任务时，才把通知栏更新为「完成/失败」，
+      // 避免多任务并行时先完成的任务把正在下载的任务的通知覆盖成「完成」。
+      final bool othersRunning = _jobs.values.any(
+          (DownloadJob j) => j.id != job.id && j.status == 'running');
+      if (!othersRunning) {
+        await _reportNotification(job, done: true);
+      }
     }
     if (!_jobs.values.any((DownloadJob j) => j.status == 'running')) {
       unawaited(_setKeepAlive(false));
@@ -270,6 +288,27 @@ class DownloadManager {
           on ? 'startKeepAlive' : 'stopKeepAlive');
     } on Object {
       // 原生层缺失时退化为普通前台下载，不阻断任务。
+    }
+  }
+
+  /// 把真实下载进度上报到 Android 前台服务通知栏：标题=模型名，
+  /// 内容=百分比 + 已下载/总量。非 Android / 原生层缺失时静默忽略。
+  Future<void> _reportNotification(DownloadJob job, {bool done = false}) async {
+    if (!Platform.isAndroid) return;
+    try {
+      final prog = progress(job);
+      // 模型名优先用目标文件名（去掉 .gguf/.bin 后缀），比 URL 更可读。
+      final base = job.target.split(RegExp(r'[\\/]')).last;
+      final name = base.replaceFirst(RegExp(r'\.(gguf|bin)$', caseSensitive: false), '');
+      await _keepAlive.invokeMethod<void>('updateProgress', <String, dynamic>{
+        'model_name': name,
+        'percent': prog['percent'],
+        'downloaded': prog['downloaded'],
+        'total': prog['total'],
+        'done': done || job.status == 'done' || job.status == 'failed',
+      });
+    } on Object {
+      // 通知刷新失败不影响下载本身。
     }
   }
 

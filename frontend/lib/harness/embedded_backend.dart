@@ -1326,7 +1326,11 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
 
     // 流式 token 事件：云端真流式已在 onDelta 中逐片投递，不再重复整段；
     // 非流式路径（端侧 / 内置）仍按可见字符分片真实投递。
-    if (_streamedRemoteTokens < 1) {
+    // 注意：失败错误只作为一次性 reply 返回，不走这里分片，避免与前端兜底
+    // 渲染各投一次、导致同一段错误在 UI 上重复显示两遍。
+    final bool failedEngine = engine == 'local-inference-failed' ||
+        engine == 'remote-failed';
+    if (_streamedRemoteTokens < 1 && !failedEngine) {
       for (final chunk in _chunks(reply, 24)) {
         _emit('stream_token', <String, dynamic>{'token': chunk});
       }
