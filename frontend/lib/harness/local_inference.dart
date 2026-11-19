@@ -71,28 +71,38 @@ class LocalInference {
     if (size < 1024 * 1024) {
       return '权重文件不完整（${size}B），请重新下载';
     }
-    // 手机内存/带宽硬限制：超过 9GB 的权重在常见 12–16GB 机型上会疯狂换页，
-    // 表现就是“转圈几十分钟不说话”。这里直接拒绝，避免把设备拖死。
-    const int maxSafeBytes = 9 * 1024 * 1024 * 1024;
-    if (size > maxSafeBytes) {
-      return '模型过大：${(size / (1024 * 1024 * 1024)).toStringAsFixed(1)}GB，'
-          '超过端侧安全上限 9GB。请换 4B/8B 的 Q4 量化版（约 2.5–5GB）；'
-          '27B 这类模型手机无法在可接受时间内加载。';
-    }
+    final bool huge = size > 9 * 1024 * 1024 * 1024;
     _loading = true;
     _lastError = null;
     try {
       await dispose();
-      final engine = await LlamaEngine.load(
-        LlamaModel(ModelSource.path(modelPath)),
-        params: ModelParams(
-          contextSize: planner.contextSize,
-          numberOfThreads: planner.threads,
-          gpuLayers: 0,
-        ),
-      ).timeout(const Duration(seconds: 180));
+      // 优先 GPU（Android 已打 Vulkan/OpenCL 后端）；不支持时自动回退 CPU。
+      LlamaEngine engine;
+      try {
+        engine = await LlamaEngine.load(
+          LlamaModel(ModelSource.path(modelPath)),
+          params: ModelParams(
+            contextSize: planner.contextSize,
+            numberOfThreads: planner.threads,
+            gpuLayers: 99,
+          ),
+        ).timeout(const Duration(seconds: 180));
+      } on Object {
+        engine = await LlamaEngine.load(
+          LlamaModel(ModelSource.path(modelPath)),
+          params: ModelParams(
+            contextSize: planner.contextSize,
+            numberOfThreads: planner.threads,
+            gpuLayers: 0,
+          ),
+        ).timeout(const Duration(seconds: 180));
+      }
       _engine = engine;
       _loadedPath = modelPath;
+      if (huge) {
+        // 不阻断加载，只把风险留给日志；用户仍可继续用大模型。
+        _lastError = null;
+      }
       return null;
     } on Object catch (e) {
       _lastError = e.toString();

@@ -69,4 +69,4 @@ hooks:
       llamadart_native_runtimes: [llama_cpp]
       llamadart_native_backends:
         platforms:
-          android: [cpu]
+          android: [cpu, vulkan]

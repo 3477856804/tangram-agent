@@ -147,10 +147,10 @@ class DeepInferPlanner {
   int _totalCompletionTokens = 0;
   int _totalLatencyMs = 0;
 
-  /// 端侧线程数：不超过物理核数，且留一个核给 UI/网络，下限 2。
+  /// 端侧线程数：尽量吃满大核，但留一个核给 UI/网络，上限 8。
   static int defaultThreads() {
     final int cores = _cores();
-    return math.max(2, math.min(6, cores <= 2 ? cores : cores - 1));
+    return math.max(2, math.min(8, cores <= 2 ? cores : cores - 1));
   }
 
   static int _cores() {
