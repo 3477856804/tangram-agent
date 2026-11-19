@@ -32,6 +32,7 @@ enum _NavGroup {
 
 /// 现有导航项 → 业务分组（以 labelKey 为准，顺序保持 workspace_sections 的声明顺序）。
 const Map<String, _NavGroup> _navGroupByLabelKey = <String, _NavGroup>{
+  'sidebar.overview': _NavGroup.reports,
   'sidebar.knowledge': _NavGroup.reports,
   'sidebar.graph': _NavGroup.reports,
   'sidebar.snapshot': _NavGroup.reports,
@@ -55,6 +56,8 @@ const Map<String, _NavGroup> _navGroupByLabelKey = <String, _NavGroup>{
   'sidebar.sandbox': _NavGroup.system,
   'sidebar.workflow': _NavGroup.system,
   'sidebar.models': _NavGroup.system,
+  'sidebar.run': _NavGroup.system,
+  'sidebar.schedule': _NavGroup.system,
   'sidebar.compute': _NavGroup.system,
   'sidebar.security': _NavGroup.system,
   'sidebar.performance': _NavGroup.system,

@@ -17,7 +17,10 @@ import 'package:tangram/ui/pages/tga_mapping_page.dart';
 import 'package:tangram/ui/pages/tga_models_page.dart';
 import 'package:tangram/ui/pages/tga_performance_page.dart';
 import 'package:tangram/ui/pages/tga_persona_page.dart';
+import 'package:tangram/ui/pages/tga_overview_page.dart';
+import 'package:tangram/ui/pages/tga_run_page.dart';
 import 'package:tangram/ui/pages/tga_sandbox_page.dart';
+import 'package:tangram/ui/pages/tga_schedule_page.dart';
 import 'package:tangram/ui/pages/tga_security_page.dart';
 import 'package:tangram/ui/pages/tga_snapshot_page.dart';
 import 'package:tangram/ui/pages/tga_sphere_graph_page.dart';
@@ -70,6 +73,12 @@ List<NavItem> buildWorkspaceNavItems({Iterable<String>? visibleKeys}) {
 
 List<NavItem> _allWorkspaceNavItems() => <NavItem>[
       NavItem(
+        icon: Icons.dashboard_outlined,
+        labelKey: 'sidebar.overview',
+        page: const TgaOverviewPage(),
+        fullPage: true,
+      ),
+      NavItem(
         icon: Icons.tune_outlined,
         labelKey: 'sidebar.training',
         page: const TgaTrainingPage(),
@@ -97,6 +106,18 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
         icon: Icons.storefront_outlined,
         labelKey: 'sidebar.store',
         page: const TgaStorePage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.play_circle_outline_rounded,
+        labelKey: 'sidebar.run',
+        page: const TgaRunPage(),
+        fullPage: true,
+      ),
+      NavItem(
+        icon: Icons.schedule_rounded,
+        labelKey: 'sidebar.schedule',
+        page: const TgaSchedulePage(),
         fullPage: true,
       ),
       NavItem(

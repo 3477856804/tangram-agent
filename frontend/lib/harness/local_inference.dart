@@ -14,12 +14,14 @@
 /// 核对结果，投机解码的真实参数在 Python 后端（llama_cpp 起草模型）里生效。
 
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:llamadart/llamadart.dart';
 
 import 'deep_infer.dart';
 import 'gguf_probe.dart';
 import 'prompt_kit.dart';
+import 'store.dart';
 
 /// 一次 GGUF 加载档位：从快到稳逐级降级，兼顾速度与移动端内存。
 class _LoadProfile {
@@ -35,6 +37,23 @@ class _LoadProfile {
   final int contextSize;
   final int threads;
   final int timeout;
+}
+
+/// run_config.json 中与加载相关的配置子集（null = 未配置）。
+class _RunConfig {
+  const _RunConfig({
+    this.contextSize,
+    this.threads,
+    this.gpuLayers,
+    this.flashAttention,
+    this.kvCacheType,
+  });
+
+  final int? contextSize;
+  final int? threads;
+  final int? gpuLayers;
+  final FlashAttention? flashAttention;
+  final KvCacheType? kvCacheType;
 }
 
 /// 一次端侧推理的结果。
@@ -62,7 +81,8 @@ class LocalInference {
   static final LocalInference instance = LocalInference._();
 
   /// 端侧推理规划器（稳定前缀 / 预算 / 线程 / 起草长度）。
-  final DeepInferPlanner planner = DeepInferPlanner(contextSize: 2048);
+  /// 加载时按 run_config.json 重建，保证生成长度预算与真实上下文一致。
+  DeepInferPlanner planner = DeepInferPlanner(contextSize: 2048);
 
   LlamaEngine? _engine;
   String? _loadedPath;
@@ -104,12 +124,28 @@ class LocalInference {
     _lastError = null;
     try {
       await dispose();
-      final int threads = planner.threads;
-      final int ctx = planner.contextSize;
+      // 读取「运行」页保存的参数；缺失字段沿用既有默认值。
+      final _RunConfig cfg = await _readRunConfig();
+      final int threads = math.min(
+        math.max(2, cfg.threads ?? planner.threads),
+        math.max(2, Platform.numberOfProcessors),
+      );
+      final int ctx = math.max(512, cfg.contextSize ?? planner.contextSize);
+      if (threads != planner.threads || ctx != planner.contextSize) {
+        planner = DeepInferPlanner(contextSize: ctx, threads: threads);
+      }
+      final int gpuLayers =
+          (cfg.gpuLayers ?? 99).clamp(0, ModelParams.maxGpuLayers).toInt();
+      final KvCacheType kv = cfg.kvCacheType ?? KvCacheType.f16;
+      FlashAttention flash = cfg.flashAttention ?? FlashAttention.auto;
+      if (kv != KvCacheType.f16 && flash != FlashAttention.enabled) {
+        // llama.cpp 拒绝非 F16 KV 搭配关闭的 Flash Attention。
+        flash = FlashAttention.enabled;
+      }
       final source = LlamaModel(ModelSource.path(modelPath));
       // 2) 三级加载档位：从快到稳。
       final List<_LoadProfile> profiles = <_LoadProfile>[
-        _LoadProfile(gpuLayers: 99, batchSize: 256, contextSize: ctx,
+        _LoadProfile(gpuLayers: gpuLayers, batchSize: 256, contextSize: ctx,
             threads: threads, timeout: 180),
         _LoadProfile(gpuLayers: 0, batchSize: 128, contextSize: ctx,
             threads: threads, timeout: 180),
@@ -128,6 +164,9 @@ class LocalInference {
               numberOfThreadsBatch: p.threads,
               batchSize: p.batchSize,
               gpuLayers: p.gpuLayers,
+              flashAttention: flash,
+              cacheTypeK: kv,
+              cacheTypeV: kv,
             ),
           ).timeout(Duration(seconds: p.timeout));
           _engine = engine;
@@ -147,6 +186,36 @@ class LocalInference {
       return _friendlyLoadError(e, size);
     } finally {
       _loading = false;
+    }
+  }
+
+  /// 读取「运行」页写入的 run_config.json（缺失/损坏时返回空配置）。
+  Future<_RunConfig> _readRunConfig() async {
+    try {
+      final HarnessStore store = await HarnessStore.instance();
+      final Map<String, dynamic> cfg = await store.readJson('run_config.json');
+      final dynamic ctx = cfg['context_size'];
+      final dynamic threads = cfg['threads'];
+      final dynamic gpu = cfg['gpu_layers'];
+      final dynamic flash = cfg['flash_attn'];
+      final String kvRaw = (cfg['kv_cache'] ?? '').toString();
+      final KvCacheType? kv = switch (kvRaw) {
+        'q8_0' => KvCacheType.q8_0,
+        'q4_0' => KvCacheType.q4_0,
+        'f16' => KvCacheType.f16,
+        _ => null,
+      };
+      return _RunConfig(
+        contextSize: ctx is num ? ctx.toInt() : null,
+        threads: threads is num ? threads.toInt() : null,
+        gpuLayers: gpu is num ? gpu.toInt() : null,
+        flashAttention: flash is bool
+            ? (flash ? FlashAttention.enabled : FlashAttention.disabled)
+            : null,
+        kvCacheType: kv,
+      );
+    } on Object {
+      return const _RunConfig();
     }
   }
 

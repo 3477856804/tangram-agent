@@ -120,6 +120,9 @@ class TgaStrings {
     'home.engine': {'cn': 'TGA 引擎', 'tw': 'TGA 引擎', 'en': 'TGA Engine'},
     // ---- 侧边栏 ----
     'sidebar.newChat': {'cn': '新对话', 'tw': '新對話', 'en': 'New Chat'},
+    'sidebar.overview': {'cn': '概览', 'tw': '概覽', 'en': 'Overview'},
+    'sidebar.run': {'cn': '运行', 'tw': '運行', 'en': 'Run'},
+    'sidebar.schedule': {'cn': '定时', 'tw': '定時', 'en': 'Schedule'},
     'sidebar.training': {'cn': '训练', 'tw': '訓練', 'en': 'Training'},
     'sidebar.persona': {'cn': '人格', 'tw': '人格', 'en': 'Persona'},
     'sidebar.sandbox': {'cn': '沙箱', 'tw': '沙箱', 'en': 'Sandbox'},
