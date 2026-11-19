@@ -7,6 +7,13 @@
     <!-- 真实出站：模型商店索引、API 教师、模型/插件下载、社区索引都需要网络 -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- 爱阳光跑：系统位置注入（需在开发者选项里选择本应用为模拟位置应用） -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_MOCK_LOCATION"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- OTA 覆盖安装：调起系统安装器需要「安装未知应用」权限（Android 8+） -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
         <!-- tangram:branding -->
@@ -36,6 +43,11 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- 爱阳光跑：前台位置注入服务 -->
+        <service
+            android:name=".SunRunMockService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

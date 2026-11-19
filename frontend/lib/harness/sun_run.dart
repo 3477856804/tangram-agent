@@ -18,6 +18,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:tangram/harness/store.dart';
+import 'package:tangram/harness/sun_run_native.dart';
 
 // ---------------------------------------------------------------------------
 // 1. 模型
@@ -773,6 +774,7 @@ class SunRunRuntime {
 
   HarnessStore? _store;
   SunRunEngine? _engine;
+  Map<String, dynamic> _nativeStatus = const <String, dynamic>{};
   Timer? _timer;
   DateTime? _startedAt;
   bool _recorded = false;
@@ -876,6 +878,7 @@ class SunRunRuntime {
       _lastError = '';
       _lastStats = _engine!.stats.toJson();
       _lastFix = _engine!.currentFix?.toJson() ?? const <String, dynamic>{};
+      _nativeStatus = await SunRunNative.start(_lastFix);
       _timer = Timer.periodic(const Duration(seconds: 1), _onTick);
       unawaited(_ensureStore());
       return <String, dynamic>{
@@ -899,10 +902,14 @@ class SunRunRuntime {
       engine.tick(1.0);
       _lastStats = engine.stats.toJson();
       _lastFix = engine.currentFix?.toJson() ?? const <String, dynamic>{};
+      final Map<String, dynamic> fix = _lastFix;
+      if (fix.isNotEmpty) unawaited(SunRunNative.update(fix));
       if (engine.state == 'finished') {
         timer.cancel();
         _timer = null;
         _state = 'finished';
+        unawaited(SunRunNative.stop());
+        _nativeStatus = const <String, dynamic>{};
         if (!_recorded) {
           _recorded = true;
           unawaited(_writeHistory(_sessionSummary(engine)));
@@ -946,6 +953,8 @@ class SunRunRuntime {
   }
 
   Future<Map<String, dynamic>> _stop() async {
+    unawaited(SunRunNative.stop());
+    _nativeStatus = const <String, dynamic>{};
     final SunRunEngine? engine = _engine;
     _timer?.cancel();
     _timer = null;
@@ -1015,6 +1024,7 @@ class SunRunRuntime {
       'end': engine.route.endPoint,
       'route_length_m': engine.route.lengthM,
       'mode_label': engine.config.mode.label,
+      'native': _nativeStatus,
       'distance_km': stats['distanceM'] is num
           ? (stats['distanceM'] as num).toDouble() / 1000.0
           : 0.0,

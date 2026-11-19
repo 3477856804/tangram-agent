@@ -6,6 +6,8 @@ import 'package:latlong2/latlong.dart' as ll;
 
 import '../../design/tga_design.dart';
 import '../../harness/sun_run.dart';
+import '../../harness/sun_run_native.dart';
+import '../widgets/baidu_map_view.dart';
 
 /// 「爱阳光跑」——插件 `capability.sunrun` 的独立界面。
 ///
@@ -35,6 +37,7 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
   String _error = '';
   String _previousState = 'idle';
   Map<String, dynamic> _status = const <String, dynamic>{};
+  Map<String, dynamic> _native = const <String, dynamic>{};
   List<Map<String, dynamic>> _history = <Map<String, dynamic>>[];
 
   @override
@@ -42,6 +45,7 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
     super.initState();
     unawaited(_runtime.ensureStore());
     unawaited(_refreshAll());
+    unawaited(_loadNative());
     // 只刷新界面；运行中的 Timer 由运行时自己持有。
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       unawaited(_refreshStatus());
@@ -54,6 +58,12 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
     _timer?.cancel();
     _paceController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadNative() async {
+    final Map<String, dynamic> r = await SunRunNative.status();
+    if (!mounted) return;
+    setState(() => _native = r);
   }
 
   Future<void> _refreshAll() async {
@@ -205,6 +215,12 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
     final Map<String, dynamic> stats = _asMap(_status['stats']);
     final Map<String, dynamic> current = _asMap(_status['current']);
     final Map<String, dynamic> config = _asMap(_status['config']);
+    final Map<String, dynamic> liveNative = _asMap(_status['native']);
+    final Map<String, dynamic> native =
+        liveNative.isEmpty ? _native : liveNative;
+    final bool nativeSupported = native['supported'] == true ||
+        (native['platform'] == 'android');
+    final bool mockAllowed = native['mock_allowed'] == true;
     final List<Map<String, dynamic>> route =
         _mapList(_status['route']);
     final String state = (_status['state'] ?? 'idle').toString();
@@ -254,6 +270,32 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
                     TgaTag(_stateLabel(state), color: _stateColor(state)),
                     const Spacer(),
                     Text(modeLabel, style: Tga.sub),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: <Widget>[
+                    TgaTag(
+                      nativeSupported
+                          ? (mockAllowed ? '系统注入已授权' : '系统注入未授权')
+                          : '系统注入仅 Android',
+                      color: nativeSupported && mockAllowed
+                          ? Tga.green
+                          : Tga.orange,
+                    ),
+                    const Spacer(),
+                    if (nativeSupported)
+                      TextButton(
+                        onPressed: () async {
+                          final Map<String, dynamic> r =
+                              await SunRunNative.openDeveloperSettings();
+                          if (!mounted) return;
+                          if (r['ok'] != true) {
+                            _toast((r['error'] ?? '无法打开开发者选项').toString());
+                          }
+                        },
+                        child: const Text('开发者选项'),
+                      ),
                   ],
                 ),
                 const SizedBox(height: 14),
@@ -474,6 +516,24 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
     List<Map<String, dynamic>> route,
     Map<String, dynamic> current,
   ) {
+    // Android/iOS 用原工程百度 AK 的真实百度底图；其它平台回退 OSM。
+    if (BaiduMapView.supported) {
+      return BaiduMapView(
+        startLat: _startLat,
+        startLng: _startLng,
+        route: route,
+        current: current,
+        onTap: (double lat, double lng) {
+          setState(() {
+            _startLat = lat;
+            _startLng = lng;
+          });
+          _toast(
+              '起点已设为 ${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}');
+        },
+      );
+    }
+
     final List<ll.LatLng> points = <ll.LatLng>[
       for (final Map<String, dynamic> p in route)
         ll.LatLng(_num(p, 'lat'), _num(p, 'lng')),

@@ -32,6 +32,8 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         // tangram:device_file_access (generated)
         DeviceFileAccessPlugin(this).register(flutterEngine)
+        // 爱阳光跑：系统位置注入原生桥（GPS/Network/Fused 测试 Provider）
+        SunRunNativePlugin(this).register(flutterEngine)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger, CHANNEL
         ).setMethodCallHandler { call, result ->
