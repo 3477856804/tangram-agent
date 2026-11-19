@@ -14,6 +14,7 @@ import 'package:tangram/ui/pages/tga_experience_page.dart';
 import 'package:tangram/ui/pages/tga_group_chat_page.dart';
 import 'package:tangram/ui/pages/tga_knowledge_page.dart';
 import 'package:tangram/ui/pages/tga_mapping_page.dart';
+import 'package:tangram/ui/pages/tga_image_page.dart';
 import 'package:tangram/ui/pages/tga_models_page.dart';
 import 'package:tangram/ui/pages/tga_performance_page.dart';
 import 'package:tangram/ui/pages/tga_persona_page.dart';
@@ -72,187 +73,193 @@ List<NavItem> buildWorkspaceNavItems({Iterable<String>? visibleKeys}) {
 }
 
 List<NavItem> _allWorkspaceNavItems() => <NavItem>[
-      NavItem(
-        icon: Icons.dashboard_outlined,
-        labelKey: 'sidebar.overview',
-        page: const TgaOverviewPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.tune_outlined,
-        labelKey: 'sidebar.training',
-        page: const TgaTrainingPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.psychology_outlined,
-        labelKey: 'sidebar.persona',
-        page: const TgaPersonaPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.terminal_outlined,
-        labelKey: 'sidebar.sandbox',
-        page: const TgaSandboxPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.directions_run_rounded,
-        labelKey: 'sidebar.sunRun',
-        page: const TgaSunRunPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.storefront_outlined,
-        labelKey: 'sidebar.store',
-        page: const TgaStorePage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.play_circle_outline_rounded,
-        labelKey: 'sidebar.run',
-        page: const TgaRunPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.schedule_rounded,
-        labelKey: 'sidebar.schedule',
-        page: const TgaSchedulePage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.folder_outlined,
-        labelKey: 'sidebar.workspace',
-        page: const TgaWorkspacePage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.folder_copy_outlined,
-        labelKey: 'sidebar.mapping',
-        page: const TgaMappingPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.menu_book_outlined,
-        labelKey: 'sidebar.knowledge',
-        page: const TgaKnowledgePage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.account_tree_outlined,
-        labelKey: 'sidebar.workflow',
-        page: const TgaWorkflowPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.inventory_2_outlined,
-        labelKey: 'sidebar.snapshot',
-        page: const TgaSnapshotPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.auto_stories_outlined,
-        labelKey: 'sidebar.experience',
-        page: const TgaExperiencePage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.psychology_alt_outlined,
-        labelKey: 'sidebar.cognition',
-        page: const TgaCognitionPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.storefront_rounded,
-        labelKey: 'sidebar.appMarket',
-        page: const TgaAppMarketPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.extension_outlined,
-        labelKey: 'sidebar.creator',
-        page: const TgaCreatorPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.palette_outlined,
-        labelKey: 'sidebar.customize',
-        page: const _SharedCustomizePage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.widgets_outlined,
-        labelKey: 'sidebar.uiPlugins',
-        page: const TgaUiPluginsPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.movie_filter_outlined,
-        labelKey: 'sidebar.videoStudio',
-        page: const TgaVideoStudioPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.view_in_ar_outlined,
-        labelKey: 'sidebar.model3d',
-        page: const Tga3DPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.forum_outlined,
-        labelKey: 'sidebar.channels',
-        page: const TgaChannelsPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.memory_outlined,
-        labelKey: 'sidebar.models',
-        page: const TgaModelsPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.speed_rounded,
-        labelKey: 'sidebar.compute',
-        page: const TgaComputePage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.gpp_good_outlined,
-        labelKey: 'sidebar.security',
-        page: const TgaSecurityPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.monitor_heart_outlined,
-        labelKey: 'sidebar.performance',
-        page: const TgaPerformancePage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.forum_rounded,
-        labelKey: 'sidebar.groupChat',
-        page: const TgaGroupChatPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.groups_2_outlined,
-        labelKey: 'sidebar.team',
-        page: const TgaTeamPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.alternate_email_rounded,
-        labelKey: 'sidebar.accountOps',
-        page: const TgaAccountOpsPage(),
-        fullPage: true,
-      ),
-      NavItem(
-        icon: Icons.hub_outlined,
-        labelKey: 'sidebar.graph',
-        page: const TgaSphereGraphPage(),
-        fullPage: true,
-      ),
-    ];
+  NavItem(
+    icon: Icons.dashboard_outlined,
+    labelKey: 'sidebar.overview',
+    page: const TgaOverviewPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.tune_outlined,
+    labelKey: 'sidebar.training',
+    page: const TgaTrainingPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.psychology_outlined,
+    labelKey: 'sidebar.persona',
+    page: const TgaPersonaPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.terminal_outlined,
+    labelKey: 'sidebar.sandbox',
+    page: const TgaSandboxPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.directions_run_rounded,
+    labelKey: 'sidebar.sunRun',
+    page: const TgaSunRunPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.storefront_outlined,
+    labelKey: 'sidebar.store',
+    page: const TgaStorePage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.play_circle_outline_rounded,
+    labelKey: 'sidebar.run',
+    page: const TgaRunPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.schedule_rounded,
+    labelKey: 'sidebar.schedule',
+    page: const TgaSchedulePage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.folder_outlined,
+    labelKey: 'sidebar.workspace',
+    page: const TgaWorkspacePage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.folder_copy_outlined,
+    labelKey: 'sidebar.mapping',
+    page: const TgaMappingPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.menu_book_outlined,
+    labelKey: 'sidebar.knowledge',
+    page: const TgaKnowledgePage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.account_tree_outlined,
+    labelKey: 'sidebar.workflow',
+    page: const TgaWorkflowPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.inventory_2_outlined,
+    labelKey: 'sidebar.snapshot',
+    page: const TgaSnapshotPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.auto_stories_outlined,
+    labelKey: 'sidebar.experience',
+    page: const TgaExperiencePage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.psychology_alt_outlined,
+    labelKey: 'sidebar.cognition',
+    page: const TgaCognitionPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.storefront_rounded,
+    labelKey: 'sidebar.appMarket',
+    page: const TgaAppMarketPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.extension_outlined,
+    labelKey: 'sidebar.creator',
+    page: const TgaCreatorPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.palette_outlined,
+    labelKey: 'sidebar.customize',
+    page: const _SharedCustomizePage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.widgets_outlined,
+    labelKey: 'sidebar.uiPlugins',
+    page: const TgaUiPluginsPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.brush_outlined,
+    labelKey: 'sidebar.imageStudio',
+    page: const TgaImageStudioPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.movie_filter_outlined,
+    labelKey: 'sidebar.videoStudio',
+    page: const TgaVideoStudioPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.view_in_ar_outlined,
+    labelKey: 'sidebar.model3d',
+    page: const Tga3DPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.forum_outlined,
+    labelKey: 'sidebar.channels',
+    page: const TgaChannelsPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.memory_outlined,
+    labelKey: 'sidebar.models',
+    page: const TgaModelsPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.speed_rounded,
+    labelKey: 'sidebar.compute',
+    page: const TgaComputePage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.gpp_good_outlined,
+    labelKey: 'sidebar.security',
+    page: const TgaSecurityPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.monitor_heart_outlined,
+    labelKey: 'sidebar.performance',
+    page: const TgaPerformancePage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.forum_rounded,
+    labelKey: 'sidebar.groupChat',
+    page: const TgaGroupChatPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.groups_2_outlined,
+    labelKey: 'sidebar.team',
+    page: const TgaTeamPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.alternate_email_rounded,
+    labelKey: 'sidebar.accountOps',
+    page: const TgaAccountOpsPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.hub_outlined,
+    labelKey: 'sidebar.graph',
+    page: const TgaSphereGraphPage(),
+    fullPage: true,
+  ),
+];
 
 /// 复用 main.dart 提供的同一个 [UiCustomizationStore]：保存/切换后主题立即生效。
 /// 没有 Provider（独立测试或单独复用页面）时回退到页面自行加载，行为不变。

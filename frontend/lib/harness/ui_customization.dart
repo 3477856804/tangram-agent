@@ -125,6 +125,7 @@ class UiCustomizationConfig {
     'sidebar.creator',
     'sidebar.customize',
     'sidebar.uiPlugins',
+    'sidebar.imageStudio',
     'sidebar.videoStudio',
     'sidebar.model3d',
     'sidebar.channels',
@@ -160,6 +161,7 @@ class UiCustomizationConfig {
     'sidebar.creator': 'Creator 创造',
     'sidebar.customize': '界面自定义',
     'sidebar.uiPlugins': 'UI 插件槽',
+    'sidebar.imageStudio': '画图',
     'sidebar.videoStudio': '视频工作室',
     'sidebar.model3d': '3D 建模',
     'sidebar.channels': '更多通信',
@@ -217,34 +219,33 @@ class UiCustomizationConfig {
     bool? composerFloating,
     UiScope? scope,
     int? themePackVersion,
-  }) =>
-      UiCustomizationConfig(
-        accentPreset: accentPreset ?? this.accentPreset,
-        surfacePreset: surfacePreset ?? this.surfacePreset,
-        fontScale: fontScale == null ? this.fontScale : clampFontScale(fontScale),
-        density: density ?? this.density,
-        radius: radius == null ? this.radius : clampRadius(radius),
-        sidebarGrouping: sidebarGrouping ?? this.sidebarGrouping,
-        visibleNavKeys: visibleNavKeys == null
-            ? this.visibleNavKeys
-            : List<String>.unmodifiable(visibleNavKeys),
-        composerFloating: composerFloating ?? this.composerFloating,
-        scope: scope ?? this.scope,
-        themePackVersion: themePackVersion ?? this.themePackVersion,
-      );
+  }) => UiCustomizationConfig(
+    accentPreset: accentPreset ?? this.accentPreset,
+    surfacePreset: surfacePreset ?? this.surfacePreset,
+    fontScale: fontScale == null ? this.fontScale : clampFontScale(fontScale),
+    density: density ?? this.density,
+    radius: radius == null ? this.radius : clampRadius(radius),
+    sidebarGrouping: sidebarGrouping ?? this.sidebarGrouping,
+    visibleNavKeys: visibleNavKeys == null
+        ? this.visibleNavKeys
+        : List<String>.unmodifiable(visibleNavKeys),
+    composerFloating: composerFloating ?? this.composerFloating,
+    scope: scope ?? this.scope,
+    themePackVersion: themePackVersion ?? this.themePackVersion,
+  );
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-        'accentPreset': accentPreset.name,
-        'surfacePreset': surfacePreset.name,
-        'fontScale': fontScale,
-        'density': density.name,
-        'radius': radius,
-        'sidebarGrouping': sidebarGrouping,
-        'visibleNavKeys': List<String>.of(visibleNavKeys),
-        'composerFloating': composerFloating,
-        'scope': scope.name,
-        'themePackVersion': themePackVersion,
-      };
+    'accentPreset': accentPreset.name,
+    'surfacePreset': surfacePreset.name,
+    'fontScale': fontScale,
+    'density': density.name,
+    'radius': radius,
+    'sidebarGrouping': sidebarGrouping,
+    'visibleNavKeys': List<String>.of(visibleNavKeys),
+    'composerFloating': composerFloating,
+    'scope': scope.name,
+    'themePackVersion': themePackVersion,
+  };
 
   /// 严格解析：类型错误 / 未知枚举 / 空导航抛 [FormatException]。
   /// 数值型 fontScale / radius 越界按 clamp 处理，不视为非法。
@@ -382,12 +383,12 @@ const double maxAppliedFontScale = 1.35;
 
 /// 主色预设 → 真实色值（与产品约定的主色一致）。
 Color uiAccentColor(UiAccentPreset preset) => switch (preset) {
-      UiAccentPreset.blue => const Color(0xFF4A90D9),
-      UiAccentPreset.cyan => const Color(0xFF2FB3AE),
-      UiAccentPreset.purple => const Color(0xFF8B5CF6),
-      UiAccentPreset.gold => const Color(0xFFD97706),
-      UiAccentPreset.green => const Color(0xFF059669),
-    };
+  UiAccentPreset.blue => const Color(0xFF4A90D9),
+  UiAccentPreset.cyan => const Color(0xFF2FB3AE),
+  UiAccentPreset.purple => const Color(0xFF8B5CF6),
+  UiAccentPreset.gold => const Color(0xFFD97706),
+  UiAccentPreset.green => const Color(0xFF059669),
+};
 
 /// 配置字体缩放 → 实际应用值（0.85–1.35）。
 double uiAppliedFontScale(num value) {
@@ -400,8 +401,9 @@ double uiAppliedFontScale(num value) {
 
 /// 系统缩放 × 配置缩放，再做整体 clamp，避免超大字号把布局撑破。
 double uiEffectiveTextScale(num systemScale, num fontScale) {
-  final double system =
-      (systemScale.isFinite && systemScale > 0) ? systemScale.toDouble() : 1;
+  final double system = (systemScale.isFinite && systemScale > 0)
+      ? systemScale.toDouble()
+      : 1;
   return (system * uiAppliedFontScale(fontScale))
       .clamp(minAppliedFontScale, maxAppliedFontScale)
       .toDouble();
@@ -418,17 +420,17 @@ double uiAppliedRadius(num value) {
 
 /// 信息密度 → VisualDensity 数值：compact 2 / comfortable 0 / spacious -1。
 double uiVisualDensityValue(UiDensity density) => switch (density) {
-      UiDensity.compact => 2.0,
-      UiDensity.comfortable => 0.0,
-      UiDensity.spacious => -1.0,
-    };
+  UiDensity.compact => 2.0,
+  UiDensity.comfortable => 0.0,
+  UiDensity.spacious => -1.0,
+};
 
 /// 表面预设 → 强制亮度；null 表示跟随系统（由 PersonaStore / 系统决定）。
 Brightness? uiForcedBrightness(UiSurfacePreset preset) => switch (preset) {
-      UiSurfacePreset.mist => Brightness.light,
-      UiSurfacePreset.midnight => Brightness.dark,
-      UiSurfacePreset.auto => null,
-    };
+  UiSurfacePreset.mist => Brightness.light,
+  UiSurfacePreset.midnight => Brightness.dark,
+  UiSurfacePreset.auto => null,
+};
 
 /// 把 UI 自定义真实落到一份 [ThemeData] 上：强调色 / 信息密度 / 卡片与按钮圆角。
 ///
@@ -441,8 +443,8 @@ ThemeData applyUiCustomizationTheme(
   final Color accent = uiAccentColor(config.accentPreset);
   final Color onAccent =
       ThemeData.estimateBrightnessForColor(accent) == Brightness.dark
-          ? Colors.white
-          : Colors.black;
+      ? Colors.white
+      : Colors.black;
   final RoundedRectangleBorder shape = RoundedRectangleBorder(
     borderRadius: BorderRadius.circular(uiAppliedRadius(config.radius)),
   );
@@ -504,7 +506,13 @@ class UiCustomizationStore extends ChangeNotifier {
   }) {
     final UiCustomizationConfig fallback = UiCustomizationConfig.defaults();
     return UiCustomizationStore._(
-        store, UiScope.global, fallback, null, fallback, loadError);
+      store,
+      UiScope.global,
+      fallback,
+      null,
+      fallback,
+      loadError,
+    );
   }
 
   /// 真实加载；文件不存在用默认值，损坏则回退默认值并在 [loadError] 说明。
@@ -513,7 +521,13 @@ class UiCustomizationStore extends ChangeNotifier {
     final File file = store.file(fileName);
     if (!await file.exists()) {
       return UiCustomizationStore._(
-          store, UiScope.global, fallback, null, fallback, '');
+        store,
+        UiScope.global,
+        fallback,
+        null,
+        fallback,
+        '',
+      );
     }
     try {
       final String raw = await file.readAsString();
@@ -522,14 +536,18 @@ class UiCustomizationStore extends ChangeNotifier {
         throw const FormatException('根节点必须是 JSON 对象');
       }
       final Map<String, dynamic> map = decoded.map(
-          (dynamic k, dynamic v) => MapEntry<String, dynamic>(k.toString(), v));
+        (dynamic k, dynamic v) => MapEntry<String, dynamic>(k.toString(), v),
+      );
       final Object? versionRaw = map['version'];
       final int version = versionRaw is num ? versionRaw.toInt() : 1;
-      final _ParsedDocument migrated =
-          _migrateDocument(_parseDocument(map), version);
+      final _ParsedDocument migrated = _migrateDocument(
+        _parseDocument(map),
+        version,
+      );
       // version<3 的旧文档补齐新入口；新文档尊重用户显式隐藏。
-      final _ParsedDocument parsed =
-          version >= 3 ? migrated : _appendNewNavKeys(migrated);
+      final _ParsedDocument parsed = version >= 3
+          ? migrated
+          : _appendNewNavKeys(migrated);
       return UiCustomizationStore._(
         store,
         parsed.scope,
@@ -554,38 +572,39 @@ class UiCustomizationStore extends ChangeNotifier {
     final Object? globalRaw = raw['global'];
     if (globalRaw is Map) {
       final UiCustomizationConfig global = UiCustomizationConfig.fromJson(
-        globalRaw.map((dynamic k, dynamic v) =>
-            MapEntry<String, dynamic>(k.toString(), v)),
+        globalRaw.map(
+          (dynamic k, dynamic v) => MapEntry<String, dynamic>(k.toString(), v),
+        ),
       ).copyWith(scope: UiScope.global);
       UiCustomizationConfig? project;
       final Object? projectRaw = raw['project'];
       if (projectRaw is Map) {
         project = UiCustomizationConfig.fromJson(
-          projectRaw.map((dynamic k, dynamic v) =>
-              MapEntry<String, dynamic>(k.toString(), v)),
+          projectRaw.map(
+            (dynamic k, dynamic v) =>
+                MapEntry<String, dynamic>(k.toString(), v),
+          ),
         ).copyWith(scope: UiScope.project);
       }
       final UiScope scope =
           UiScope.tryParse((raw['active_scope'] ?? 'global').toString()) ??
-              UiScope.global;
+          UiScope.global;
       final UiCustomizationConfig draft = scope == UiScope.project
           ? (project ?? global.copyWith(scope: UiScope.project))
           : global;
       return _ParsedDocument(scope, global, project, draft);
     }
     // 单配置文档：视为全局配置。
-    final UiCustomizationConfig single =
-        UiCustomizationConfig.fromJson(raw).copyWith(scope: UiScope.global);
+    final UiCustomizationConfig single = UiCustomizationConfig.fromJson(
+      raw,
+    ).copyWith(scope: UiScope.global);
     return _ParsedDocument(UiScope.global, single, null, single);
   }
 
   /// 旧文档（version<2）的一次性导航迁移：只追加新增入口，保留原有顺序与
   /// 去重，不删除任何项。仅在 [load] 读盘时执行；导入 JSON 是用户显式行为，
   /// 不做隐式补键，避免覆盖导入内容。
-  static _ParsedDocument _migrateDocument(
-    _ParsedDocument parsed,
-    int version,
-  ) {
+  static _ParsedDocument _migrateDocument(_ParsedDocument parsed, int version) {
     if (version >= 2) return parsed;
     final UiCustomizationConfig global = _migrateNavKeys(parsed.global);
     final UiCustomizationConfig? project = parsed.project == null
@@ -600,8 +619,10 @@ class UiCustomizationStore extends ChangeNotifier {
   /// 读盘时补齐新增入口：老用户升级后仍能看到「爱阳光跑」。
   /// 只在 [load] 生效；显式导入 JSON 不会被隐式补键（导入是用户明确行为）。
   static _ParsedDocument _appendNewNavKeys(_ParsedDocument parsed) {
-    final UiCustomizationConfig global =
-        _appendNavKey(parsed.global, 'sidebar.sunRun');
+    final UiCustomizationConfig global = _appendNavKey(
+      parsed.global,
+      'sidebar.sunRun',
+    );
     final UiCustomizationConfig? project = parsed.project == null
         ? null
         : _appendNavKey(parsed.project!, 'sidebar.sunRun');
@@ -612,18 +633,19 @@ class UiCustomizationStore extends ChangeNotifier {
   }
 
   static UiCustomizationConfig _appendNavKey(
-      UiCustomizationConfig config, String key) {
+    UiCustomizationConfig config,
+    String key,
+  ) {
     if (config.visibleNavKeys.isEmpty || config.visibleNavKeys.contains(key)) {
       return config;
     }
     return config.copyWith(
-        visibleNavKeys: <String>[...config.visibleNavKeys, key]);
+      visibleNavKeys: <String>[...config.visibleNavKeys, key],
+    );
   }
 
   /// 旧版文档迁移：只追加新增入口，保留用户原有顺序与去重，不删除任何项。
-  static UiCustomizationConfig _migrateNavKeys(
-    UiCustomizationConfig config,
-  ) {
+  static UiCustomizationConfig _migrateNavKeys(UiCustomizationConfig config) {
     final List<String> keys = List<String>.of(config.visibleNavKeys);
     for (final String key in const <String>[
       'sidebar.security',
@@ -641,8 +663,9 @@ class UiCustomizationStore extends ChangeNotifier {
   UiScope get scope => _currentScope;
 
   /// 生效配置：project 已保存则返回 project，否则真实回退 global。
-  UiCustomizationConfig apply(UiScope scope) =>
-      scope == UiScope.project ? (_projectConfig ?? _globalConfig) : _globalConfig;
+  UiCustomizationConfig apply(UiScope scope) => scope == UiScope.project
+      ? (_projectConfig ?? _globalConfig)
+      : _globalConfig;
 
   void setScope(UiScope scope) {
     if (scope == _currentScope) return;
@@ -698,9 +721,10 @@ class UiCustomizationStore extends ChangeNotifier {
 
   void setThemePackVersion(int value) {
     _draft = _draft.copyWith(
-        themePackVersion: value < 1
-            ? UiCustomizationConfig.defaultThemePackVersion
-            : value);
+      themePackVersion: value < 1
+          ? UiCustomizationConfig.defaultThemePackVersion
+          : value,
+    );
     lastError = '';
     notifyListeners();
   }
@@ -768,8 +792,9 @@ class UiCustomizationStore extends ChangeNotifier {
 
   /// 保存当前作用域的草稿到磁盘。写盘失败会被真实抛出（由调用方提示）。
   Future<bool> save() async {
-    final UiCustomizationConfig normalized =
-        _draft.copyWith(scope: _currentScope);
+    final UiCustomizationConfig normalized = _draft.copyWith(
+      scope: _currentScope,
+    );
     if (normalized.visibleNavKeys.isEmpty) {
       lastError = '可见导航项不能为空';
       notifyListeners();
@@ -788,10 +813,12 @@ class UiCustomizationStore extends ChangeNotifier {
   }
 
   Map<String, dynamic> _document() {
-    final UiCustomizationConfig global =
-        _currentScope == UiScope.global ? _draft : _globalConfig;
-    final UiCustomizationConfig? project =
-        _currentScope == UiScope.project ? _draft : _projectConfig;
+    final UiCustomizationConfig global = _currentScope == UiScope.global
+        ? _draft
+        : _globalConfig;
+    final UiCustomizationConfig? project = _currentScope == UiScope.project
+        ? _draft
+        : _projectConfig;
     return <String, dynamic>{
       'version': 3,
       'active_scope': _currentScope.name,
@@ -816,7 +843,8 @@ class UiCustomizationStore extends ChangeNotifier {
       return <String, dynamic>{'ok': false, 'error': '导入内容必须是 JSON 对象'};
     }
     final Map<String, dynamic> map = decoded.map(
-        (dynamic k, dynamic v) => MapEntry<String, dynamic>(k.toString(), v));
+      (dynamic k, dynamic v) => MapEntry<String, dynamic>(k.toString(), v),
+    );
     try {
       final _ParsedDocument parsed = _parseDocument(map);
       _globalConfig = parsed.global;

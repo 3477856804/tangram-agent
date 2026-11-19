@@ -13,11 +13,11 @@ class TgaL10n {
 
   static const List<LocalizationsDelegate<dynamic>> delegates =
       <LocalizationsDelegate<dynamic>>[
-    GlobalMaterialLocalizations.delegate,
-    GlobalWidgetsLocalizations.delegate,
-    GlobalCupertinoLocalizations.delegate,
-    _TgaDictDelegate(),
-  ];
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+        _TgaDictDelegate(),
+      ];
 
   static const List<Locale> supported = <Locale>[
     Locale('zh', 'CN'),
@@ -27,10 +27,10 @@ class TgaL10n {
 
   /// PersonaStore.language（简体中文/繁體中文/English）→ Locale。
   static Locale localeOf(String language) => switch (language) {
-        '繁體中文' => const Locale('zh', 'TW'),
-        'English' => const Locale('en'),
-        _ => const Locale('zh', 'CN'),
-      };
+    '繁體中文' => const Locale('zh', 'TW'),
+    'English' => const Locale('en'),
+    _ => const Locale('zh', 'CN'),
+  };
 
   /// 当前激活语言（由 [_TgaLocalizations] 加载时同步，供 Tga 组件与
   /// 非 Widget 代码读取）。
@@ -60,8 +60,7 @@ class _TgaLocalizations {
   }
 }
 
-class _TgaDictDelegate
-    extends LocalizationsDelegate<_TgaLocalizations> {
+class _TgaDictDelegate extends LocalizationsDelegate<_TgaLocalizations> {
   const _TgaDictDelegate();
   @override
   bool isSupported(Locale locale) =>
@@ -76,8 +75,10 @@ class _TgaDictDelegate
 /// 推荐用法：`context.t('settings.title')`。
 extension TgaT on BuildContext {
   String t(String key, {String? zh}) {
-    final _TgaLocalizations? loc =
-        Localizations.of<_TgaLocalizations>(this, _TgaLocalizations);
+    final _TgaLocalizations? loc = Localizations.of<_TgaLocalizations>(
+      this,
+      _TgaLocalizations,
+    );
     if (loc != null) return loc.t(key, zh: zh);
     return zh ?? TgaStrings.table[key]?['cn'] ?? key;
   }
@@ -88,8 +89,8 @@ extension TgaT on BuildContext {
 class TgaStrings {
   TgaStrings._();
 
-  static const Map<String, Map<String, String>> table =
-      <String, Map<String, String>>{
+  static const Map<String, Map<String, String>>
+  table = <String, Map<String, String>>{
     // ---- 通用 ----
     'common.cancel': {'cn': '取消', 'tw': '取消', 'en': 'Cancel'},
     'common.ok': {'cn': '确定', 'tw': '確定', 'en': 'OK'},
@@ -108,13 +109,41 @@ class TgaStrings {
     'common.disconnected': {'cn': '未连接', 'tw': '未連線', 'en': 'Disconnected'},
     'common.connecting': {'cn': '连接中', 'tw': '連線中', 'en': 'Connecting'},
     // ---- 首页问候 ----
-    'home.greet.night': {'cn': '夜深了，我能帮你做什么？', 'tw': '夜深了，我能幫你做什麼？', 'en': 'Late night — how can I help?'},
-    'home.greet.early': {'cn': '早上好，我能帮你做什么？', 'tw': '早上好，我能幫你做什麼？', 'en': 'Good morning. How can I help?'},
-    'home.greet.am': {'cn': '上午好，我能帮你做什么？', 'tw': '上午好，我能幫你做什麼？', 'en': 'Good morning. How can I help?'},
-    'home.greet.noon': {'cn': '中午好，我能帮你做什么？', 'tw': '中午好，我能幫你做什麼？', 'en': 'Good noon. How can I help?'},
-    'home.greet.afternoon': {'cn': '下午好，我能帮你做什么？', 'tw': '下午好，我能幫你做什麼？', 'en': 'Good afternoon. How can I help?'},
-    'home.greet.evening': {'cn': '晚上好，我能帮你做什么？', 'tw': '晚上好，我能幫你做什麼？', 'en': 'Good evening. How can I help?'},
-    'home.inputHint': {'cn': '给 TGA 发送消息…', 'tw': '給 TGA 傳送訊息…', 'en': 'Message TGA…'},
+    'home.greet.night': {
+      'cn': '夜深了，我能帮你做什么？',
+      'tw': '夜深了，我能幫你做什麼？',
+      'en': 'Late night — how can I help?',
+    },
+    'home.greet.early': {
+      'cn': '早上好，我能帮你做什么？',
+      'tw': '早上好，我能幫你做什麼？',
+      'en': 'Good morning. How can I help?',
+    },
+    'home.greet.am': {
+      'cn': '上午好，我能帮你做什么？',
+      'tw': '上午好，我能幫你做什麼？',
+      'en': 'Good morning. How can I help?',
+    },
+    'home.greet.noon': {
+      'cn': '中午好，我能帮你做什么？',
+      'tw': '中午好，我能幫你做什麼？',
+      'en': 'Good noon. How can I help?',
+    },
+    'home.greet.afternoon': {
+      'cn': '下午好，我能帮你做什么？',
+      'tw': '下午好，我能幫你做什麼？',
+      'en': 'Good afternoon. How can I help?',
+    },
+    'home.greet.evening': {
+      'cn': '晚上好，我能帮你做什么？',
+      'tw': '晚上好，我能幫你做什麼？',
+      'en': 'Good evening. How can I help?',
+    },
+    'home.inputHint': {
+      'cn': '给 TGA 发送消息…',
+      'tw': '給 TGA 傳送訊息…',
+      'en': 'Message TGA…',
+    },
     'home.deepThink': {'cn': '深度思考', 'tw': '深度思考', 'en': 'Deep Think'},
     'home.smartSearch': {'cn': '智能搜索', 'tw': '智慧搜尋', 'en': 'Smart Search'},
     'home.engine': {'cn': 'TGA 引擎', 'tw': 'TGA 引擎', 'en': 'TGA Engine'},
@@ -146,10 +175,15 @@ class TgaStrings {
     'sidebar.performance': {'cn': '性能', 'tw': '效能', 'en': 'Performance'},
     'sidebar.experience': {'cn': '经验库', 'tw': '經驗庫', 'en': 'Experience'},
     'sidebar.accountOps': {'cn': '账号', 'tw': '帳號', 'en': 'Account Ops'},
+    'sidebar.imageStudio': {'cn': '画图', 'tw': '畫圖', 'en': 'Image Studio'},
     'sidebar.videoStudio': {'cn': '视频', 'tw': '影片', 'en': 'Video Studio'},
     'sidebar.group.reports': {'cn': '报告与真实', 'tw': '報告與真實', 'en': 'Reports'},
     'sidebar.group.creation': {'cn': '创作', 'tw': '創作', 'en': 'Creation'},
-    'sidebar.group.collaboration': {'cn': '协作', 'tw': '協作', 'en': 'Collaboration'},
+    'sidebar.group.collaboration': {
+      'cn': '协作',
+      'tw': '協作',
+      'en': 'Collaboration',
+    },
     'sidebar.group.system': {'cn': '系统', 'tw': '系統', 'en': 'System'},
     'sidebar.model3d': {'cn': '建模', 'tw': '建模', 'en': '3D Studio'},
     'sidebar.channels': {'cn': '通信', 'tw': '通訊', 'en': 'Channels'},
@@ -175,29 +209,65 @@ class TgaStrings {
     'superAgent.title': {'cn': '超级智能体', 'tw': '超級智能體', 'en': 'Super Agent'},
     // ---- 设置页 ----
     'settings.general': {'cn': '通用设置', 'tw': '通用設定', 'en': 'General'},
-    'settings.notifications': {'cn': '消息通知', 'tw': '訊息通知', 'en': 'Notifications'},
-    'settings.notificationsSub': {'cn': '接收 Agent 任务完成提醒', 'tw': '接收 Agent 任務完成提醒', 'en': 'Agent task-completion alerts'},
+    'settings.notifications': {
+      'cn': '消息通知',
+      'tw': '訊息通知',
+      'en': 'Notifications',
+    },
+    'settings.notificationsSub': {
+      'cn': '接收 Agent 任务完成提醒',
+      'tw': '接收 Agent 任務完成提醒',
+      'en': 'Agent task-completion alerts',
+    },
     'settings.language': {'cn': '语言', 'tw': '語言', 'en': 'Language'},
     'settings.voice': {'cn': '音色设置', 'tw': '音色設定', 'en': 'Voice'},
     'settings.theme': {'cn': '颜色模式', 'tw': '顏色模式', 'en': 'Appearance'},
     'settings.themeSystem': {'cn': '跟随系统', 'tw': '跟隨系統', 'en': 'System'},
     'settings.themeLight': {'cn': '浅色', 'tw': '淺色', 'en': 'Light'},
     'settings.themeDark': {'cn': '深色', 'tw': '深色', 'en': 'Dark'},
-    'settings.modelService': {'cn': '模型与服务', 'tw': '模型與服務', 'en': 'Models & Services'},
-    'settings.defaultModel': {'cn': '默认模型', 'tw': '預設模型', 'en': 'Default Model'},
-    'settings.apiService': {'cn': 'API 服务', 'tw': 'API 服務', 'en': 'API Service'},
-    'settings.onDevice': {'cn': '端侧推理', 'tw': '端側推理', 'en': 'On-device Inference'},
+    'settings.modelService': {
+      'cn': '模型与服务',
+      'tw': '模型與服務',
+      'en': 'Models & Services',
+    },
+    'settings.defaultModel': {
+      'cn': '默认模型',
+      'tw': '預設模型',
+      'en': 'Default Model',
+    },
+    'settings.apiService': {
+      'cn': 'API 服务',
+      'tw': 'API 服務',
+      'en': 'API Service',
+    },
+    'settings.onDevice': {
+      'cn': '端侧推理',
+      'tw': '端側推理',
+      'en': 'On-device Inference',
+    },
     'settings.data': {'cn': '数据设置', 'tw': '資料設定', 'en': 'Data'},
     'settings.localData': {'cn': '本地数据', 'tw': '本機資料', 'en': 'Local Data'},
-    'settings.checkUpdate': {'cn': '检查更新', 'tw': '檢查更新', 'en': 'Check for Updates'},
+    'settings.checkUpdate': {
+      'cn': '检查更新',
+      'tw': '檢查更新',
+      'en': 'Check for Updates',
+    },
     'settings.clearCache': {'cn': '清理缓存', 'tw': '清理快取', 'en': 'Clear Cache'},
     'settings.about': {'cn': '关于', 'tw': '關於', 'en': 'About'},
     'settings.version': {'cn': '版本', 'tw': '版本', 'en': 'Version'},
     'settings.sponsor': {'cn': '赞助', 'tw': '贊助', 'en': 'Sponsor'},
     'settings.latest': {'cn': '已是最新版本', 'tw': '已是最新版本', 'en': 'Up to date'},
     'settings.newVersion': {'cn': '发现新版本', 'tw': '發現新版本', 'en': 'New version'},
-    'settings.downloadUpdate': {'cn': '下载更新', 'tw': '下載更新', 'en': 'Downloading'},
-    'settings.tagline': {'cn': 'Tangram Agent · 让每个人拥有自己的模型', 'tw': 'Tangram Agent · 讓每個人擁有自己的模型', 'en': 'Tangram Agent · Your own model for everyone'},
+    'settings.downloadUpdate': {
+      'cn': '下载更新',
+      'tw': '下載更新',
+      'en': 'Downloading',
+    },
+    'settings.tagline': {
+      'cn': 'Tangram Agent · 让每个人拥有自己的模型',
+      'tw': 'Tangram Agent · 讓每個人擁有自己的模型',
+      'en': 'Tangram Agent · Your own model for everyone',
+    },
     // ---- 个人页 ----
     'profile.diary': {'cn': '我的日记', 'tw': '我的日記', 'en': 'My Diary'},
     'profile.works': {'cn': '我的作品', 'tw': '我的作品', 'en': 'My Works'},
@@ -206,7 +276,11 @@ class TgaStrings {
     'profile.tasks': {'cn': '定时任务', 'tw': '定時任務', 'en': 'Scheduled Tasks'},
     // ---- 通信页 ----
     'channels.authorize': {'cn': '去授权', 'tw': '去授權', 'en': 'Authorize'},
-    'channels.qrExpiry': {'cn': '二维码 5 分钟内有效', 'tw': 'QR Code 5 分鐘內有效', 'en': 'QR code valid for 5 minutes'},
+    'channels.qrExpiry': {
+      'cn': '二维码 5 分钟内有效',
+      'tw': 'QR Code 5 分鐘內有效',
+      'en': 'QR code valid for 5 minutes',
+    },
     'channels.newCode': {'cn': '要新码', 'tw': '要新碼', 'en': 'New code'},
     // ---- 侧边栏（问题#11 收尾：抽屉/会话行） ----
     'sidebar.collapse': {'cn': '收起', 'tw': '收起', 'en': 'Collapse'},
@@ -215,7 +289,11 @@ class TgaStrings {
     'sidebar.search': {'cn': '搜索会话', 'tw': '搜尋對話', 'en': 'Search chats'},
     'sidebar.starred': {'cn': '已收藏', 'tw': '已收藏', 'en': 'Starred'},
     'sidebar.empty': {'cn': '还没有会话', 'tw': '還沒有對話', 'en': 'No chats yet'},
-    'sidebar.noMatch': {'cn': '没有匹配“{q}”的会话', 'tw': '沒有匹配「{q}」的對話', 'en': 'No chats matching "{q}"'},
+    'sidebar.noMatch': {
+      'cn': '没有匹配“{q}”的会话',
+      'tw': '沒有匹配「{q}」的對話',
+      'en': 'No chats matching "{q}"',
+    },
     'sidebar.justNow': {'cn': '刚刚', 'tw': '剛剛', 'en': 'Just now'},
     'sidebar.unitMinute': {'cn': '分钟', 'tw': '分鐘', 'en': 'm'},
     'sidebar.unitHour': {'cn': '小时', 'tw': '小時', 'en': 'h'},
@@ -230,11 +308,27 @@ class TgaStrings {
     'home.stopRecording': {'cn': '停止录音', 'tw': '停止錄音', 'en': 'Stop recording'},
     'home.voiceInput': {'cn': '语音输入', 'tw': '語音輸入', 'en': 'Voice input'},
     'home.attach': {'cn': '添加附件', 'tw': '新增附件', 'en': 'Attach files'},
-    'home.switchModelTooltip': {'cn': '切换模型（Ctrl + M）', 'tw': '切換模型（Ctrl + M）', 'en': 'Switch model (Ctrl + M)'},
-    'home.switchModelSemantics': {'cn': '切换模型，快捷键 Ctrl 或 Command 加 M', 'tw': '切換模型，快捷鍵 Ctrl 或 Command 加 M', 'en': 'Switch model — press Ctrl or Command + M'},
+    'home.switchModelTooltip': {
+      'cn': '切换模型（Ctrl + M）',
+      'tw': '切換模型（Ctrl + M）',
+      'en': 'Switch model (Ctrl + M)',
+    },
+    'home.switchModelSemantics': {
+      'cn': '切换模型，快捷键 Ctrl 或 Command 加 M',
+      'tw': '切換模型，快捷鍵 Ctrl 或 Command 加 M',
+      'en': 'Switch model — press Ctrl or Command + M',
+    },
     'home.ampPending': {'cn': '振幅未接入', 'tw': '振幅未接入', 'en': 'amplitude N/A'},
     'home.modelGroupBuiltin': {'cn': '内置', 'tw': '內建', 'en': 'Built-in'},
-    'home.modelGroupCloud': {'cn': '云端模型（API）', 'tw': '雲端模型（API）', 'en': 'Cloud models (API)'},
-    'home.modelGroupLocal': {'cn': '本地模型（权重）', 'tw': '本地模型（權重）', 'en': 'Local models (weights)'},
+    'home.modelGroupCloud': {
+      'cn': '云端模型（API）',
+      'tw': '雲端模型（API）',
+      'en': 'Cloud models (API)',
+    },
+    'home.modelGroupLocal': {
+      'cn': '本地模型（权重）',
+      'tw': '本地模型（權重）',
+      'en': 'Local models (weights)',
+    },
   };
 }
