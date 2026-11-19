@@ -235,10 +235,37 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Linux 构建依赖
+      - name: Linux 构建依赖（多轮重试 + 换源兜底）
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libsecret-1-dev libjsoncpp-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+          set -euo pipefail
+          PKGS="clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libsecret-1-dev libjsoncpp-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev"
+          # GitHub runner 偶发 security.ubuntu.com CDN 节点不可达（Connection failed
+          # [IP: x.x.x.x 443]），单次 apt 会直接 exit 100 让整个 job 挂掉。
+          # 这里做多轮重试：每轮失败后 clean + 清空 lists + 退避，再重新 update。
+          ok=0
+          for i in 1 2 3 4; do
+            echo "=== apt 依赖安装 第 $i/4 轮 ==="
+            if sudo apt-get update -qq && sudo apt-get install -y -qq --fix-missing $PKGS; then
+              ok=1; echo "apt 依赖安装成功（第 $i 轮）"; break
+            fi
+            echo "第 $i 轮失败，清理 apt 缓存后退避重试..."
+            sudo apt-get clean || true
+            sudo rm -rf /var/lib/apt/lists/* || true
+            sleep $((i * 5))
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "4 轮常规重试均失败：尝试把 security.ubuntu.com 换成 archive.ubuntu.com 后最后重试"
+            # 同时兼容传统 sources.list 与 Ubuntu 24.04 的 deb822 ubuntu.sources
+            sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+              -exec sed -i 's|http://security.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' {} + 2>/dev/null || true
+            sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+              -exec sed -i 's|https://security.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' {} + 2>/dev/null || true
+            sudo apt-get clean || true
+            sudo rm -rf /var/lib/apt/lists/* || true
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --fix-missing $PKGS
+          fi
+          echo "Linux 构建依赖就绪"
       - name: Install Flutter 3.50.0 (官方源优先 + 校验)
         run: |
           set -euo pipefail
