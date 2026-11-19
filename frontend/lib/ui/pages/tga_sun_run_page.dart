@@ -1,7 +1,8 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart' as ll;
 
 import '../../design/tga_design.dart';
 import '../../harness/sun_run.dart';
@@ -21,6 +22,11 @@ class TgaSunRunPage extends StatefulWidget {
 class _TgaSunRunPageState extends State<TgaSunRunPage> {
   final SunRunRuntime _runtime = SunRunRuntime.instance;
   final TextEditingController _paceController = TextEditingController();
+  final MapController _mapController = MapController();
+
+  // 默认坐标沿用原「阳光跑」的山东科技大学点位；点击地图可改起点。
+  double _startLat = 36.667662;
+  double _startLng = 117.027707;
 
   SunRunMode _mode = SunRunMode.run;
   int _targetKm = 5;
@@ -89,6 +95,8 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
         'targetKm': _targetKm.toDouble(),
         'paceSecPerKm': int.tryParse(_paceController.text.trim()) ?? 0,
         'seed': DateTime.now().millisecondsSinceEpoch % 1000000,
+        'startLat': _startLat,
+        'startLng': _startLng,
         'loop': true,
         'realism': 0.75,
         'weightKg': 65,
@@ -368,39 +376,35 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
               ],
             ),
           ),
-          TgaGroupTitle('轨迹'),
+          TgaGroupTitle('地图轨迹'),
           TgaCard(
+            padding: EdgeInsets.zero,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                if (route.length < 2)
-                  const TgaEmpty('开始后显示模拟轨迹',
-                      icon: Icons.route_rounded)
-                else
-                  SizedBox(
-                    height: 190,
-                    width: double.infinity,
-                    child: CustomPaint(
-                      painter: _RoutePainter(
-                        route: route,
-                        current: current,
-                        start: _asMap(_status['start']),
-                        end: _asMap(_status['end']),
-                      ),
-                    ),
+                SizedBox(
+                  height: 300,
+                  width: double.infinity,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.vertical(
+                        top: Radius.circular(Tga.rCard)),
+                    child: _buildMap(route, current),
                   ),
-                const SizedBox(height: 10),
-                Row(
-                  children: <Widget>[
-                    _legend(Tga.green, '起点'),
-                    const SizedBox(width: 14),
-                    _legend(Tga.red, '终点'),
-                    const SizedBox(width: 14),
-                    _legend(Tga.primary, '当前位置'),
-                    const Spacer(),
-                    Text('已走 ${distanceKm.toStringAsFixed(2)} km',
-                        style: Tga.body),
-                  ],
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: <Widget>[
+                      _legend(Tga.green, '起点'),
+                      const SizedBox(width: 14),
+                      _legend(Tga.red, '终点'),
+                      const SizedBox(width: 14),
+                      _legend(Tga.primary, '当前位置'),
+                      const Spacer(),
+                      Text('已走 ${distanceKm.toStringAsFixed(2)} km',
+                          style: Tga.body),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -464,6 +468,156 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
         ),
       );
 
+  /// 真实地图底图（OpenStreetMap）+ 轨迹/起点/终点/当前位置。
+  /// 点击地图可把起点移到点击位置；轨迹运行时自动出现。
+  Widget _buildMap(
+    List<Map<String, dynamic>> route,
+    Map<String, dynamic> current,
+  ) {
+    final List<ll.LatLng> points = <ll.LatLng>[
+      for (final Map<String, dynamic> p in route)
+        ll.LatLng(_num(p, 'lat'), _num(p, 'lng')),
+    ];
+    final ll.LatLng fallback = ll.LatLng(_startLat, _startLng);
+    final ll.LatLng center = points.isNotEmpty ? points.first : fallback;
+    final double curLat = _num(current, 'lat');
+    final double curLng = _num(current, 'lng');
+    final bool hasCurrent = curLat != 0 && curLng != 0;
+
+    final List<Marker> markers = <Marker>[
+      if (points.isNotEmpty)
+        Marker(
+          point: points.first,
+          width: 30,
+          height: 30,
+          child: _pin(Tga.green, Icons.trip_origin_rounded),
+        ),
+      if (points.isNotEmpty)
+        Marker(
+          point: points.last,
+          width: 30,
+          height: 30,
+          child: _pin(Tga.red, Icons.flag_rounded),
+        ),
+      if (hasCurrent)
+        Marker(
+          point: ll.LatLng(curLat, curLng),
+          width: 34,
+          height: 34,
+          child: _pin(Tga.primary, Icons.directions_run_rounded),
+        ),
+    ];
+
+    return Stack(
+      children: <Widget>[
+        FlutterMap(
+          mapController: _mapController,
+          options: MapOptions(
+            initialCenter: center,
+            initialZoom: 16,
+            minZoom: 3,
+            maxZoom: 19,
+            onTap: (TapPosition tap, ll.LatLng point) {
+              setState(() {
+                _startLat = point.latitude;
+                _startLng = point.longitude;
+              });
+              _toast(
+                  '起点已设为 ${_startLat.toStringAsFixed(5)}, ${_startLng.toStringAsFixed(5)}');
+            },
+          ),
+          children: <Widget>[
+            TileLayer(
+              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              userAgentPackageName: 'com.tangram.agent.tangram',
+              maxNativeZoom: 19,
+            ),
+            if (points.length >= 2)
+              PolylineLayer(
+                polylines: <Polyline>[
+                  Polyline(
+                    points: points,
+                    strokeWidth: 4,
+                    color: Tga.primary.withValues(alpha: 0.9),
+                  ),
+                ],
+              ),
+            MarkerLayer(markers: markers),
+            const RichAttributionWidget(
+              attributions: <SourceAttribution>[
+                TextSourceAttribution('OpenStreetMap contributors'),
+              ],
+            ),
+          ],
+        ),
+        Positioned(
+          right: 10,
+          top: 10,
+          child: Column(
+            children: <Widget>[
+              _mapButton(Icons.add_rounded, () {
+                _mapController.move(
+                    _mapController.camera.center, _mapController.camera.zoom + 1);
+              }),
+              const SizedBox(height: 8),
+              _mapButton(Icons.remove_rounded, () {
+                _mapController.move(
+                    _mapController.camera.center, _mapController.camera.zoom - 1);
+              }),
+              const SizedBox(height: 8),
+              _mapButton(Icons.my_location_rounded, () {
+                _mapController.move(center, 16);
+              }),
+            ],
+          ),
+        ),
+        Positioned(
+          left: 10,
+          top: 10,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            decoration: BoxDecoration(
+              color: Tga.card.withValues(alpha: 0.92),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text('点击地图设起点',
+                style: Tga.caption.copyWith(color: Tga.textSub)),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _mapButton(IconData icon, VoidCallback onTap) => Material(
+        color: Tga.card.withValues(alpha: 0.95),
+        shape: const CircleBorder(),
+        elevation: 2,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(7),
+            child: Icon(icon, size: 20, color: Tga.primary),
+          ),
+        ),
+      );
+
+  Widget _pin(Color color, IconData icon) => Container(
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 2.5),
+          boxShadow: <BoxShadow>[
+            BoxShadow(
+              color: color.withValues(alpha: 0.35),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Icon(icon, size: 16, color: Colors.white),
+      );
+
   Widget _legend(Color color, String label) => Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
@@ -516,113 +670,3 @@ class _TgaSunRunPageState extends State<TgaSunRunPage> {
 }
 
 /// 轻量轨迹绘制（不依赖任何地图 SDK）：折线 + 起点/终点 + 当前位置。
-class _RoutePainter extends CustomPainter {
-  _RoutePainter({
-    required this.route,
-    required this.current,
-    required this.start,
-    required this.end,
-  });
-
-  final List<Map<String, dynamic>> route;
-  final Map<String, dynamic> current;
-  final Map<String, dynamic> start;
-  final Map<String, dynamic> end;
-
-  double _lat(Map<String, dynamic> m) {
-    final Object? v = m['lat'];
-    return v is num ? v.toDouble() : 0.0;
-  }
-
-  double _lng(Map<String, dynamic> m) {
-    final Object? v = m['lng'];
-    return v is num ? v.toDouble() : 0.0;
-  }
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (route.length < 2 || size.width <= 0 || size.height <= 0) return;
-
-    double minLat = double.infinity;
-    double maxLat = -double.infinity;
-    double minLng = double.infinity;
-    double maxLng = -double.infinity;
-    for (final Map<String, dynamic> p in route) {
-      final double lat = _lat(p);
-      final double lng = _lng(p);
-      minLat = math.min(minLat, lat);
-      maxLat = math.max(maxLat, lat);
-      minLng = math.min(minLng, lng);
-      maxLng = math.max(maxLng, lng);
-    }
-    final double midLat = (minLat + maxLat) / 2;
-    final double cosLat = math
-        .cos(midLat * math.pi / 180.0)
-        .abs()
-        .clamp(0.05, 1.0)
-        .toDouble();
-    double spanX = (maxLng - minLng) * cosLat;
-    double spanY = maxLat - minLat;
-    if (spanX <= 0) spanX = 1e-9;
-    if (spanY <= 0) spanY = 1e-9;
-
-    const double pad = 12;
-    final double scale = math.min(
-      (size.width - 2 * pad) / spanX,
-      (size.height - 2 * pad) / spanY,
-    );
-    final double offsetX = pad + (size.width - 2 * pad - spanX * scale) / 2;
-    final double offsetY = pad + (size.height - 2 * pad - spanY * scale) / 2;
-
-    Offset project(double lat, double lng) => Offset(
-          offsetX + (lng - minLng) * cosLat * scale,
-          size.height - offsetY - (lat - minLat) * scale,
-        );
-
-    final Path path = Path();
-    for (int i = 0; i < route.length; i++) {
-      final Offset o = project(_lat(route[i]), _lng(route[i]));
-      if (i == 0) {
-        path.moveTo(o.dx, o.dy);
-      } else {
-        path.lineTo(o.dx, o.dy);
-      }
-    }
-    canvas.drawPath(
-      path,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.4
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round
-        ..color = Tga.primary.withValues(alpha: 0.85),
-    );
-
-    void marker(Map<String, dynamic> point, Color color) {
-      if (point.isEmpty) return;
-      canvas.drawCircle(project(_lat(point), _lng(point)), 4.5,
-          Paint()..color = color);
-    }
-
-    marker(start, Tga.green);
-    marker(end, Tga.red);
-
-    if (current.isNotEmpty) {
-      final Offset dot = project(_lat(current), _lng(current));
-      canvas.drawCircle(
-          dot, 8, Paint()..color = Tga.primary.withValues(alpha: 0.16));
-      canvas.drawCircle(dot, 5, Paint()..color = Tga.primary);
-      canvas.drawCircle(
-        dot,
-        5,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.6
-          ..color = Tga.card,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _RoutePainter oldDelegate) => true;
-}
