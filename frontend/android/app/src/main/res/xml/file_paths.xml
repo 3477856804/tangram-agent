@@ -6,4 +6,7 @@
 <paths>
     <external-files-path name="external_files" path="." />
     <files-path name="internal_files" path="." />
+    <!-- OTA 的 APK 实际落在 getTemporaryDirectory()/ota（Android 的 code_cache）。
+         少了这一条 FileProvider 会报 “Failed to find configured root”。 -->
+    <cache-path name="cache_files" path="." />
 </paths>

@@ -134,8 +134,9 @@ class LocalInference {
       if (threads != planner.threads || ctx != planner.contextSize) {
         planner = DeepInferPlanner(contextSize: ctx, threads: threads);
       }
-      final int gpuLayers =
-          (cfg.gpuLayers ?? 99).clamp(0, ModelParams.maxGpuLayers).toInt();
+      final int gpuLayers = (cfg.gpuLayers ?? 99)
+          .clamp(0, ModelParams.maxGpuLayers)
+          .toInt();
       final KvCacheType kv = cfg.kvCacheType ?? KvCacheType.f16;
       FlashAttention flash = cfg.flashAttention ?? FlashAttention.auto;
       if (kv != KvCacheType.f16 && flash != FlashAttention.enabled) {
@@ -145,16 +146,52 @@ class LocalInference {
       final source = LlamaModel(ModelSource.path(modelPath));
       // 2) 三级加载档位：从快到稳。
       final List<_LoadProfile> profiles = <_LoadProfile>[
-        _LoadProfile(gpuLayers: gpuLayers, batchSize: 256, contextSize: ctx,
-            threads: threads, timeout: 180),
-        _LoadProfile(gpuLayers: 0, batchSize: 128, contextSize: ctx,
-            threads: threads, timeout: 180),
-        _LoadProfile(gpuLayers: 0, batchSize: 64,
-            contextSize: ctx < 1024 ? ctx : 1024,
-            threads: threads < 2 ? threads : 2, timeout: 180),
+        _LoadProfile(
+          gpuLayers: gpuLayers,
+          batchSize: 256,
+          contextSize: ctx,
+          threads: threads,
+          timeout: 180,
+        ),
+        _LoadProfile(
+          gpuLayers: 0,
+          batchSize: 128,
+          contextSize: ctx,
+          threads: threads,
+          timeout: 180,
+        ),
+        _LoadProfile(
+          gpuLayers: 0,
+          batchSize: 64,
+          contextSize: ctx < 1024 ? ctx : 1024,
+          threads: threads < 2 ? threads : 2,
+          timeout: 180,
+        ),
+        // 6GB 级权重在 12–16GB 手机上最后再试一次极小计算缓冲，
+        // 避免 CPU 后端因 batch/上下文缓冲直接 OOM。
+        _LoadProfile(
+          gpuLayers: 0,
+          batchSize: 32,
+          contextSize: ctx < 512 ? ctx : 512,
+          threads: threads < 2 ? threads : 2,
+          timeout: 180,
+        ),
+        // 最后兜底：极小上下文 + 单线程，把计算缓冲压到最低，
+        // 让尽可能大的权重也能在手机上真正加载并推理。
+        _LoadProfile(
+          gpuLayers: 0,
+          batchSize: 8,
+          contextSize: ctx < 128 ? ctx : 128,
+          threads: 1,
+          timeout: 180,
+        ),
       ];
       Object? lastFailure;
-      for (final _LoadProfile p in profiles) {
+      Future<bool> tryProfile(
+        _LoadProfile p,
+        FlashAttention fa,
+        KvCacheType cache,
+      ) async {
         try {
           final LlamaEngine engine = await LlamaEngine.load(
             source,
@@ -164,16 +201,38 @@ class LocalInference {
               numberOfThreadsBatch: p.threads,
               batchSize: p.batchSize,
               gpuLayers: p.gpuLayers,
-              flashAttention: flash,
-              cacheTypeK: kv,
-              cacheTypeV: kv,
+              flashAttention: fa,
+              cacheTypeK: cache,
+              cacheTypeV: cache,
+              useMmap: true,
+              // 第一档显式要 Vulkan；模块缺失时 llamadart 会回落 CPU，
+              // 后面的纯 CPU 档位继续兜底。
+              preferredBackend: p.gpuLayers > 0
+                  ? GpuBackend.vulkan
+                  : GpuBackend.auto,
             ),
           ).timeout(Duration(seconds: p.timeout));
           _engine = engine;
           _loadedPath = modelPath;
-          return null;
+          return true;
         } on Object catch (e) {
           lastFailure = e;
+          return false;
+        }
+      }
+
+      for (final _LoadProfile p in profiles) {
+        if (await tryProfile(p, flash, kv)) return null;
+      }
+      // 某些 CPU/旧驱动不支持 Flash Attention 或量化 KV；最后一轮退回
+      // F16 KV + 关闭 Flash Attention，避免参数组合把可加载的权重挡在门外。
+      if (flash != FlashAttention.disabled || kv != KvCacheType.f16) {
+        for (final _LoadProfile p in profiles.where(
+          (_LoadProfile p) => p.gpuLayers == 0,
+        )) {
+          if (await tryProfile(p, FlashAttention.disabled, KvCacheType.f16)) {
+            return null;
+          }
         }
       }
       // 3) 所有档位都失败：输出精简、可读、无重复的原因。
@@ -239,16 +298,17 @@ class LocalInference {
     } else if (lower.contains('invalid magic') ||
         lower.contains('unknown model') ||
         lower.contains('unsupported') ||
-        lower.contains('invalid model')) {
-      cause = '模型格式不受当前引擎支持';
+        lower.contains('invalid model') ||
+        lower.contains('unknown architecture')) {
+      cause = '该权重的架构无法被当前文本引擎解析';
     } else if (lower.contains('failed to open') ||
         lower.contains('no such file') ||
         lower.contains('cannot open')) {
       cause = '无法读取权重文件';
-    } else if (lower.contains('diagnostics') &&
-        lower.contains('registeredbackends=[cpu]')) {
-      // GPU 后端未就绪 + 大 batch，本机实测常见于 5GB 模型加载失败。
-      cause = 'GPU 后端不可用且模型较大，CPU 加载内存不足';
+    } else if (lower.contains('registeredbackends=[cpu]')) {
+      // 只是说明 GPU 后端没启用，并不等于内存不足；真正原因通常是
+      // 权重架构不受支持或计算缓冲分配失败。
+      cause = 'GPU 后端未启用，已回落 CPU 仍加载失败';
     } else {
       cause = '底层加载失败';
     }
@@ -271,13 +331,18 @@ class LocalInference {
     if (engine == null) {
       return const LocalInferenceResult(ok: false, error: '端侧模型尚未加载');
     }
-    final GenerationPlan plan =
-        planner.plan(system: system, user: text, maxTokens: maxTokens);
+    final GenerationPlan plan = planner.plan(
+      system: system,
+      user: text,
+      maxTokens: maxTokens,
+    );
     final Stopwatch sw = Stopwatch()..start();
     try {
       final messages = <LlamaChatMessage>[
         LlamaChatMessage.fromText(
-            role: LlamaChatRole.system, text: plan.stableSystem),
+          role: LlamaChatRole.system,
+          text: plan.stableSystem,
+        ),
         LlamaChatMessage.fromText(role: LlamaChatRole.user, text: text),
       ];
       final completion = await engine.complete(
