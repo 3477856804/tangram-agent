@@ -83,6 +83,21 @@ class MainActivity : FlutterActivity() {
             }
         }
         try {
+            // 先解析 APK 头：损坏包/错包在这里直接拒绝，不交给系统安装器。
+            val archive = packageManager.getPackageArchiveInfo(file.absolutePath, 0)
+            if (archive == null) {
+                result.success(mapOf("ok" to false, "error" to "APK 解析失败：文件可能损坏或被截断"))
+                return
+            }
+            if (archive.packageName != packageName) {
+                result.success(
+                    mapOf(
+                        "ok" to false,
+                        "error" to "安装包包名不匹配：${archive.packageName} != $packageName"
+                    )
+                )
+                return
+            }
             val mime = call.argument<String>("fileType") ?: MIME_APK
             val uri = FileProvider.getUriForFile(
                 this, "$packageName.update.fileprovider", file

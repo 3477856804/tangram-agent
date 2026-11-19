@@ -331,6 +331,17 @@ class UpdateService {
       } else {
         await _downloadResilient(url, file, expected, onProgress);
       }
+      // 先做 APK 魔数校验：下载到登录页/错误页/被截断的包时直接拒绝，
+      // 避免把损坏文件交给系统安装器后抛 JThrowable/ClassNotFound。
+      if (!await _looksLikeApk(file)) {
+        try {
+          await file.delete();
+        } on Object {
+          // 删不掉也如实报错，绝不安装。
+        }
+        return const InstallOutcome(
+            ok: false, error: '安装包不是有效 APK（可能下载到错误页面或被截断），请重试');
+      }
       // 完整性校验：优先 GitHub asset 自带 digest，兼容历史 Release 正文
       // 清单与 SHA256SUMS.txt 资产。校验不过删包拒装。
       String? verifyError = await _verifyAgainstExpected(
@@ -376,6 +387,26 @@ class UpdateService {
           error: '当前平台未实现 installApk（MethodChannel tangram/update 仅 Android）');
     } on Object catch (e) {
       return InstallOutcome(ok: false, error: '${e.runtimeType}: $e');
+    }
+  }
+
+  /// APK 必须是 ZIP（PK\x03\x04）；HTML 错误页、JSON、截断文件都不放行。
+  Future<bool> _looksLikeApk(File file) async {
+    try {
+      if (!await file.exists() || await file.length() < 1024) return false;
+      final RandomAccessFile raf = await file.open();
+      try {
+        final List<int> head = await raf.read(4);
+        return head.length == 4 &&
+            head[0] == 0x50 && // P
+            head[1] == 0x4B && // K
+            head[2] == 0x03 &&
+            head[3] == 0x04;
+      } finally {
+        await raf.close();
+      }
+    } on Object {
+      return false;
     }
   }
 
