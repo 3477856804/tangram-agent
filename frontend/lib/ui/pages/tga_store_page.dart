@@ -5,6 +5,9 @@ import 'package:provider/provider.dart';
 
 import '../../bridge/backend_client.dart';
 import '../../design/tga_design.dart';
+import '../../services/model_registry.dart';
+import 'tga_hf_panel.dart';
+import 'tga_models_page.dart';
 
 /// 模型商店（2026-11-14 GGUF 可下载性改造）：
 /// - 搜索：防抖后调用后端 `model_store ms_search` RPC（魔搭 PUT dolphin 接口
@@ -59,6 +62,8 @@ class _TgaStorePageState extends State<TgaStorePage> {
   ];
 
   String _cat = '全部';
+  /// 顶部三个入口：推荐 / 已装 / 抱脸。命名统一为 2–3 个字。
+  String _mode = '推荐';
   bool _loading = false;
   String _note = ''; // 在线搜索来源说明（如实展示，不静默吞掉）
   String _error = ''; // 在线搜索失败原因（如实展示 + 重试按钮）
@@ -253,7 +258,7 @@ class _TgaStorePageState extends State<TgaStorePage> {
           if (fname.isEmpty) continue;
           final int bytes = fd['size'] is num ? (fd['size'] as num).toInt() : 0;
           local.add(_ModelItem(
-            id: 'file:$fname',
+            id: (fd['path'] ?? 'file:$fname').toString(),
             name: fname,
             desc: '本地已下载权重文件',
             type: _classify(fname),
@@ -408,6 +413,36 @@ class _TgaStorePageState extends State<TgaStorePage> {
     );
   }
 
+  /// 本地权重直接运行：设为当前模型并回到对话页。
+  Future<void> _runLocal(_ModelItem item) async {
+    try {
+      final registry = context.read<ModelRegistry>();
+      await registry.refresh();
+      ModelEntry? match;
+      for (final e in registry.localEntries) {
+        if (e.path == item.id ||
+            e.path?.endsWith('/${item.name}') == true) {
+          match = e;
+          break;
+        }
+      }
+      if (match == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('权重还没合并完成，暂时不能运行')),
+        );
+        return;
+      }
+      await registry.setSelected(match.id);
+      if (!mounted) return;
+      Navigator.of(context).popUntil((Route<dynamic> r) => r.isFirst);
+    } on Object catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('启动失败：$e')));
+    }
+  }
+
   /// 点击在线条目 → 底部弹层列出该仓库真实 GGUF 文件并可逐个下载。
   void _openFilesSheet(_ModelItem item) {
     final BackendClient backend = context.read<BackendClient>();
@@ -428,9 +463,12 @@ class _TgaStorePageState extends State<TgaStorePage> {
 
   @override
   Widget build(BuildContext context) {
-    final List<_ModelItem> online = _cat == '全部'
-        ? _online
-        : _online.where((_ModelItem i) => i.type == _cat).toList();
+    final bool installed = _mode == '已装';
+    final List<_ModelItem> online = installed || _mode == '抱脸'
+        ? <_ModelItem>[]
+        : _cat == '全部'
+            ? _online
+            : _online.where((_ModelItem i) => i.type == _cat).toList();
     final List<_ModelItem> local = _cat == '全部'
         ? _local
         : _local.where((_ModelItem i) => i.type == _cat).toList();
@@ -443,82 +481,123 @@ class _TgaStorePageState extends State<TgaStorePage> {
     ].join('；');
 
     return TgaPage(
-      title: '模型商店',
+      title: '模型库',
+      actions: <Widget>[
+        TextButton.icon(
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const TgaModelsPage()),
+          ),
+          icon: const Icon(Icons.file_upload_outlined, size: 18),
+          label: const Text('导入'),
+        ),
+      ],
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           Padding(
             padding: const EdgeInsets.fromLTRB(Tga.pagePad, 4, Tga.pagePad, 0),
-            child: TgaSearchField(
-              hint: '搜索魔搭模型，例如 qwen',
-              controller: _searchCtrl,
-              onChanged: _onQueryChanged,
+            child: TgaSegmented<String>(
+              items: const <String>['推荐', '已装', '抱脸'],
+              value: _mode,
+              labelOf: (String s) => s,
+              onChanged: (String v) {
+                setState(() => _mode = v);
+                if (v == '已装') _search(quiet: true);
+              },
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(Tga.pagePad, 8, Tga.pagePad, 0),
-            child: Text(
-              caption.isNotEmpty
-                  ? caption
-                  : '魔搭真实模型 · 含 GGUF 的仓库优先 · 无 GGUF 仓库自动推荐量化版',
-              style: Tga.caption,
+          if (_mode != '抱脸')
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Tga.pagePad, 8, Tga.pagePad, 0),
+              child: TgaSearchField(
+                hint: '搜索魔搭模型，例如 qwen',
+                controller: _searchCtrl,
+                onChanged: _onQueryChanged,
+              ),
             ),
-          ),
-          _recommendSection(),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(Tga.pagePad, 12, 0, 10),
-            child: Row(
-              children: <Widget>[
-                Expanded(
-                  child: TgaSegmented<String>(
-                    items: _cats,
-                    value: _cat,
-                    labelOf: (String s) => s,
-                    onChanged: (String v) => setState(() => _cat = v),
+          if (_mode != '抱脸')
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Tga.pagePad, 8, Tga.pagePad, 0),
+              child: Text(
+                caption.isNotEmpty
+                    ? caption
+                    : '魔搭真实模型 · 含 GGUF 的仓库优先 · '
+                        '无 GGUF 仓库自动推荐量化版',
+                style: Tga.caption,
+              ),
+            ),
+          if (_mode == '推荐') _recommendSection(),
+          if (_mode != '抱脸')
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Tga.pagePad, 12, 0, 10),
+              child: Row(
+                children: <Widget>[
+                  Expanded(
+                    child: TgaSegmented<String>(
+                      items: _cats,
+                      value: _cat,
+                      labelOf: (String s) => s,
+                      onChanged: (String v) => setState(() => _cat = v),
+                    ),
                   ),
-                ),
-                if (_loading)
-                  SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Tga.primary),
-                  ),
-                const SizedBox(width: Tga.pagePad),
-              ],
+                  if (_loading)
+                    SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Tga.primary),
+                    ),
+                  const SizedBox(width: Tga.pagePad),
+                ],
+              ),
             ),
-          ),
-          Expanded(
-            child: allEmpty
-                ? (_loading
-                    ? TgaEmpty('正在加载…', icon: Icons.storefront_outlined)
-                    : _error.isNotEmpty
-                        ? _errorArea()
-                        : TgaEmpty(_cat == '全部' ? '没有找到相关模型' : '该分类暂无模型',
-                            icon: Icons.storefront_outlined))
-                : ListView(
-                    padding:
-                        const EdgeInsets.fromLTRB(Tga.pagePad, 0, Tga.pagePad, 24),
-                    children: <Widget>[
-                      if (online.isNotEmpty) _sectionTitle('在线模型 · 魔搭社区'),
-                      for (final _ModelItem it in online)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: _StoreCard(
-                            item: it,
-                            ggufCount: _ggufCount[it.id],
-                            onTap: () => _openFilesSheet(it),
+          if (_mode == '抱脸')
+            Expanded(
+              child: TgaHfPanel(
+                onDownloaded: () => _search(quiet: true),
+              ),
+            )
+          else
+            Expanded(
+              child: allEmpty
+                  ? (_loading
+                      ? TgaEmpty('正在加载…', icon: Icons.storefront_outlined)
+                      : _error.isNotEmpty
+                          ? _errorArea()
+                          : TgaEmpty(
+                              installed
+                                  ? '还没有已下载的模型'
+                                  : _cat == '全部'
+                                      ? '没有找到相关模型'
+                                      : '该分类暂无模型',
+                              icon: Icons.storefront_outlined))
+                  : ListView(
+                      padding: const EdgeInsets.fromLTRB(
+                          Tga.pagePad, 0, Tga.pagePad, 24),
+                      children: <Widget>[
+                        if (online.isNotEmpty) _sectionTitle('在线模型 · 魔搭社区'),
+                        for (final _ModelItem it in online)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: _StoreCard(
+                              item: it,
+                              ggufCount: _ggufCount[it.id],
+                              onTap: () => _openFilesSheet(it),
+                            ),
                           ),
-                        ),
-                      if (local.isNotEmpty) _sectionTitle('本地已下载'),
-                      for (final _ModelItem it in local)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: _StoreCard(item: it, onTap: () {}),
-                        ),
-                    ],
-                  ),
-          ),
+                        if (local.isNotEmpty) _sectionTitle('本地已下载'),
+                        for (final _ModelItem it in local)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: _StoreCard(
+                              item: it,
+                              onTap: () {},
+                              onRun: () => _runLocal(it),
+                            ),
+                          ),
+                      ],
+                    ),
+            ),
         ],
       ),
     );
@@ -611,9 +690,10 @@ class _ModelItem {
 
 class _StoreCard extends StatelessWidget {
   const _StoreCard(
-      {required this.item, required this.onTap, this.ggufCount});
+      {required this.item, required this.onTap, this.onRun, this.ggufCount});
   final _ModelItem item;
   final VoidCallback onTap;
+  final VoidCallback? onRun;
 
   /// ms_files 真实探测到的 .gguf 文件数；null = 未探测/本地条目。
   final int? ggufCount;
@@ -723,7 +803,21 @@ class _StoreCard extends StatelessWidget {
         ],
       );
     }
-    if (item.downloaded) return TgaTag('已下载', color: Tga.green);
+    if (item.downloaded) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          TgaTag('已下载', color: Tga.green),
+          if (onRun != null) ...<Widget>[
+            const SizedBox(width: 6),
+            TextButton(
+              onPressed: onRun,
+              child: const Text('运行'),
+            ),
+          ],
+        ],
+      );
+    }
     return const SizedBox.shrink();
   }
 }

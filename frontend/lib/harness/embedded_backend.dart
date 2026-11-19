@@ -3719,6 +3719,53 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
     },
   ];
 
+  /// 从 HuggingFace 链接 / owner/repo 中解析仓库，兼容 /tree、/blob、镜像站。
+  String? _parseHfRepo(String raw) {
+    final s = raw.trim();
+    if (s.isEmpty) return null;
+    Uri? uri;
+    if (s.startsWith('http://') || s.startsWith('https://')) {
+      uri = Uri.tryParse(s);
+    } else if (s.contains('/') && !s.contains(' ')) {
+      final parts = s.split('/').where((e) => e.isNotEmpty).toList();
+      if (parts.length >= 2) return '${parts[0]}/${parts[1]}';
+      return null;
+    }
+    if (uri == null) return null;
+    final host = uri.host.toLowerCase();
+    if (!host.contains('huggingface.co') && !host.contains('hf-mirror.com')) {
+      return null;
+    }
+    final seg = uri.pathSegments.where((e) => e.isNotEmpty).toList();
+    if (seg.length < 2) return null;
+    return '${seg[0]}/${seg[1]}';
+  }
+
+  /// 依次尝试 huggingface.co / hf-mirror.com；返回解析后的 JSON。
+  Future<dynamic> _hfGetJson(String path, {String token = ''}) async {
+    Object? last;
+    for (final host in <String>['hf-mirror.com', 'huggingface.co']) {
+      try {
+        final req = http.Request('GET', Uri.parse('https://$host$path'))
+          ..headers['User-Agent'] =
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0'
+          ..headers['Accept'] = 'application/json';
+        if (token.isNotEmpty) {
+          req.headers['Authorization'] = 'Bearer $token';
+        }
+        final resp = await http.Response.fromStream(await req.send())
+            .timeout(const Duration(seconds: 45));
+        if (resp.statusCode == 200) {
+          return jsonDecode(utf8.decode(resp.bodyBytes));
+        }
+        last = 'HTTP ${resp.statusCode}';
+      } on Object catch (e) {
+        last = e;
+      }
+    }
+    throw StateError('$last');
+  }
+
   Future<Map<String, dynamic>> _modelStore(Map<String, dynamic> p) async {
     final action = _action(p);
     switch (action) {
@@ -3917,6 +3964,154 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           'expected_sha256': job.expectedSha256,
           if (job.error != null) 'error': job.error,
           'note': '真实 HTTP 分片下载（Range + 断点续传）。',
+        };
+      }
+      case 'hf_search': {
+        final q = (p['query'] ?? '').toString().trim();
+        if (q.isEmpty) return _err('请输入模型名或 HuggingFace 链接');
+        final token = (p['token'] ?? '').toString().trim();
+        final parsed = _parseHfRepo(q);
+        if (parsed != null) {
+          return <String, dynamic>{
+            'ok': true,
+            'source': 'huggingface.co',
+            'repo': parsed,
+            'models': <Map<String, dynamic>>[
+              <String, dynamic>{
+                'id': parsed,
+                'path': parsed,
+                'name': parsed.split('/').last,
+                'owner': parsed.split('/').first,
+                'downloads': 0,
+                'likes': 0,
+                'pipeline_tag': '',
+                'from_link': true,
+              }
+            ],
+          };
+        }
+        try {
+          final decoded = await _hfGetJson(
+            '/api/models?search=${Uri.encodeQueryComponent(q)}'
+            '&limit=20&sort=downloads&direction=-1',
+            token: token,
+          );
+          if (decoded is! List) return _err('抱脸搜索返回非预期结构');
+          final models = <Map<String, dynamic>>[];
+          for (final e in decoded.whereType<Map>()) {
+            final id = (e['id'] ?? e['modelId'] ?? '').toString();
+            if (id.isEmpty) continue;
+            models.add(<String, dynamic>{
+              'id': id,
+              'path': id,
+              'name': id.split('/').last,
+              'owner': id.contains('/') ? id.split('/').first : '',
+              'downloads': e['downloads'] is num
+                  ? (e['downloads'] as num).toInt()
+                  : 0,
+              'likes':
+                  e['likes'] is num ? (e['likes'] as num).toInt() : 0,
+              'pipeline_tag': (e['pipeline_tag'] ?? '').toString(),
+              'tags': e['tags'] is List
+                  ? (e['tags'] as List).map((t) => t.toString()).toList()
+                  : <String>[],
+              'updated': (e['lastModified'] ?? '').toString(),
+            });
+          }
+          return <String, dynamic>{
+            'ok': true,
+            'source': 'huggingface.co',
+            'models': models,
+            'total': models.length,
+          };
+        } on Object catch (e) {
+          return _err('抱脸搜索失败：$e');
+        }
+      }
+      case 'hf_files': {
+        final repo = _parseHfRepo(
+                (p['repo'] ?? p['url'] ?? p['model_path'] ?? '').toString()) ??
+            '';
+        if (repo.isEmpty || !repo.contains('/')) {
+          return _err('缺少 HuggingFace 仓库（owner/repo）');
+        }
+        final token = (p['token'] ?? '').toString().trim();
+        try {
+          final decoded = await _hfGetJson(
+            '/api/models/$repo/tree/main?recursive=true&expand=true',
+            token: token,
+          );
+          if (decoded is! List) return _err('抱脸文件列表返回非预期结构');
+          final files = <Map<String, dynamic>>[];
+          for (final f in decoded.whereType<Map>()) {
+            final path = (f['path'] ?? '').toString();
+            final type = (f['type'] ?? '').toString();
+            if (type != 'file' || !path.toLowerCase().endsWith('.gguf')) {
+              continue;
+            }
+            files.add(<String, dynamic>{
+              'path': path,
+              'name': path.split('/').last,
+              'size': f['size'] is num ? (f['size'] as num).toInt() : 0,
+            });
+          }
+          files.sort((a, b) => (a['size'] as int).compareTo(b['size'] as int));
+          return <String, dynamic>{
+            'ok': true,
+            'repo': repo,
+            'files': files,
+            if (files.isEmpty)
+              'note': '该仓库没有 GGUF 文件，需要先在电脑上转换后再上传/导入。',
+          };
+        } on Object catch (e) {
+          return _err('读取抱脸文件列表失败：$e');
+        }
+      }
+      case 'hf_download': {
+        final repo = _parseHfRepo(
+                (p['repo'] ?? p['url'] ?? p['model_path'] ?? '').toString()) ??
+            '';
+        final file = (p['file'] ?? p['file_path'] ?? '').toString().trim();
+        if (repo.isEmpty || file.isEmpty || file.contains('..')) {
+          return _err('缺少 HuggingFace repo / file');
+        }
+        final safeName =
+            '${repo.split('/').last}-${file.split('/').last}'.replaceAll(
+                RegExp(r'[^A-Za-z0-9._-]'), '_');
+        final expectedSha256 =
+            (p['expected_sha256'] ?? '').toString().trim().toLowerCase();
+        DownloadJob? job;
+        Object? lastError;
+        for (final host in <String>['hf-mirror.com', 'huggingface.co']) {
+          final url = 'https://$host/$repo/resolve/main/$file?download=true';
+          try {
+            job = await downloads.start(
+              url,
+              filename: safeName,
+              chunks: 4,
+              expectedBytes:
+                  (p['size'] is num) ? (p['size'] as num).toInt() : 0,
+              expectedSha256: expectedSha256.isEmpty ? null : expectedSha256,
+            );
+            if (job.status != 'failed') break;
+            lastError = job.error;
+          } on Object catch (e) {
+            lastError = e;
+          }
+        }
+        if (job == null) return _err('抱脸下载启动失败：$lastError');
+        _emit('download_progress', downloads.progress(job));
+        return <String, dynamic>{
+          'ok': job.status != 'failed',
+          'job_id': job.id,
+          'repo': repo,
+          'file': file,
+          'status': job.status,
+          'target': job.target,
+          'filename': safeName,
+          'resumable': job.resumable,
+          if (job.error != null) 'error': job.error,
+          'note': 'HuggingFace 直链，失败自动切 hf-mirror.com；Range 分片 + 断点续传。',
         };
       }
       case 'download_status' || 'status':

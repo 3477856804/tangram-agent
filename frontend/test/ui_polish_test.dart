@@ -161,21 +161,21 @@ void main() {
         expect(find.text(group), findsOneWidget, reason: '缺少分组「$group」');
       }
       for (final String label in <String>[
-        '训练设置',
-        '人格设置',
-        '内置沙箱',
-        '模型商店',
-        '工作区域',
-        '私有知识库',
-        '自动化工作流',
-        '快照备份',
-        '应用市场',
-        '3D 建模',
-        '更多通信',
-        '模型管理',
-        '多模型群聊',
-        '团队协作',
-        '知识图谱',
+        '训练',
+        '人格',
+        '沙箱',
+        '模型库',
+        '工作区',
+        '知识库',
+        '工作流',
+        '快照',
+        '应用',
+        '建模',
+        '通信',
+        '管理',
+        '群聊',
+        '团队',
+        '图谱',
       ]) {
         expect(find.text(label), findsOneWidget, reason: '缺少导航项「$label」');
       }
