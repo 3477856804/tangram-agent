@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -118,6 +120,8 @@ function initMap(){
   map.centerAndZoom(center, 16);
   map.enableScrollWheelZoom(true);
   map.enableDragging();
+  map.enableInertialDragging();
+  map.enablePinchToZoom(true);
   map.addEventListener("click", function(e){
     if (window.BaiduMapTap) {
       window.BaiduMapTap.postMessage(JSON.stringify({lat:e.point.lat,lng:e.point.lng}));
@@ -178,7 +182,16 @@ if (window.BMap) { initMap(); }
   Widget build(BuildContext context) {
     return Stack(
       children: <Widget>[
-        WebViewWidget(controller: _controller),
+        WebViewWidget(
+          controller: _controller,
+          // 地图在 ListView 里：必须让 WebView 赢得手势竞技场，
+          // 否则上下滑动会被外层列表抢走，表现为“地图拖不动/点不了”。
+          gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+            Factory<OneSequenceGestureRecognizer>(
+              () => EagerGestureRecognizer(),
+            ),
+          },
+        ),
         Positioned(
           right: 10,
           top: 10,
