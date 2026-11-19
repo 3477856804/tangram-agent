@@ -29,17 +29,14 @@ gradle.beforeProject(org.gradle.api.Action<org.gradle.api.Project> {
 
 allprojects {
     repositories {
-        // tangram:build-mirrors (generated)
+        // tangram:build-mirrors (generated, 官方源优先,国内镜像兜底)
+        google()
+        mavenCentral()
+        gradlePluginPortal()
         maven { url = uri("https://maven.aliyun.com/repository/google") }
         maven { url = uri("https://maven.aliyun.com/repository/public") }
         maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
-
-        // 国内镜像优先，境外官方仓库作 fallback（与 settings.gradle.kts 对齐）。
-        maven { url = uri("https://maven.aliyun.com/repository/google") }
-        maven { url = uri("https://maven.aliyun.com/repository/public") }
-        google()
-        mavenCentral()
-    }
+}
 }
 
 val newBuildDir: Directory =

@@ -36,6 +36,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:http/http.dart' as http;
 import 'package:tangram/harness/downloader.dart';
 import 'package:tangram/harness/store.dart';
@@ -60,6 +61,27 @@ class ProotSandbox {
   static const int kTallocBytes = 75648;
   static const int kUbuntuRootfsBytes = 29936675;
   static const int kRootfsBytes = 3947906;
+
+  /// 下载完整性真源：proot 是要被 exec 的二进制，仅比字节长度无法发现
+  /// 内容被替换（长度相同的恶意 ELF）。这些值来自官方源实测（2026-11-19）：
+  /// proot/talloc 与 UserLAnd 官方资产一致，ubuntu 取自官方 SHA256SUMS，
+  /// alpine 取自 Alpine 官方发布。下载后逐字节算 SHA256 比对，不符即拒用。
+  static const String kProotSha256 =
+      '6bb2cb176d4a617fc0c4cd1a948075bc5ff1ddaf9ece306df0f2f0b52dbc8547';
+  static const String kTallocSha256 =
+      '81500585cc2dacbe1bdb687e0dd26e9c89cedbbcf0e609c5b905cc4705fabdd6';
+  static const String kUbuntuRootfsSha256 =
+      'a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2';
+  static const String kRootfsSha256 =
+      '041fa34a81788242df9e78fa69b97ab45b8ec47ddbf88864755610414a7bf3de';
+
+  static String sha256ForUrl(String url) {
+    if (url == kProotUrl) return kProotSha256;
+    if (url == kTallocUrl) return kTallocSha256;
+    if (url == kUbuntuRootfsUrl) return kUbuntuRootfsSha256;
+    if (url == kRootfsUrl) return kRootfsSha256;
+    return '';
+  }
 
   /// 新装默认 profile；已装环境的 READY.json 没写 profile 时按 alpine 解释。
   static const String kDefaultProfile = 'ubuntu';
@@ -264,9 +286,12 @@ class ProotSandbox {
       final File rootfsTmp =
           File('${extDir.path}/${rootfsArchiveFor(profile)}');
       await _downloadStream(
-          client, kProotUrl, prootBin, kTallocBytes + rootfsBytes);
-      await _downloadStream(client, kTallocUrl, tallocLib, rootfsBytes);
-      await _downloadStream(client, rootfsUrlFor(profile), rootfsTmp, 0);
+          client, kProotUrl, prootBin, kTallocBytes + rootfsBytes,
+          expectedSha256: kProotSha256);
+      await _downloadStream(client, kTallocUrl, tallocLib, rootfsBytes,
+          expectedSha256: kTallocSha256);
+      await _downloadStream(client, rootfsUrlFor(profile), rootfsTmp, 0,
+          expectedSha256: sha256ForUrl(rootfsUrlFor(profile)));
 
       _step = 'extracting';
       _report('extract', _received, _total, 0);
@@ -348,8 +373,9 @@ class ProotSandbox {
     http.Client client,
     String url,
     File target,
-    int remainingKnown,
-  ) async {
+    int remainingKnown, {
+    String expectedSha256 = '',
+  }) async {
     final request = http.Request('GET', Uri.parse(url))
       ..followRedirects = true;
     final http.StreamedResponse resp;
@@ -387,6 +413,25 @@ class ProotSandbox {
     _doneBytes += written;
     if (fileTotal > 0 && written != fileTotal) {
       throw StateError('${target.path} 不完整：$written / $fileTotal 字节');
+    }
+    // 完整性校验：proot/rootfs 是要执行或解包落盘的二进制，长度一致但内容
+    // 被替换（恶意 ELF / 损坏镜像）只能靠摘要发现。不符则删除并如实失败，
+    // 绝不把未校验的文件交给 exec 或 tar 解包。
+    if (expectedSha256.isNotEmpty) {
+      // 对已落盘文件做流式 SHA256（不全量载入内存），与官方摘要比对。
+      final String actual =
+          (await crypto.sha256.bind(target.openRead()).first).toString();
+      if (actual != expectedSha256.toLowerCase()) {
+        try {
+          target.deleteSync();
+        } on Object {
+          // 删不掉也如实报错，绝不继续使用未通过校验的文件。
+        }
+        _doneBytes -= written;
+        _received = base;
+        throw StateError('${target.path} SHA256 校验失败：期望 $expectedSha256，'
+            '实际 $actual（下载内容可能被替换/损坏），已删除拒绝使用');
+      }
     }
     _report('download', _received,
         fileTotal > 0 ? _doneBytes + remainingKnown : -1, _speed);
@@ -640,8 +685,11 @@ esac
       };
     }
 
-    final Future<String> outF = proc.stdout.transform(utf8.decoder).join();
-    final Future<String> errF = proc.stderr.transform(utf8.decoder).join();
+    // 宽松解码：Linux 命令可能输出非 UTF-8 字节，严格解码会抛 FormatException。
+    final Future<String> outF =
+        proc.stdout.transform(const Utf8Decoder(allowMalformed: true)).join();
+    final Future<String> errF =
+        proc.stderr.transform(const Utf8Decoder(allowMalformed: true)).join();
     int exitCode = 124;
     try {
       exitCode = await proc.exitCode.timeout(timeout);

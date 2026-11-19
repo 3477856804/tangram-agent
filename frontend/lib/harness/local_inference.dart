@@ -77,6 +77,12 @@ class LocalInference {
     try {
       await dispose();
       // 优先 GPU（Android 已打 Vulkan/OpenCL 后端）；不支持时自动回退 CPU。
+      // 提速参数：
+      //  - batchSize / numberOfThreadsBatch：prompt prefill 阶段并行度。prefill
+      //    是矩阵乘、可吃满所有核，线程数可多于逐 token decode，显著缩短首字延迟。
+      //  - flashAttention / useMmap 保持引擎默认（auto / true），对长上下文友好。
+      final int batchThreads = planner.threads;
+      const int kBatchSize = 512;
       LlamaEngine engine;
       try {
         engine = await LlamaEngine.load(
@@ -84,6 +90,8 @@ class LocalInference {
           params: ModelParams(
             contextSize: planner.contextSize,
             numberOfThreads: planner.threads,
+            numberOfThreadsBatch: batchThreads,
+            batchSize: kBatchSize,
             gpuLayers: 99,
           ),
         ).timeout(const Duration(seconds: 180));
@@ -93,6 +101,8 @@ class LocalInference {
           params: ModelParams(
             contextSize: planner.contextSize,
             numberOfThreads: planner.threads,
+            numberOfThreadsBatch: batchThreads,
+            batchSize: kBatchSize,
             gpuLayers: 0,
           ),
         ).timeout(const Duration(seconds: 180));

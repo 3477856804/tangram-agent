@@ -168,9 +168,22 @@ class DownloadManager {
       resumable = true;
     }
 
-    final int n = (resumable && chunks > 1 && total > 1024 * 1024)
-        ? chunks.clamp(1, 8)
-        : 1;
+    // 分片数自适应提速：大 GGUF 在弱网/高延迟 CDN 上单连接吞吐受限，
+    // 8 路 Range 并行能显著提升聚合带宽。按已探测的真实文件大小上调分片，
+    // 调用方给的 chunks 作为下限（默认 4），上限 8；小文件/不支持 Range 退单流。
+    int n = 1;
+    if (resumable && total > 1024 * 1024) {
+      final int floor = chunks > 1 ? chunks : 4;
+      int adaptive = floor;
+      if (total >= 4 * 1024 * 1024 * 1024) {
+        adaptive = 8; // >=4GB：顶格 8 路
+      } else if (total >= 1024 * 1024 * 1024) {
+        adaptive = floor >= 8 ? floor : 8; // >=1GB：8 路
+      } else if (total >= 512 * 1024 * 1024) {
+        adaptive = floor >= 6 ? floor : 6; // >=512MB：6 路
+      }
+      n = adaptive.clamp(1, 8);
+    }
     final job = DownloadJob(
       id: id,
       url: url,
@@ -270,8 +283,13 @@ class DownloadManager {
         throw HttpException('HTTP ${resp.statusCode}', uri: Uri.parse(job.url));
       }
       final sink = File('${job.target}.part0').openWrite();
-      await sink.addStream(resp);
-      await sink.close();
+      // 空闲 30s 才判停滞：慢但持续推进的下载不被误杀；连接假死则抛错，
+      // 由 _run 的 catch 标记失败（单流无分片续传，下次重下）。
+      try {
+        await sink.addStream(resp.timeout(const Duration(seconds: 30)));
+      } finally {
+        await sink.close();
+      }
       await File('${job.target}.part0').rename(job.target);
     } finally {
       client.close(force: true);

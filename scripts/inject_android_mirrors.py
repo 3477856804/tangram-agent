@@ -2,15 +2,22 @@
 """Android 构建镜像注入（幂等，全平台单一代码库）。
 
 背景：frontend/android/ 由 flutter create 生成且不入库；默认 Gradle 发行包来自
-services.gradle.org（境内常超时并重定向到 github），Maven 依赖来自
-google()/mavenCentral()/gradlePluginPortal()（maven.google.com 境内不可达）。
-换机器重建 APK 会因此失败，故把镜像配置在生成运行器后幂等注入。
+services.gradle.org（境内常超时），Maven 依赖来自 google()/mavenCentral()/
+gradlePluginPortal()。换机器重建 APK 会因此失败，故在生成运行器后幂等注入镜像。
+
+关键修复（2026-11-19）：此前把阿里云镜像放在官方仓库**之前**，导致 GitHub
+境外 runner 的 Android 构建反复撞 maven.aliyun.com 502 Bad Gateway（POM 解析
+链中断，Gradle 不 fallback，直接 BUILD FAILED）。现改为：
+  - 官方仓库（google/mavenCentral/gradlePluginPortal）在前——境外 CI 快且稳；
+  - 国内镜像（阿里云 google/public/gradle-plugin）在后兜底——境内本地若官方
+    源不可达时 Gradle 会 fallback 到镜像（连接失败会 fallback，只首次多等超时）；
+  - 去重：清理旧的重复镜像块与陈旧的「国内镜像优先」手写块。
+  - 本地境内可用 TGA_MAVEN_CN_FIRST=1 让镜像优先（历史行为）。
 
 注入内容（全部幂等，带标记防重复）：
   1. gradle/wrapper/gradle-wrapper.properties
      distributionUrl -> 腾讯云镜像（保留版本号，仅换 host/前缀）
-  2. settings.gradle.kts / build.gradle.kts 的 repositories
-     在原有仓库之前插入阿里云 google / public / gradle-plugin 镜像
+  2. settings.gradle.kts / build.gradle.kts 的 repositories：官方在前、镜像在后
 
 用法：
   python3 scripts/inject_android_mirrors.py <android_dir> [--check]
@@ -31,11 +38,40 @@ MARKER = "tangram:build-mirrors"
 MEM_MARKER = "tangram:gradle-memory"
 
 GRADLE_MIRROR = "https://mirrors.cloud.tencent.com/gradle/"
-MIRROR_BLOCK = """        // {marker} (generated)
-        maven {{ url = uri("https://maven.aliyun.com/repository/google") }}
+
+# 国内镜像条目（fallback 用；境外 CI 下官方仓库在前，镜像只在官方不可达时兜底）。
+_MIRROR_LINES = """        maven {{ url = uri("https://maven.aliyun.com/repository/google") }}
         maven {{ url = uri("https://maven.aliyun.com/repository/public") }}
         maven {{ url = uri("https://maven.aliyun.com/repository/gradle-plugin") }}
 """.format(marker=MARKER)
+
+# 官方仓库条目（境外 CI 优先，稳定快速）。
+_OFFICIAL_LINES = """        google()
+        mavenCentral()
+        gradlePluginPortal()
+"""
+
+
+def _repo_block(cn_first: bool) -> str:
+    official = _OFFICIAL_LINES
+    mirror = _MIRROR_LINES
+    body = mirror + official if cn_first else official + mirror
+    order = "境内镜像优先" if cn_first else "官方源优先,国内镜像兜底"
+    return f"        // {MARKER} (generated, {order})\n" + body
+
+
+def _find_matching_brace(text: str, open_idx: int) -> int:
+    """返回与 text[open_idx]=='{' 匹配的 '}' 下标；找不到返回 -1。"""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
 
 # 受限内存（如 8GB cgroup）下，Flutter 模板默认 -Xmx8G + MaxMetaspaceSize=4G
 # 会让 Gradle/Kotlin daemon 双双被 OOM kill。这里改成总占用 < 4GB 的保守配置，
@@ -68,7 +104,30 @@ def inject_wrapper(android_dir: Path) -> tuple[bool, str]:
     return True, f"Gradle 发行包 -> {GRADLE_MIRROR}{filename}"
 
 
-def inject_repos(android_dir: Path) -> tuple[bool, str]:
+def _clean_old_mirror_lines(text: str) -> str:
+    """去掉陈旧的镜像行/块，避免重复注入叠加（含旧版手写「国内镜像优先」块）。
+
+    这些行单独出现也无害，但重复会出现多次 502 拖慢境外构建，必须清掉。
+    """
+    lines: list[str] = []
+    skip_comment = False
+    for ln in text.splitlines():
+        stripped = ln.strip()
+        if "maven.aliyun.com" in stripped:
+            continue
+        # 去掉旧的手写注释行（语义已反转/陈旧）
+        if ("国内镜像优先" in stripped or "境外官方仓库作 fallback" in stripped
+                or "保留下方官方仓库作 fallback" in stripped):
+            continue
+        if MARKER in stripped and stripped.lstrip().startswith("//"):
+            continue
+        lines.append(ln)
+    return "\n".join(lines)
+
+
+def inject_repos(android_dir: Path, *, cn_first: bool = False) -> tuple[bool, str]:
+    import os
+    cn_first = cn_first or os.environ.get("TGA_MAVEN_CN_FIRST") == "1"
     results = []
     for rel in ("settings.gradle.kts", "build.gradle.kts"):
         p = android_dir / rel
@@ -76,21 +135,31 @@ def inject_repos(android_dir: Path) -> tuple[bool, str]:
             results.append((False, f"{rel} 不存在"))
             continue
         text = p.read_text(encoding="utf-8")
-        if MARKER in text:
-            results.append((True, f"{rel} 镜像已注入（跳过）"))
-            continue
-        # 在 repositories { 之后插入镜像块；匹配所有 repositories 块
-        new_text, n = re.subn(
-            r"(repositories\s*\{)",
-            r"\1\n" + MIRROR_BLOCK,
-            text,
-        )
-        if n == 0:
+        cleaned = _clean_old_mirror_lines(text)
+        block = _repo_block(cn_first)
+        # 在每个 repositories { ... } 块的闭合括号前插入（作为 fallback 顺序）。
+        out = cleaned
+        pos = 0
+        count = 0
+        pat = re.compile(r"repositories\s*\{")
+        while True:
+            m = pat.search(out, pos)
+            if not m:
+                break
+            open_idx = out.index("{", m.start())
+            close_idx = _find_matching_brace(out, open_idx)
+            if close_idx < 0:
+                break
+            out = out[:close_idx] + "\n" + block + out[close_idx:]
+            pos = close_idx + len(block) + 1
+            count += 1
+        if count == 0:
             results.append((True, f"{rel} 无 repositories 块（无需注入）"))
             continue
-        new_text = new_text.rstrip("\n") + f"\n// {MARKER}\n"
-        p.write_text(new_text, encoding="utf-8")
-        results.append((True, f"{rel} 注入 {n} 处仓库镜像"))
+        out = out.rstrip("\n") + f"\n// {MARKER}\n"
+        p.write_text(out, encoding="utf-8")
+        order = "境内镜像优先" if cn_first else "官方源优先+镜像兜底"
+        results.append((True, f"{rel} 注入 {count} 处仓库（{order}）"))
     ok = all(o for o, _ in results)
     return ok, "; ".join(m for _, m in results)
 
@@ -135,13 +204,21 @@ def inject(android_dir: Path, *, check_only: bool = False) -> int:
         st = settings.read_text(encoding="utf-8") if settings.is_file() else ""
         bt = build.read_text(encoding="utf-8") if build.is_file() else ""
         pt = props.read_text(encoding="utf-8") if props.is_file() else ""
+        # 官方源与镜像都应存在；镜像只能出现一次（去重）；官方在前（境外 CI）。
+        def official_before_mirror(t: str) -> bool:
+            g = t.find("google()")
+            a = t.find("maven.aliyun.com")
+            return g >= 0 and a >= 0 and g < a
         ok = (
             MARKER in wt and "mirrors.cloud.tencent.com" in wt
             and MARKER in st and "maven.aliyun.com" in st
+            and official_before_mirror(st)
+            and st.count("maven.aliyun.com/repository/google") == 1
             and "maven.aliyun.com" in bt
+            and bt.count("maven.aliyun.com/repository/google") == 1
             and MEM_MARKER in pt and "-Xmx3G" in pt
         )
-        print(f"  [{'OK ' if ok else 'FAIL'}] 构建镜像/内存校验：{android_dir}")
+        print(f"  [{'OK ' if ok else 'FAIL'}] 构建镜像/内存校验（官方源优先+去重）：{android_dir}")
         return 0 if ok else 1
 
     results = [
@@ -188,6 +265,8 @@ def _self_test() -> int:
         bt = (android / "build.gradle.kts").read_text(encoding="utf-8")
         checks.append(("settings 含阿里云镜像", "maven.aliyun.com/repository/google" in st))
         checks.append(("build 含阿里云镜像", "maven.aliyun.com/repository/public" in bt))
+        checks.append(("官方源在镜像之前(境外CI)", st.find("google()") < st.find("maven.aliyun.com")))
+        checks.append(("settings 镜像去重", st.count("maven.aliyun.com/repository/google") == 1))
         pt = (android / "gradle.properties").read_text(encoding="utf-8")
         checks.append(("内存参数降为 -Xmx3G", "-Xmx3G" in pt))
         checks.append(("移除模板 -Xmx8G", "-Xmx8G" not in pt))

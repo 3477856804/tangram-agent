@@ -341,12 +341,27 @@ class TgaPage extends StatelessWidget {
         title: Text(title, style: Tga.h1),
         actions: actions,
         // 顶栏与内容之间加一条发丝线：滚动时标题区不再和内容糊在一起。
+        // 发丝线用主题强调色渐变（左实右淡），全页面统一且随深浅色自适应，
+        // 比纯灰线更有品牌辨识度；纯装饰，不影响交互与数据。
         flexibleSpace: DecoratedBox(
           decoration: BoxDecoration(
             border: Border(
-              bottom: BorderSide(
-                color: Tga.divider.withValues(alpha: 0.55),
-                width: 0.6,
+              bottom: BorderSide(color: Colors.transparent, width: 0.6),
+            ),
+          ),
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: Container(
+              height: 0.8,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: <Color>[
+                    Tga.primary.withValues(alpha: 0.9),
+                    Tga.primary.withValues(alpha: 0.35),
+                    Tga.divider.withValues(alpha: 0.25),
+                  ],
+                  stops: const <double>[0.0, 0.35, 1.0],
+                ),
               ),
             ),
           ),

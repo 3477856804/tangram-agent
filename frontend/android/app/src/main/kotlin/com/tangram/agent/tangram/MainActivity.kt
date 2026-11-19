@@ -73,33 +73,6 @@ class MainActivity : FlutterActivity() {
      * - pendingPermission=true：未授予「安装未知应用」权限，已跳转系统授权页，
      *   授权后重新触发即可安装（APK 已在本地，不会重复下载）。
      */
-    private fun containsBrokenDexDescriptor(apk: File): Boolean {
-        return try {
-            java.util.zip.ZipFile(apk).use { zip ->
-                zip.entries().asSequence()
-                    .filter { it.name.matches(Regex("classes\\d*\\.dex")) }
-                    .any { entry ->
-                        val bytes = zip.getInputStream(entry).readBytes()
-                        val needle = "Landroid/content/Context;".toByteArray()
-                        bytes.indexOfSubArray(needle) >= 0
-                    }
-            }
-        } catch (_: Exception) {
-            true
-        }
-    }
-
-    private fun ByteArray.indexOfSubArray(target: ByteArray): Int {
-        if (target.isEmpty() || target.size > size) return -1
-        outer@ for (i in 0..(size - target.size)) {
-            for (j in target.indices) {
-                if (this[i + j] != target[j]) continue@outer
-            }
-            return i
-        }
-        return -1
-    }
-
     private fun installApk(call: MethodCall, result: MethodChannel.Result) {
         val path = call.argument<String>("filePath")
         if (path.isNullOrBlank()) {
@@ -131,18 +104,6 @@ class MainActivity : FlutterActivity() {
             }
         }
         try {
-            // v0.0.20/0.0.22 的包在 DEX 里带了一个非法类名
-            // "Landroid/content/Context;"，装到一半系统才抛 ClassNotFoundException。
-            // 这里提前扫 DEX，坏包直接拒绝，不再交给安装器。
-            if (containsBrokenDexDescriptor(file)) {
-                result.success(
-                    mapOf(
-                        "ok" to false,
-                        "error" to "安装包 DEX 损坏（含非法类名 Landroid/content/Context;），请用干净 CI 重新打包"
-                    )
-                )
-                return
-            }
             // 先解析 APK 头：损坏包/错包在这里直接拒绝，不交给系统安装器。
             val archive = packageManager.getPackageArchiveInfo(file.absolutePath, 0)
             if (archive == null) {

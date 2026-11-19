@@ -2808,8 +2808,10 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
           final name = e.uri.pathSegments.last;
           if (showLong) {
             final st = e.statSync();
+            // 用文件真实修改时间，不再用当前时间伪造 mtime。
+            final String mtime = st.modified.toIso8601String();
             buf.writeln('${e is Directory ? "drwxr-xr-x" : "-rw-r--r--"} '
-                '${st.size.toString().padLeft(10)}  ${_now()}  $name${e is Directory ? "/" : ""}');
+                '${st.size.toString().padLeft(10)}  $mtime  $name${e is Directory ? "/" : ""}');
           } else {
             buf.writeln('$name${e is Directory ? "/" : ""}');
           }
@@ -3005,6 +3007,9 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       'error': ok ? '' : buf.toString(),
       'cwd': newCwd,
       'cube': 'shell',
+      // 如实标注：这是受限内置解释器（真实 shell 不可用时才回退），
+      // 不是系统 shell。终端据此提示用户，避免把模拟命令当成真 shell。
+      'real': false,
     };
   }
 
@@ -3321,8 +3326,14 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       debugPrint('TGA_REAL_SHELL_FAIL: no shell $shell');
       return null;
     }
-    final String cwdAbs =
-        cwd.startsWith('/') ? cwd : '$root/${cwd == '.' ? '' : cwd}';
+    // 平台无关判断绝对路径：Windows 的 C:\... 也必须以 isAbsolute 识别，
+    // 否则会被错误拼成 'root/C:\...'，cwd 校验失败后静默回退内置解释器。
+    final bool cwdIsAbsolute = Platform.isWindows
+        ? RegExp(r'^[A-Za-z]:[\\/]').hasMatch(cwd) || cwd.startsWith(r'\\')
+        : cwd.startsWith('/');
+    final String cwdAbs = cwdIsAbsolute
+        ? cwd
+        : '$root/${cwd == '.' ? '' : cwd}';
     if (!Directory(cwdAbs).existsSync()) {
       debugPrint('TGA_REAL_SHELL_FAIL: no cwd $cwdAbs');
       return null;
@@ -3356,10 +3367,12 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
       return null; // 起进程失败：回退内置解释器。
     }
 
+    // allowMalformed:true：真实命令可能输出非 UTF-8 字节（二进制/区域编码），
+    // 严格解码会抛 FormatException 被误报成「执行失败」。宽松解码保留可读文本。
     final Future<String> outF =
-        proc.stdout.transform(utf8.decoder).join();
+        proc.stdout.transform(const Utf8Decoder(allowMalformed: true)).join();
     final Future<String> errF =
-        proc.stderr.transform(utf8.decoder).join();
+        proc.stderr.transform(const Utf8Decoder(allowMalformed: true)).join();
     int exitCode = 124;
     try {
       exitCode = await proc.exitCode.timeout(const Duration(seconds: 60));

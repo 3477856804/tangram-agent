@@ -108,6 +108,10 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
   /// '/' 开头=已 cd 到系统绝对路径（和真 Linux 一样）。
   String _cwd = '.';
 
+  /// 是否已就「回退到内置受限解释器」提示过一次，避免每条命令刷屏。
+  /// 环境切换（远端/本地）时可重置。
+  bool _degradedNotified = false;
+
   String get _cwdShown => _cwd == '.'
       ? '~'
       : _cwd.startsWith('/')
@@ -299,6 +303,14 @@ class _TgaSandboxPageState extends State<TgaSandboxPage>
       setState(() {
         if (payload is Map) {
           _cwd = (payload['cwd'] ?? '.').toString();
+          // 如实标注执行引擎：real=false 表示系统 shell 不可用、已回退到
+          // 受限内置解释器（pwd/ls/cat 等是真实文件操作，但不是系统 shell）。
+          // 只在首次降级时提示一次，不刷屏。
+          if (payload['real'] == false && !_degradedNotified && !_remote) {
+            _degradedNotified = true;
+            _lines.add('[提示] 当前为受限内置解释器（系统 shell 不可用）；'
+                'pwd/ls/cat 等为真实文件操作，apt/pip/curl 等系统命令不可用。');
+          }
           final String out = (payload['stdout'] ?? '').toString();
           if (out.contains('\x1bclear\x1b')) {
             _lines.clear();
