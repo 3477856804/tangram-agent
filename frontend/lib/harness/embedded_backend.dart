@@ -2310,6 +2310,54 @@ effectiveSystem += '\n\n【联网检索】${PromptKit.searchFailedNote}';
         },
       ),
       AgentTool(
+        name: 'model3d_generate',
+        description: '按用户描述生成 3D 模型并真实导出到沙箱 models3d/。'
+            '当前支持 cube（立方体）与 deer（品牌低模鹿），可导出 obj/stl；'
+            '生成后会同时更新 3D 建模页当前模型。',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'kind': <String, dynamic>{'type': 'string', 'enum': <String>['cube', 'deer']},
+            'scale': <String, dynamic>{'type': 'number'},
+            'format': <String, dynamic>{'type': 'string', 'enum': <String>['obj', 'stl']},
+            'name': <String, dynamic>{'type': 'string'},
+          },
+          'required': <String>['kind'],
+        },
+        execute: (args, _) async {
+          try {
+            final String kind = (args['kind'] ?? 'cube').toString();
+            final double scale =
+                double.tryParse('${args['scale'] ?? 1}') ?? 1;
+            final String format = (args['format'] ?? 'stl').toString();
+            final Map<String, dynamic> generated = await _model3dPrimitive(
+                <String, dynamic>{'kind': kind, 'scale': scale});
+            if (generated['ok'] != true) {
+              return ToolResult.error(
+                  (generated['error'] ?? '模型生成失败').toString());
+            }
+            final Map<String, dynamic> exported = await _model3dExport(
+                <String, dynamic>{
+                  'format': format,
+                  'name': (args['name'] ?? 'ai-$kind').toString(),
+                });
+            if (exported['ok'] != true) {
+              return ToolResult.error(
+                  (exported['error'] ?? '模型导出失败').toString());
+            }
+            return ToolResult.ok(
+              '已生成 $kind 模型并导出 ${exported['format']}：'
+              '${exported['path']}（${exported['bytes']} 字节）。'
+              '可在「3D 建模」页查看/继续导出。',
+              data: exported,
+            );
+          } on Object catch (e) {
+            return ToolResult.error('3D 生成失败：$e');
+          }
+        },
+      ),
+      AgentTool(
         name: 'remember',
         description: '把一段文本真实写入本地记忆（重启可恢复）',
         tier: ApprovalTier.write,
