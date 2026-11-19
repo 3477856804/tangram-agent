@@ -164,7 +164,7 @@ class ModelDownloadKeepAliveService : Service() {
             .setOngoing(anyActive)
             .setOnlyAlertOnce(true)
 
-        if (list.isNotEmpty) {
+        if (list.isNotEmpty()) {
             val style = Notification.InboxStyle()
                 .setBigContentTitle(title)
                 .setSummaryText("${list.size} 个任务")
