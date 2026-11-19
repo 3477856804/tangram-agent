@@ -69,6 +69,49 @@ void main() {
     });
   });
 
+  group('深浅模式文字颜色：深色纯白、浅色纯黑', () {
+    test('Flai 调色板文本令牌', () {
+      expect(TangramColors.textPrimary, const Color(0xFF000000));
+      expect(TangramColors.textSecondary, const Color(0xFF000000));
+      expect(TangramColors.textMuted, const Color(0xFF000000));
+      expect(TangramColors.textCaption, const Color(0xFF000000));
+      expect(TangramColorsDark.textPrimary, const Color(0xFFFFFFFF));
+      expect(TangramColorsDark.textSecondary, const Color(0xFFFFFFFF));
+      expect(TangramColorsDark.textMuted, const Color(0xFFFFFFFF));
+      expect(TangramColorsDark.textCaption, const Color(0xFFFFFFFF));
+    });
+
+    test('Tga 设计系统文本令牌', () {
+      expect(TgaTokens.light.text, const Color(0xFF000000));
+      expect(TgaTokens.light.textSub, const Color(0xFF000000));
+      expect(TgaTokens.light.textDim, const Color(0xFF000000));
+      expect(TgaTokens.dark.text, const Color(0xFFFFFFFF));
+      expect(TgaTokens.dark.textSub, const Color(0xFFFFFFFF));
+      expect(TgaTokens.dark.textDim, const Color(0xFFFFFFFF));
+    });
+
+    test('Dsh 调色板文本令牌', () {
+      for (final Color c in <Color>[
+        DshPalette.light.labelPrimary,
+        DshPalette.light.labelSecondary,
+        DshPalette.light.labelTertiary,
+        DshPalette.light.labelCaption,
+        DshPalette.light.labelDimmed,
+      ]) {
+        expect(c, const Color(0xFF000000));
+      }
+      for (final Color c in <Color>[
+        DshPalette.dark.labelPrimary,
+        DshPalette.dark.labelSecondary,
+        DshPalette.dark.labelTertiary,
+        DshPalette.dark.labelCaption,
+        DshPalette.dark.labelDimmed,
+      ]) {
+        expect(c, const Color(0xFFFFFFFF));
+      }
+    });
+  });
+
   group('对话输入/输出区前景：深色纯白、浅色纯黑', () {
     test('浅色 chatText 为纯黑且对比度达标', () {
       expect(DshPalette.light.chatText, const Color(0xFF000000));

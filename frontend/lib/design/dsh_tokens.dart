@@ -127,11 +127,11 @@ class DshPalette {
 
   static const DshPalette light = DshPalette(
     isDark: false,
-    labelPrimary: Color(0xFF17181C),
-    labelSecondary: Color(0xFF5F6673),
-    labelTertiary: Color(0xFF8A90A0),
-    labelCaption: Color(0xFFA0A5B2),
-    labelDimmed: Color(0xFFD9DCE5),
+    labelPrimary: Color(0xFF000000),
+    labelSecondary: Color(0xFF000000),
+    labelTertiary: Color(0xFF000000),
+    labelCaption: Color(0xFF000000),
+    labelDimmed: Color(0xFF000000),
     labelOnPrimary: Color(0xFFFFFFFF),
     // 冷白底 + 纯白卡 + 蓝紫强调，整体更接近豆包的清爽层叠。
     bgBase: Color(0xFFF6F7FB),
@@ -175,12 +175,12 @@ class DshPalette {
 
   static const DshPalette dark = DshPalette(
     isDark: true,
-    labelPrimary: Color(0xFFEDEFF5),
-    labelSecondary: Color(0xFFA0A7B5),
-    labelTertiary: Color(0xFF8A91A0),
-    labelCaption: Color(0xFF6B7280),
-    labelDimmed: Color(0xFF3A4150),
-    labelOnPrimary: Color(0xFF0E1014),
+    labelPrimary: Color(0xFFFFFFFF),
+    labelSecondary: Color(0xFFFFFFFF),
+    labelTertiary: Color(0xFFFFFFFF),
+    labelCaption: Color(0xFFFFFFFF),
+    labelDimmed: Color(0xFFFFFFFF),
+    labelOnPrimary: Color(0xFFFFFFFF),
     // 近黑打底，深蓝灰承载卡片 / 弹窗。
     bgBase: Color(0xFF0E1014),
     bgLayer1: Color(0xFF171A21),
@@ -199,9 +199,9 @@ class DshPalette {
     borderL2: Color(0xFF2A3040),
     borderL3: Color(0xFF333A4A),
     borderL4: Color(0xFF414A5E),
-    brandPrimary: Color(0xFF8C9BFF),
+    brandPrimary: Color(0xFF4D6BFE),
     brandDimmed: Color(0xFF262E4D),
-    business: Color(0xFF8C9BFF),
+    business: Color(0xFF4D6BFE),
     businessTertiary: Color(0xFF252D4D),
     link: Color(0xFF9AA8FF),
     hover: Color(0x14FFFFFF),

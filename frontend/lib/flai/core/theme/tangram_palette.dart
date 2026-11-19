@@ -22,12 +22,11 @@ class TangramColors {
   static const Color surfaceHigh = Color(0xFFF8F9FC);
   static const Color surfaceRaised = Color(0xFFF1F3F9);
 
-  // 文本：墨黑 / 石墨灰
-  static const Color textPrimary = Color(0xFF17181C);
-  static const Color textSecondary = Color(0xFF5F6673);
-  // 次要文字保持 WCAG AA：白底 5.6:1。
-  static const Color textMuted = Color(0xFF5F6673);
-  static const Color textCaption = Color(0xFFA0A5B2);
+  // 文本：浅色模式统一纯黑（用户要求，次要文字也不例外）。
+  static const Color textPrimary = Color(0xFF000000);
+  static const Color textSecondary = Color(0xFF000000);
+  static const Color textMuted = Color(0xFF000000);
+  static const Color textCaption = Color(0xFF000000);
 
   // 描边：中性冷灰阶梯（替换原先偏绿的海盐蓝）。
   static const Color borderL1 = Color(0xFFEFF1F6);
@@ -77,20 +76,20 @@ class TangramColorsDark {
   static const Color surfaceHigh = Color(0xFF1C2029);
   static const Color surfaceRaised = Color(0xFF232833);
 
-  static const Color textPrimary = Color(0xFFEDEFF5);
-  static const Color textSecondary = Color(0xFFA0A7B5);
-  // 深色下 7:1+，在卡片/思考块上仍可读。
-  static const Color textMuted = Color(0xFFA0A7B5);
-  static const Color textCaption = Color(0xFF6B7280);
+  // 深色模式统一纯白（用户要求，次要文字也不例外）。
+  static const Color textPrimary = Color(0xFFFFFFFF);
+  static const Color textSecondary = Color(0xFFFFFFFF);
+  static const Color textMuted = Color(0xFFFFFFFF);
+  static const Color textCaption = Color(0xFFFFFFFF);
 
   static const Color borderL1 = Color(0xFF232833);
   static const Color borderL2 = Color(0xFF2A3040);
   static const Color borderL3 = Color(0xFF333A4A);
   static const Color borderL4 = Color(0xFF414A5E);
 
-  static const Color brand = Color(0xFF8C9BFF);
+  static const Color brand = Color(0xFF4D6BFE);
   static const Color brandDimmed = Color(0xFF262E4D);
-  static const Color onBrand = Color(0xFF0E1014);
+  static const Color onBrand = Color(0xFFFFFFFF);
 
   static const Color accent = Color(0xFF8C9BFF);
   static const Color accentSoft = Color(0xFF252D4D);
@@ -414,20 +413,17 @@ class TangramTheme {
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
         elevation: 0,
-        backgroundColor: const Color(0xFFE2E8F0),
-        contentTextStyle: const TextStyle(
-          color: Color(0xFF141618),
-          fontSize: 13,
-        ),
+        backgroundColor: const Color(0xFF2A3040),
+        contentTextStyle: const TextStyle(color: Colors.white, fontSize: 13),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       ),
       tooltipTheme: TooltipThemeData(
         decoration: BoxDecoration(
-          color: const Color(0xFFE2E8F0),
+          color: const Color(0xFF2A3040),
           borderRadius: BorderRadius.circular(8),
         ),
-        textStyle: const TextStyle(color: Color(0xFF141618), fontSize: 12),
+        textStyle: const TextStyle(color: Colors.white, fontSize: 12),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       ),
       pageTransitionsTheme: const PageTransitionsTheme(

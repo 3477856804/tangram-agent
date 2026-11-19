@@ -58,11 +58,11 @@ class TgaTokens {
     cardAlt: Color(0xFFFBFCFE),
     primary: Color(0xFF4D6BFE),
     primaryDeep: Color(0xFF3D5AFE),
-    groupTitle: Color(0xFF17181C),
+    groupTitle: Color(0xFF000000),
     onPrimary: Color(0xFFFFFFFF),
-    text: Color(0xFF17181C),
-    textSub: Color(0xFF5F6673),
-    textDim: Color(0xFFA0A5B2),
+    text: Color(0xFF000000),
+    textSub: Color(0xFF000000),
+    textDim: Color(0xFF000000),
     divider: Color(0xFFEDEFF5),
     border: Color(0xFFE5E8F0),
     iconBlueBg: Color(0xFFE9EDFF),
@@ -103,13 +103,13 @@ class TgaTokens {
     bgSoft: Color(0xFF12151B),
     card: Color(0xFF171A21),
     cardAlt: Color(0xFF1C2029),
-    primary: Color(0xFF8C9BFF),
-    primaryDeep: Color(0xFFA5B0FF),
-    groupTitle: Color(0xFFEDEFF5),
-    onPrimary: Color(0xFF0E1014),
-    text: Color(0xFFEDEFF5),
-    textSub: Color(0xFFA0A7B5),
-    textDim: Color(0xFF6B7280),
+    primary: Color(0xFF4D6BFE),
+    primaryDeep: Color(0xFF3D5AFE),
+    groupTitle: Color(0xFFFFFFFF),
+    onPrimary: Color(0xFFFFFFFF),
+    text: Color(0xFFFFFFFF),
+    textSub: Color(0xFFFFFFFF),
+    textDim: Color(0xFFFFFFFF),
     divider: Color(0xFF232833),
     border: Color(0xFF2A3040),
     iconBlueBg: Color(0xFF252D4D),
@@ -269,7 +269,11 @@ class Tga {
   static const double pagePad = 18;
 
   static TextStyle get h1 => TextStyle(
-      fontSize: 24, fontWeight: FontWeight.w700, color: text, height: 1.25);
+    fontSize: 24,
+    fontWeight: FontWeight.w700,
+    color: text,
+    height: 1.25,
+  );
   static TextStyle get h2 => TextStyle(
     fontSize: 16,
     fontWeight: FontWeight.w600,
@@ -277,7 +281,11 @@ class Tga {
     height: 1.4,
   );
   static TextStyle get body => TextStyle(
-      fontSize: 14, fontWeight: FontWeight.w500, color: text, height: 1.45);
+    fontSize: 14,
+    fontWeight: FontWeight.w500,
+    color: text,
+    height: 1.45,
+  );
   static TextStyle get sub => TextStyle(
     fontSize: 12,
     fontWeight: FontWeight.w400,
@@ -292,10 +300,10 @@ class Tga {
   );
 
   static BoxShadow get softShadow => BoxShadow(
-        color: _active.shadowBase.withValues(alpha: _active.shadowAlpha),
-        blurRadius: 24,
-        offset: const Offset(0, 6),
-      );
+    color: _active.shadowBase.withValues(alpha: _active.shadowAlpha),
+    blurRadius: 24,
+    offset: const Offset(0, 6),
+  );
 
   /// 卡片专用双层投影：大范围环境光 + 贴边接触阴影，比单层投影更接近
   /// 真实材质的抬升感；深色主题下自动压低强度，避免糊成黑块。
