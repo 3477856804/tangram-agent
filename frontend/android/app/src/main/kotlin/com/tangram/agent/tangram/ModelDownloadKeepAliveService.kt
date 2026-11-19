@@ -9,40 +9,74 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 模型下载保活前台服务：不自己下载，只保证 Flutter 进程在后台不被挂起，
- * 让 Dart 的分片/断点下载能继续跑；同时把 Dart 上报的真实进度（模型名 +
- * 百分比 + 已下载/总量）刷新到通知栏。下载结束由 Dart 侧 stopKeepAlive。
+ * 让 Dart 的分片/断点下载能继续跑。
+ *
+ * 通知栏用 InboxStyle 列出所有并发下载任务，每个任务一行：
+ *   Qwen3-8B-Q4   35%  1.9 GB / 5.4 GB
+ * 不再用单一通知反复覆盖，避免多个模型下载时通知闪来闪去。
  */
 class ModelDownloadKeepAliveService : Service() {
+
+    data class Job(
+        val name: String,
+        var percent: Int,
+        var downloaded: Long,
+        var total: Long,
+        var done: Boolean,
+        var updatedAt: Long,
+    )
 
     companion object {
         private const val CHANNEL_ID = "tga_model_download"
         private const val NOTIFICATION_ID = 0x5A18
-        private const val ACTION_UPDATE = "tga.model_download.update"
-        private const val EXTRA_NAME = "model_name"
-        private const val EXTRA_PERCENT = "percent"
-        private const val EXTRA_DOWNLOADED = "downloaded"
-        private const val EXTRA_TOTAL = "total"
-        private const val EXTRA_DONE = "done"
+        private const val MAX_LINES = 7
+
+        private val jobs = ConcurrentHashMap<String, Job>()
 
         @Volatile
         private var instance: ModelDownloadKeepAliveService? = null
 
-        // 最新进度缓存：即使服务尚未 onCreate，也先存下来，onCreate 后应用。
-        @Volatile
-        private var modelName: String = ""
-        @Volatile
-        private var percent: Int = -1
-        @Volatile
-        private var downloaded: Long = 0L
-        @Volatile
-        private var total: Long = 0L
-        @Volatile
-        private var done: Boolean = false
+        /** Dart/Activity：按 jobId 更新单个任务；同一任务只占一行。 */
+        @JvmStatic
+        fun updateJobProgress(
+            id: String?,
+            name: String?,
+            pct: Int,
+            doneBytes: Long,
+            totalBytes: Long,
+            finished: Boolean,
+        ) {
+            val key = id?.takeIf { it.isNotBlank() } ?: "default"
+            val label = name?.takeIf { it.isNotBlank() } ?: "模型"
+            val job = jobs[key]
+            if (job == null) {
+                jobs[key] = Job(
+                    label, pct.coerceIn(-1, 100),
+                    doneBytes.coerceAtLeast(0), totalBytes.coerceAtLeast(0),
+                    finished, System.currentTimeMillis()
+                )
+            } else {
+                job.percent = pct.coerceIn(-1, 100)
+                job.downloaded = doneBytes.coerceAtLeast(0)
+                job.total = totalBytes.coerceAtLeast(0)
+                job.done = finished
+                job.updatedAt = System.currentTimeMillis()
+            }
+            // 已完成的任务保留 5 秒，让用户看到“完成”，然后清掉。
+            if (finished) {
+                val done = jobs[key]
+                if (done != null && System.currentTimeMillis() - done.updatedAt > 5000) {
+                    jobs.remove(key)
+                }
+            }
+            instance?.refreshNotification()
+        }
 
-        /** Dart/Activity 调用：更新通知栏进度（同进程静态缓存，线程安全）。 */
+        /** 兼容旧调用：没有 jobId 时只更新 default 行。 */
         @JvmStatic
         fun updateProgress(
             name: String?,
@@ -50,30 +84,13 @@ class ModelDownloadKeepAliveService : Service() {
             doneBytes: Long,
             totalBytes: Long,
             finished: Boolean,
-        ) {
-            if (!name.isNullOrBlank()) modelName = name
-            percent = pct.coerceIn(-1, 100)
-            downloaded = doneBytes.coerceAtLeast(0)
-            total = totalBytes.coerceAtLeast(0)
-            done = finished
-            instance?.refreshNotification()
-        }
+        ) = updateJobProgress("default", name, pct, doneBytes, totalBytes, finished)
 
-        /** 供 Activity 构造 startService 的 Intent（实例为空时也能更新进度）。 */
-        fun updateIntent(
-            context: Context,
-            name: String?,
-            pct: Int,
-            doneBytes: Long,
-            totalBytes: Long,
-            finished: Boolean,
-        ): Intent = Intent(context, ModelDownloadKeepAliveService::class.java).apply {
-            action = ACTION_UPDATE
-            putExtra(EXTRA_NAME, name)
-            putExtra(EXTRA_PERCENT, pct)
-            putExtra(EXTRA_DOWNLOADED, doneBytes)
-            putExtra(EXTRA_TOTAL, totalBytes)
-            putExtra(EXTRA_DONE, finished)
+        fun stopAll(context: Context) {
+            jobs.clear()
+            context.stopService(
+                Intent(context, ModelDownloadKeepAliveService::class.java)
+            )
         }
     }
 
@@ -90,18 +107,8 @@ class ModelDownloadKeepAliveService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification())
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_UPDATE) {
-            updateProgress(
-                intent.getStringExtra(EXTRA_NAME),
-                intent.getIntExtra(EXTRA_PERCENT, percent),
-                intent.getLongExtra(EXTRA_DOWNLOADED, downloaded),
-                intent.getLongExtra(EXTRA_TOTAL, total),
-                intent.getBooleanExtra(EXTRA_DONE, done),
-            )
-        }
-        return START_NOT_STICKY
-    }
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int =
+        START_NOT_STICKY
 
     override fun onDestroy() {
         instance = null
@@ -128,36 +135,61 @@ class ModelDownloadKeepAliveService : Service() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
-        val label = modelName.ifBlank { "模型" }
+
+        val list = jobs.values.sortedByDescending { it.updatedAt }
+        val anyActive = list.any { !it.done }
+        val sumTotal = list.sumOf { it.total }
+        val sumDone = list.sumOf { it.downloaded }
+
         val title: String
         val text: String
-        when {
-            done && percent >= 0 -> {
-                title = "模型下载完成"
-                text = label
-            }
-            done -> {
-                title = "模型下载已结束"
-                text = label
-            }
-            percent < 0 -> {
-                title = label
-                text = "后台下载中，退出应用不会中断"
-            }
-            else -> {
-                title = label
-                text = "$percent%  ·  ${formatSize(downloaded)} / ${formatSize(total)}"
+        if (list.isEmpty()) {
+            title = "模型下载"
+            text = "后台下载中，退出应用不会中断"
+        } else {
+            title = "模型下载 · ${list.size} 个"
+            text = if (sumTotal > 0) {
+                "${(sumDone * 100 / sumTotal)}%  ·  " +
+                    "${formatSize(sumDone)} / ${formatSize(sumTotal)}"
+            } else {
+                "后台下载中，退出应用不会中断"
             }
         }
+
         builder
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(pending)
-            .setOngoing(!done)
-            .setAutoCancel(done)
-        if (!done) {
-            builder.setProgress(100, if (percent < 0) 0 else percent, percent < 0)
+            .setOngoing(anyActive)
+            .setOnlyAlertOnce(true)
+
+        if (list.isNotEmpty) {
+            val style = Notification.InboxStyle()
+                .setBigContentTitle(title)
+                .setSummaryText("${list.size} 个任务")
+            for (job in list.take(MAX_LINES)) {
+                val state = when {
+                    job.done -> "完成"
+                    job.percent >= 0 -> "${job.percent}%"
+                    else -> "连接中"
+                }
+                val size = if (job.total > 0) {
+                    "  ${formatSize(job.downloaded)} / ${formatSize(job.total)}"
+                } else {
+                    ""
+                }
+                style.addLine("${job.name}  $state$size")
+            }
+            if (list.size > MAX_LINES) {
+                style.addLine("还有 ${list.size - MAX_LINES} 个任务…")
+            }
+            builder.setStyle(style)
+        }
+
+        if (anyActive) {
+            val pct = if (sumTotal > 0) (sumDone * 100 / sumTotal).toInt() else 0
+            builder.setProgress(100, pct, sumTotal <= 0)
         }
         return builder.build()
     }

@@ -53,7 +53,9 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "updateProgress" -> {
-                    // Dart 侧下载进度（模型名 + 百分比 + 已下载/总量）→ 通知栏实时刷新。
+                    // Dart 侧下载进度（任务 ID + 模型名 + 百分比 + 已下载/总量）
+                    // → 通知栏按任务分行的实时列表。
+                    val jobId = call.argument<String>("job_id")
                     val name = call.argument<String>("model_name")
                     val percent = (call.argument<Number>("percent")?.toInt())
                         ?: -1
@@ -61,8 +63,8 @@ class MainActivity : FlutterActivity() {
                         ?: 0L
                     val total = (call.argument<Number>("total")?.toLong()) ?: 0L
                     val done = (call.argument<Boolean>("done")) ?: false
-                    ModelDownloadKeepAliveService.updateProgress(
-                        name, percent, downloaded, total, done
+                    ModelDownloadKeepAliveService.updateJobProgress(
+                        jobId, name, percent, downloaded, total, done
                     )
                     result.success(true)
                 }

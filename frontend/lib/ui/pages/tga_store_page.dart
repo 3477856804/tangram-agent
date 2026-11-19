@@ -1,13 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../bridge/backend_client.dart';
 import '../../design/tga_design.dart';
+import '../../harness/store.dart';
 import '../../services/model_registry.dart';
 import 'tga_hf_panel.dart';
-import 'tga_models_page.dart';
 
 /// 模型商店（2026-11-14 GGUF 可下载性改造）：
 /// - 搜索：防抖后调用后端 `model_store ms_search` RPC（魔搭 PUT dolphin 接口
@@ -461,6 +463,48 @@ class _TgaStorePageState extends State<TgaStorePage> {
     );
   }
 
+  /// 导入本地 GGUF：复制到 downloads 目录，随后「已装」即可看到并运行。
+  Future<void> _importLocal() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const <String>['gguf', 'bin'],
+        withData: false,
+      );
+      final path = result?.files.single.path;
+      if (path == null || path.isEmpty) return;
+      final src = File(path);
+      if (!await src.exists()) {
+        throw StateError('选择的文件不存在：$path');
+      }
+      final store = await HarnessStore.instance();
+      final dir = store.sub('downloads');
+      await dir.create(recursive: true);
+      final name = path.split(RegExp(r'[\\/]')).last.replaceAll(
+          RegExp(r'[^A-Za-z0-9._-]'), '_');
+      final target = File('${dir.path}/$name');
+      if (await target.exists() && await target.length() == await src.length()) {
+        // 同大小视为已导入，避免重复复制几个 GB。
+      } else {
+        await src.copy(target.path);
+      }
+      if (!mounted) return;
+      final registry = context.read<ModelRegistry>();
+      await registry.refresh();
+      if (!mounted) return;
+      setState(() => _mode = '已装');
+      await _search(quiet: true);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已导入 $name，可在「已装」里运行')),
+      );
+    } on Object catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('导入失败：$e')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final bool installed = _mode == '已装';
@@ -484,9 +528,7 @@ class _TgaStorePageState extends State<TgaStorePage> {
       title: '模型库',
       actions: <Widget>[
         TextButton.icon(
-          onPressed: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(builder: (_) => const TgaModelsPage()),
-          ),
+          onPressed: _importLocal,
           icon: const Icon(Icons.file_upload_outlined, size: 18),
           label: const Text('导入'),
         ),

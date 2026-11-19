@@ -301,6 +301,7 @@ class DownloadManager {
       final base = job.target.split(RegExp(r'[\\/]')).last;
       final name = base.replaceFirst(RegExp(r'\.(gguf|bin)$', caseSensitive: false), '');
       await _keepAlive.invokeMethod<void>('updateProgress', <String, dynamic>{
+        'job_id': job.id,
         'model_name': name,
         'percent': prog['percent'],
         'downloaded': prog['downloaded'],
