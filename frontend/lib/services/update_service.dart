@@ -386,8 +386,28 @@ class UpdateService {
           ok: false,
           error: '当前平台未实现 installApk（MethodChannel tangram/update 仅 Android）');
     } on Object catch (e) {
-      return InstallOutcome(ok: false, error: '${e.runtimeType}: $e');
+      return InstallOutcome(ok: false, error: describeInstallError(e));
     }
+  }
+
+  /// 把原生/JNI 异常压成一句话，避免 JThrowable.toString()（message 与
+  /// stackTrace 首行重复）在更新弹窗里刷屏两遍冗长 DexPathList。
+  String describeInstallError(Object e) {
+    final String raw = e.toString();
+    final String type = e.runtimeType.toString();
+    // JThrowable: "Exception in Java: <msg>\n<stack>"——取第一行即可。
+    String first = raw.split(RegExp(r'\r?\n')).first.trim();
+    if (first.isEmpty) first = type;
+    // 已知 JNI 拿 Context 失败：给可操作的提示，而不是倒出整段堆栈。
+    if (raw.contains('ClassNotFoundException') ||
+        raw.contains('Landroid/content/Context;') ||
+        raw.contains('Exception in Java')) {
+      return '系统组件暂时不可用（$first）。请稍后重试，'
+          '或到 GitHub Releases 页面手动下载最新 APK 安装。';
+    }
+    // 其它 JNI/平台异常同样只留首行，去掉重复 DexPathList 噪声。
+    if (first.length > 200) first = '${first.substring(0, 200)}…';
+    return '$type: $first';
   }
 
   /// APK 必须是 ZIP（PK\x03\x04）；HTML 错误页、JSON、截断文件都不放行。
@@ -597,8 +617,10 @@ class UpdateService {
   }
 
   Future<Directory> _otaDir() async {
-    // getExternalStorageDirectory 仅 Android 实现，桌面调用会抛
-    // UnimplementedError；按平台守卫并降级到应用文档目录。
+    // path_provider 在 Android 上经 jni_flutter 拿 Context；个别版本组合下
+    // 会抛 JThrowable(ClassNotFoundException: Landroid/content/Context;)。
+    // 这里对**每一次**目录获取都独立兜底，绝不让平台/JNI 异常冒泡到 OTA 流程
+    // （此前 ext 有 try 而 documents 无 try，异常直达下载弹窗导致更新失败）。
     Directory? ext;
     if (Platform.isAndroid) {
       try {
@@ -607,7 +629,15 @@ class UpdateService {
         ext = null;
       }
     }
-    final Directory base = ext ?? await getApplicationDocumentsDirectory();
+    Directory? docs;
+    try {
+      docs = await getApplicationDocumentsDirectory();
+    } on Object {
+      docs = null;
+    }
+    // 三级降级：外置私有目录 → 应用文档目录 → 系统临时目录。
+    // 三者都是真实磁盘目录，APK 依旧真实落盘，OTA 不受 JNI 异常阻断。
+    final Directory base = ext ?? docs ?? Directory.systemTemp;
     final Directory dir = Directory('${base.path}/ota');
     if (!dir.existsSync()) await dir.create(recursive: true);
     return dir;
