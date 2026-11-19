@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${ROOT}/build/sdcpp-desktop"
 
-cmake -S "${ROOT}/native/sdcpp" -B "${BUILD}" -DCMAKE_BUILD_TYPE=Release
+cmake -S "${ROOT}/native/sdcpp" -B "${BUILD}" -DCMAKE_BUILD_TYPE=Release -DTGA_SD_VULKAN="${VULKAN:-OFF}"
 cmake --build "${BUILD}" --target stable-diffusion -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
 echo "构建完成：${BUILD}/sdcpp"

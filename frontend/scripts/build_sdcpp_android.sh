@@ -11,9 +11,7 @@ API="${API:-26}"
 BUILD="${ROOT}/build/sdcpp-android-${ABI}"
 
 case "${ABI}" in
-  arm64-v8a) TRIPLE=aarch64-linux-android ;;
-  armeabi-v7a) TRIPLE=armv7a-linux-androideabi ;;
-  x86_64) TRIPLE=x86_64-linux-android ;;
+  arm64-v8a|armeabi-v7a|x86_64) ;;
   *) echo "不支持的 ABI: ${ABI}" >&2; exit 1 ;;
 esac
 
@@ -23,8 +21,7 @@ cmake -S "${ROOT}/native/sdcpp" -B "${BUILD}" \
   -DANDROID_ABI="${ABI}" \
   -DANDROID_PLATFORM="android-${API}" \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_COMPILER="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/${TRIPLE}${API}-clang" \
-  -DCMAKE_CXX_COMPILER="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/${TRIPLE}${API}-clang++"
+  -DTGA_SD_VULKAN="${VULKAN:-OFF}"
 
 cmake --build "${BUILD}" --target stable-diffusion -j"$(nproc)"
 

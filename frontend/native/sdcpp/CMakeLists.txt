@@ -15,17 +15,19 @@ set(SD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SD_WEBP OFF CACHE BOOL "" FORCE)
 set(SD_WEBM OFF CACHE BOOL "" FORCE)
 
+option(TGA_SD_VULKAN "启用 Vulkan 后端（需要 Vulkan SDK/驱动）" OFF)
 if(ANDROID)
-  # 手机端优先 Vulkan；没有可用 GPU 时上游会回落 CPU。
-  set(SD_VULKAN ON CACHE BOOL "" FORCE)
+  # 默认 CPU，构建机装好 Vulkan SDK 后可 -DTGA_SD_VULKAN=ON。
+  set(SD_VULKAN ${TGA_SD_VULKAN} CACHE BOOL "" FORCE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -fvisibility=hidden")
 elseif(APPLE)
   set(SD_METAL ON CACHE BOOL "" FORCE)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "" FORCE)
 elseif(WIN32)
-  set(SD_VULKAN ON CACHE BOOL "" FORCE)
+  set(SD_VULKAN ${TGA_SD_VULKAN} CACHE BOOL "" FORCE)
 else()
-  set(SD_VULKAN ON CACHE BOOL "" FORCE)
+  # Linux CI 常常没有 Vulkan SDK，默认 CPU，显式打开需 -DTGA_SD_VULKAN=ON。
+  set(SD_VULKAN ${TGA_SD_VULKAN} CACHE BOOL "" FORCE)
 endif()
 
 add_subdirectory("${SDCPP_ROOT}" "${CMAKE_BINARY_DIR}/sdcpp")

@@ -223,7 +223,6 @@ class DiffusionEngine {
       );
       _putBool(ctxOpt, 'enable_mmap', true);
       _putBool(ctxOpt, 'diffusion_flash_attn', true);
-      _putBool(ctxOpt, 'vae_tiling.enabled', true);
 
       final Pointer<Pointer<Void>> outCtx = calloc<Pointer<Void>>();
       try {
@@ -248,6 +247,8 @@ class DiffusionEngine {
       _putInt(imgOpt, 'sample.steps', req.steps);
       _putStr(imgOpt, 'sample.method', req.sampler);
       _putDouble(imgOpt, 'sample.guidance.txt_cfg', req.cfgScale);
+      // VAE tiling 属于生图选项，不是上下文选项；H3 1024² 在手机上必需。
+      _putBool(imgOpt, 'vae_tiling.enabled', true);
       // MiniMax-H3-Image 的 6 步 PDD sigma 由默认离散调度器在 steps=6 时生成；
       // 不传自定义 sample.sigmas（那是浮点数组，不是预设名）。
 
