@@ -36,8 +36,23 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+# cryptography 是可选依赖（与 qq_openapi / wechat_ilink 的惰性依赖约定一致）：
+# 主链路只用标准库；只有真正加解密快照时才需要它。未安装时模块仍可导入，
+# 只有 encrypt_bytes / decrypt_bytes 会明确报 CloudCryptoError，绝不静默降级。
+try:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:  # pragma: no cover - 可选依赖缺失路径
+    InvalidTag = None  # type: ignore[assignment]
+    AESGCM = None  # type: ignore[assignment]
+
+
+def _require_crypto() -> None:
+    if AESGCM is None:
+        raise CloudCryptoError(
+            "未安装 cryptography，无法加解密云端快照。"
+            "请执行 pip install cryptography 后重试"
+        )
 
 __all__ = [
     "CloudConfig", "CloudConfigError", "CloudCryptoError", "CloudNetworkError",
@@ -144,6 +159,7 @@ def _check_key(key: bytes) -> None:
 def encrypt_bytes(data: bytes, key: bytes) -> tuple[bytes, bytes]:
     """AES-256-GCM 加密，返回 ``(nonce, ciphertext)``（密文已含 16 字节 tag）。"""
     _check_key(key)
+    _require_crypto()
     nonce = os.urandom(NONCE_SIZE)
     return nonce, AESGCM(bytes(key)).encrypt(nonce, bytes(data), None)
 
@@ -151,6 +167,7 @@ def encrypt_bytes(data: bytes, key: bytes) -> tuple[bytes, bytes]:
 def decrypt_bytes(nonce: bytes, ciphertext: bytes, key: bytes) -> bytes:
     """AES-256-GCM 解密；被篡改 / 密钥错误时抛 ``CloudCryptoError``。"""
     _check_key(key)
+    _require_crypto()
     if not isinstance(nonce, (bytes, bytearray)) or len(nonce) != NONCE_SIZE:
         raise CloudCryptoError("GCM nonce 长度必须为 12 字节")
     if not isinstance(ciphertext, (bytes, bytearray)) or len(ciphertext) < TAG_SIZE:

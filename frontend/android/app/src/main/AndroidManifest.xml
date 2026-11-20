@@ -4,6 +4,8 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
+    <!-- 语音输入：平台语音识别 + 录音波形声级需要麦克风 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 真实出站：模型商店索引、API 教师、模型/插件下载、社区索引都需要网络 -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>

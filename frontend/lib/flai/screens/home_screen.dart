@@ -147,6 +147,7 @@ class _FlaiHomeScreenState extends State<FlaiHomeScreen> {
       isRecording: vc?.isRecording ?? false,
       isTranscribing: vc?.isTranscribing ?? false,
       voiceTranscript: vc?.lastTranscript,
+      amplitude: vc?.amplitude,
       onVoiceStart: vc != null ? () => vc.startRecording() : null,
       onVoiceStop: vc != null ? () => vc.stopRecording() : null,
     );

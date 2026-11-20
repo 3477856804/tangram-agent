@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -46,6 +47,10 @@ class FlaiComposerV2 extends StatefulWidget {
 
   final String? voiceTranscript;
 
+  /// 实时麦克风声级（0.0 ~ 1.0），由 FlaiVoiceController.amplitude 提供。
+  /// 为空表示当前录音链路没有声级来源，波形区继续如实显示「振幅未接入」。
+  final ValueListenable<double>? amplitude;
+
   const FlaiComposerV2({
     super.key,
     required this.config,
@@ -57,6 +62,7 @@ class FlaiComposerV2 extends StatefulWidget {
     this.isRecording = false,
     this.isTranscribing = false,
     this.voiceTranscript,
+    this.amplitude,
   });
 
   @override
@@ -765,7 +771,11 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
                         ),
                       ],
                     )
-                  : _InlineWaveform(color: c.labelPrimary, dim: c.labelCaption),
+                  : _InlineWaveform(
+                      color: c.labelPrimary,
+                      dim: c.labelCaption,
+                      amplitude: widget.amplitude,
+                    ),
             ),
             const SizedBox(width: DshSpace.x8),
             Semantics(
@@ -794,26 +804,41 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   }
 }
 
-/// 录音时的波形：24 根随相位起伏的竖条 + 计时（沿用 dsh 的克制风格）。
+/// 录音时的波形：最近 24 个真实麦克风声级样本画成的竖条 + 计时
+/// （沿用 dsh 的克制风格）。声级样本来自录音链路的 VoiceAmplitude 事件，
+/// 经 FlaiVoiceController.amplitude 回流；没有声级来源时只画固定基线并
+/// 如实标注「振幅未接入」，绝不用随机波形冒充。
 class _InlineWaveform extends StatefulWidget {
-  const _InlineWaveform({required this.color, required this.dim});
+  const _InlineWaveform({
+    required this.color,
+    required this.dim,
+    this.amplitude,
+  });
 
   final Color color;
   final Color dim;
+  final ValueListenable<double>? amplitude;
 
   @override
   State<_InlineWaveform> createState() => _InlineWaveformState();
 }
 
 class _InlineWaveformState extends State<_InlineWaveform> {
+  static const int _maxSamples = 24;
+
   late final Timer _timerTick;
   int _elapsedSeconds = 0;
+
+  /// 收到的真实声级样本（0.0 ~ 1.0），新样本追加在末尾，只留最近 24 个。
+  /// 为空表示本次录音尚未收到任何声级样本（无声级来源，或全程静音）。
+  List<double> _samples = const <double>[];
 
   @override
   void initState() {
     super.initState();
-    // 波形是固定基线、振幅未接入，此前 AnimationController.repeat() 每帧
-    // 驱动 AnimatedBuilder 纯空转；改为只有秒表每秒刷新一次。
+    widget.amplitude?.addListener(_onAmplitude);
+    // 秒表每秒刷新一次（此前 AnimationController.repeat() 每帧驱动
+    // AnimatedBuilder 纯空转的问题已在固定基线时期修掉）。
     _timerTick = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() => _elapsedSeconds++);
@@ -821,8 +846,32 @@ class _InlineWaveformState extends State<_InlineWaveform> {
   }
 
   @override
+  void didUpdateWidget(_InlineWaveform oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.amplitude != widget.amplitude) {
+      oldWidget.amplitude?.removeListener(_onAmplitude);
+      widget.amplitude?.addListener(_onAmplitude);
+    }
+  }
+
+  void _onAmplitude() {
+    if (!mounted) return;
+    final double level = widget.amplitude?.value ?? 0.0;
+    setState(() {
+      final List<double> next = <double>[
+        ..._samples,
+        level.clamp(0.0, 1.0).toDouble(),
+      ];
+      _samples = next.length > _maxSamples
+          ? next.sublist(next.length - _maxSamples)
+          : next;
+    });
+  }
+
+  @override
   void dispose() {
     _timerTick.cancel();
+    widget.amplitude?.removeListener(_onAmplitude);
     super.dispose();
   }
 
@@ -834,17 +883,27 @@ class _InlineWaveformState extends State<_InlineWaveform> {
 
   @override
   Widget build(BuildContext context) {
+    // 只有收到真实声级样本后才去掉「振幅未接入」标注：标注的消失本身
+    // 就是「振幅已接通」的证据；无样本时继续如实显示。
+    final bool live = _samples.isNotEmpty;
     return Row(
       children: <Widget>[
         Expanded(
           child: SizedBox(
             height: 20,
-            child: CustomPaint(painter: _WaveformPainter(color: widget.dim)),
+            child: CustomPaint(
+              painter: _WaveformPainter(
+                color: live ? widget.color : widget.dim,
+                samples: _samples,
+              ),
+            ),
           ),
         ),
         const SizedBox(width: DshSpace.x8),
         Text(
-          '$_formattedTime · ${context.t('home.ampPending', zh: '振幅未接入')}',
+          live
+              ? _formattedTime
+              : '$_formattedTime · ${context.t('home.ampPending', zh: '振幅未接入')}',
           style: DshType.mono11.copyWith(color: widget.dim),
         ),
       ],
@@ -853,27 +912,52 @@ class _InlineWaveformState extends State<_InlineWaveform> {
 }
 
 class _WaveformPainter extends CustomPainter {
-  const _WaveformPainter({required this.color});
+  const _WaveformPainter({required this.color, required this.samples});
 
   final Color color;
 
+  /// 真实声级样本（0.0 ~ 1.0），按时间从左到右；为空时只画固定基线。
+  final List<double> samples;
+
   @override
   void paint(Canvas canvas, Size size) {
-    // 真实麦克风 PCM 振幅尚未接入。这里不再用 Random + sin 生成随机波形
-    // 冒充录音数据，只画一条固定的基线，界面上同时标注「振幅未接入」。
-    final Paint base = Paint()
+    final Paint paint = Paint()
       ..color = color.withValues(alpha: 0.55)
       ..strokeWidth = 1.5
       ..strokeCap = StrokeCap.round;
-    canvas.drawLine(
-      Offset(0, size.height / 2),
-      Offset(size.width, size.height / 2),
-      base,
-    );
+    if (samples.isEmpty) {
+      // 真实麦克风声级尚未接入：只画一条固定的基线，界面上同时标注
+      // 「振幅未接入」，绝不用 Random + sin 生成随机波形冒充录音数据。
+      canvas.drawLine(
+        Offset(0, size.height / 2),
+        Offset(size.width, size.height / 2),
+        paint,
+      );
+      return;
+    }
+    // 每根竖条的高度就是该时刻的真实声级；条数不足 24 时靠右对齐，
+    // 使最新样本始终贴着计时文本。
+    const double gap = 3.0;
+    final double barWidth = 2.0;
+    final double step = barWidth + gap;
+    final double totalWidth = samples.length * step - gap;
+    double x = size.width - totalWidth;
+    final double midY = size.height / 2;
+    for (final double sample in samples) {
+      final double half =
+          (sample.clamp(0.0, 1.0) * midY).clamp(1.0, midY).toDouble();
+      canvas.drawLine(
+        Offset(x + barWidth / 2, midY - half),
+        Offset(x + barWidth / 2, midY + half),
+        paint,
+      );
+      x += step;
+    }
   }
 
   @override
-  bool shouldRepaint(_WaveformPainter oldDelegate) => false;
+  bool shouldRepaint(_WaveformPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.samples != samples;
 }
 
 /// 附件预览：60dp 缩略图 / 文件块，右上角减号。

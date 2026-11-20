@@ -290,11 +290,14 @@ class Gateway:
             adp.enabled = enabled
 
     def register_default_adapters(self) -> None:
-        """注册约定的四个 Adapter（微信官方默认启用，
-        微信非官方默认禁用，QQ 官方默认启用，QQ NapCat 默认启用但风险自担）。
+        """注册约定的五个 Adapter（微信官方默认启用，
+        微信非官方默认禁用，QQ 官方默认启用，QQ NapCat 默认启用但风险自担，
+        微信 iLink 默认启用——是否已登录由其 has_token 决定，send_outbound
+        在未登录时诚实报错，不伪造在线）。
         """
         from .adapters.qq_napcat import QQNapCatAdapter
         from .adapters.qq_official import QQOfficialAdapter
+        from .adapters.wechat_ilink import WeChatILinkAdapter
         from .adapters.wechat_official import WeChatOfficialAdapter
         from .adapters.wechat_unofficial import WeChatUnofficialAdapter
 
@@ -302,6 +305,7 @@ class Gateway:
         self.register(WeChatUnofficialAdapter())  # 默认 enabled=False
         self.register(QQOfficialAdapter())
         self.register(QQNapCatAdapter())
+        self.register(WeChatILinkAdapter())
 
     # ---- 生命周期 ----
     def start(self) -> None:

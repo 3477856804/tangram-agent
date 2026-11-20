@@ -19,6 +19,10 @@ from xml.sax.saxutils import escape
 
 import pytest
 
+# cryptography 是云端快照的可选依赖（见 backend/app/runtime/cloud_sync.py）：
+# 未安装时本模块的加解密测试跳过，不阻塞整套测试收集。
+pytest.importorskip("cryptography")
+
 from backend.app.runtime.cloud_sync import (
     EMPTY_SHA256,
     CloudClient,

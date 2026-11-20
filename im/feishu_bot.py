@@ -13,6 +13,11 @@ Authorization Grant / RFC 8628）：
 设计约束：
 - 模块导入本身只用标准库；``lark-oapi`` 惰性导入，未安装时所有入口返回
   可读提示，绝不编造「已连接」或假二维码。
+- 主动发送不依赖 ``lark-oapi``：``send_text()`` 直接用标准库走飞书官方
+  OpenAPI（``tenant_access_token/internal`` 取 token +
+  ``im/v1/messages`` 发消息，与 Dart 侧 ``FeishuBotApi.sendText`` 同款端点
+  与字段），凭据复用扫码后落盘的 ``feishu_bot.json``；官方 code/msg
+  原样回传，绝不静默当成成功。
 - 真正扫码需用户持有飞书账号并在真实环境完成，本机无法代扫；本模块的
   自测 ``self_check()`` 只验证「依赖探测 + 状态机 + 落盘」，不触发真实 OAuth。
 - 凭据是用户扫码后自己生成的，不写死、不回显到日志。
@@ -30,6 +35,10 @@ from typing import Any, Callable, Optional
 _DATA_DIR = Path(os.environ.get("TANGRAM_DATA", str(Path.home() / ".tangram")))
 _CRED_PATH = _DATA_DIR / "feishu_bot.json"
 _MIN_VERSION = "1.5.5"
+
+# 飞书官方 OpenAPI 基址（与 Dart 侧 FeishuBotApi.kOpenApiBase 一致）；
+# TANGRAM_FEISHU_BASE 仅供自测指向本地桩，与 iLink 的 TANGRAM_ILINK_BASE 同款约定。
+OPEN_API_BASE = os.environ.get("TANGRAM_FEISHU_BASE", "https://open.feishu.cn")
 
 
 def sdk_available() -> tuple[bool, str]:
@@ -97,6 +106,96 @@ def clear_credentials() -> bool:
         return True
     except OSError:
         return False
+
+
+def _http_json(method: str, url: str, body: Optional[dict] = None,
+               headers: Optional[dict] = None, timeout: float = 15.0) -> tuple[int, dict]:
+    """真实 HTTP JSON 请求；返回 (状态码, 解析后的响应体)。
+
+    与 util.NetClient 不同：错误响应体（官方 code/msg）必须原样带回，
+    发送失败时调用方才能转述真实原因（与 qq_official._http_json 同款约定）。
+    网络层异常（不可达/超时）如实抛给调用方，不伪造响应。
+    """
+    import urllib.error
+    import urllib.request
+
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    hdrs = {"Accept": "application/json", "Content-Type": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            raw = resp.read().decode("utf-8", "replace")
+            code = resp.status
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        code = exc.code
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            parsed = {"data": parsed}
+    except ValueError:
+        parsed = {"message": raw[:200]}
+    return code, parsed
+
+
+def fetch_tenant_token(client_id: str, client_secret: str,
+                       timeout: float = 15.0) -> str:
+    """取 tenant_access_token（官方端点，与 Dart 侧 FeishuBotApi 同款）。
+
+    失败时把官方 code/msg 原样放进异常，绝不谎称已拿到 token。
+    """
+    code, body = _http_json(
+        "POST",
+        f"{OPEN_API_BASE}/open-apis/auth/v3/tenant_access_token/internal",
+        {"app_id": client_id, "app_secret": client_secret},
+        timeout=timeout,
+    )
+    token = str(body.get("tenant_access_token") or "")
+    if body.get("code") != 0 or not token:
+        raise RuntimeError(
+            f"feishu-token-failed:http={code}:code={body.get('code')}:"
+            f"{body.get('msg', body.get('message', ''))}"
+        )
+    return token
+
+
+def send_text(receive_id: str, text: str, receive_id_type: str = "open_id",
+              timeout: float = 15.0) -> str:
+    """主动发一条文本消息；成功返回官方 message_id。
+
+    凭据只从扫码后落盘的 ``feishu_bot.json`` 读取（复用现有 session 的
+    凭据流程），绝不写死、绝不接受调用方传入的明文凭据；未登录时诚实报错。
+    ``receive_id_type`` 取 open_id / chat_id / user_id / email（官方枚举）。
+    官方错误（code/msg）原样放进异常，不静默当成成功。
+    """
+    if not receive_id or not receive_id.strip():
+        raise ValueError("feishu-send: 缺少接收方（open_id / chat_id）")
+    if not text or not text.strip():
+        raise ValueError("feishu-send: 消息内容为空")
+    cred = load_credentials()
+    if cred is None:
+        raise RuntimeError("feishu-send: 尚未完成飞书扫码登录（无凭据，不伪造发送）")
+    token = fetch_tenant_token(cred["client_id"], cred["client_secret"], timeout=timeout)
+    code, body = _http_json(
+        "POST",
+        f"{OPEN_API_BASE}/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
+        {
+            "receive_id": receive_id,
+            "msg_type": "text",
+            "content": json.dumps({"text": text}, ensure_ascii=False),
+        },
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=timeout,
+    )
+    if body.get("code") == 0:
+        data = body.get("data") or {}
+        return str(data.get("message_id") or "")
+    raise RuntimeError(
+        f"feishu-send-failed:http={code}:code={body.get('code')}:"
+        f"{body.get('msg', body.get('message', ''))}"
+    )
 
 
 class FeishuBotSession:
@@ -174,6 +273,16 @@ class FeishuBotSession:
                     return self.snapshot()
             time.sleep(0.1)
         return self.snapshot()
+
+    def send_text(self, receive_id: str, text: str,
+                  receive_id_type: str = "open_id", timeout: float = 15.0) -> str:
+        """主动发一条文本消息；成功返回官方 message_id。
+
+        复用模块级 ``send_text``（标准库直调官方 OpenAPI，不依赖 lark-oapi
+        长连接）；凭据只读落盘文件，未登录/官方错误均如实抛异常。
+        """
+        return send_text(receive_id, text, receive_id_type=receive_id_type,
+                         timeout=timeout)
 
     def _register(self) -> None:
         """后台跑官方设备授权流，阻塞轮询直到扫码确认/过期。"""
