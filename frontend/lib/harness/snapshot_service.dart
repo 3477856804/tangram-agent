@@ -39,6 +39,7 @@ class SnapshotService {
     'knowledge_base.json',
     'workflows.json',
     'workflow_runs.json',
+    'pages.json',
     'turns.json',
     'proactive_rules.json',
     'proactive_tasks.json',
@@ -55,6 +56,7 @@ class SnapshotService {
     'knowledge_snapshots',
     'cards',
     'work',
+    'pages',
   };
 
   Directory get _snapshotsDir => Directory('${store.root.path}/snapshots');

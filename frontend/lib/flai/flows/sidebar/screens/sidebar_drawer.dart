@@ -56,6 +56,7 @@ const Map<String, _NavGroup> _navGroupByLabelKey = <String, _NavGroup>{
   'sidebar.persona': _NavGroup.system,
   'sidebar.sandbox': _NavGroup.system,
   'sidebar.workflow': _NavGroup.system,
+  'sidebar.pages': _NavGroup.creation,
   'sidebar.models': _NavGroup.system,
   'sidebar.run': _NavGroup.system,
   'sidebar.schedule': _NavGroup.system,

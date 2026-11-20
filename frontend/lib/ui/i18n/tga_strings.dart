@@ -162,6 +162,7 @@ class TgaStrings {
     'sidebar.mapping': {'cn': '映射', 'tw': '映射', 'en': 'Dir Mapping'},
     'sidebar.knowledge': {'cn': '知识库', 'tw': '知識庫', 'en': 'Knowledge Base'},
     'sidebar.workflow': {'cn': '工作流', 'tw': '工作流', 'en': 'Workflows'},
+    'sidebar.pages': {'cn': '页面', 'tw': '頁面', 'en': 'Pages'},
     'sidebar.snapshot': {'cn': '快照', 'tw': '快照', 'en': 'Snapshots'},
     'sidebar.groupChat': {'cn': '群聊', 'tw': '群聊', 'en': 'Group Chat'},
     'sidebar.appMarket': {'cn': '应用', 'tw': '應用', 'en': 'App Market'},

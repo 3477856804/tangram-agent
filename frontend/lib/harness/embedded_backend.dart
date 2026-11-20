@@ -59,6 +59,7 @@ import 'package:tangram/harness/prompt_kit.dart';
 import 'package:tangram/harness/proot_sandbox.dart';
 import 'package:tangram/harness/qq_sandbox.dart';
 import 'package:tangram/harness/security_policy.dart';
+import 'package:tangram/harness/pages_service.dart';
 import 'package:tangram/harness/snapshot_service.dart';
 import 'package:tangram/harness/startup_timeline.dart';
 import 'package:tangram/harness/store.dart';
@@ -117,6 +118,9 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// 本地快照 / 备份 / 恢复（真实文件副本 + SHA256 校验）。
   late final SnapshotService snapshots = SnapshotService(store);
+
+  /// Agent 生成的版本化 Pages（看板 / 文档）。
+  late final PagesService pages = PagesService(store);
 
   /// Agent 应用市场：行业工作站模板安装 / 导入 / 导出。
   late final AppPackageService appPackages = AppPackageService(
@@ -282,6 +286,7 @@ class EmbeddedBackend implements QqShellRunner {
     'knowledge_base',
     'workflow',
     'snapshot',
+    'pages',
     'model_group',
     'app_market',
     'team_space',
@@ -463,6 +468,60 @@ class EmbeddedBackend implements QqShellRunner {
     return <String, dynamic>{...result, 'bind_supported': bindSupported};
   }
 
+  /// Pages 控制域：列表 / 创建 / 读取 / 保存 / 元数据 / 删除 / 导出。
+  Future<Map<String, dynamic>> _pages(Map<String, dynamic> p) async {
+    final String action = _action(p, 'list');
+    switch (action) {
+      case 'list':
+        return pages.list(query: (p['query'] ?? '').toString());
+      case 'get':
+        return pages.get(
+          (p['id'] ?? '').toString(),
+          version: p['version'] is int ? p['version'] as int : null,
+        );
+      case 'create':
+        return pages.create(
+          title: (p['title'] ?? '').toString(),
+          html: (p['html'] ?? '').toString(),
+          botId: (p['bot_id'] ?? '').toString(),
+          visibility: '${p['visibility']}' == 'link'
+              ? PageVisibility.link
+              : PageVisibility.private,
+        );
+      case 'save':
+        return pages.save(
+          (p['id'] ?? '').toString(),
+          (p['html'] ?? '').toString(),
+          title: p['title'] == null ? null : '${p['title']}',
+          visibility: p['visibility'] == null
+              ? null
+              : ('${p['visibility']}' == 'link'
+                    ? PageVisibility.link
+                    : PageVisibility.private),
+        );
+      case 'update':
+        return pages.updateMeta(
+          (p['id'] ?? '').toString(),
+          title: p['title'] == null ? null : '${p['title']}',
+          pinned: p['pinned'] is bool ? p['pinned'] as bool : null,
+          visibility: p['visibility'] == null
+              ? null
+              : ('${p['visibility']}' == 'link'
+                    ? PageVisibility.link
+                    : PageVisibility.private),
+        );
+      case 'delete':
+        return pages.delete((p['id'] ?? '').toString());
+      case 'export':
+        return pages.export(
+          (p['id'] ?? '').toString(),
+          version: p['version'] is int ? p['version'] as int : null,
+        );
+      default:
+        return _err('未知 Pages 动作：$action');
+    }
+  }
+
   /// 统一分发入口。任何异常都转成结构化 error，绝不让 UI 拿到未捕获异常。
   Future<BackendReply> dispatch(
     String topic,
@@ -492,6 +551,7 @@ class EmbeddedBackend implements QqShellRunner {
         ),
         'workflow' => await workflows.handle(_action(payload, 'list'), payload),
         'snapshot' => await snapshots.handle(_action(payload, 'list'), payload),
+        'pages' => await _pages(payload),
         'model_group' => await _modelGroup(payload),
         'app_market' => await appPackages.handle(
           _action(payload, 'list'),
@@ -595,6 +655,12 @@ class EmbeddedBackend implements QqShellRunner {
       'architecture':
           'local file copies + sha256 manifest + auto pre-restore backup',
       'cloud_enabled': false,
+    },
+    'pages': <String, dynamic>{
+      'architecture': 'versioned html pages + pin/search + export/share file',
+      'storage': 'app-private-json+html',
+      'public_link_enabled': false,
+      'max_html_bytes': PagesRepository.maxHtmlBytes,
     },
     'model_group': <String, dynamic>{
       'architecture': 'parallel members + cross-compare + moderator synthesis',
@@ -2448,6 +2514,81 @@ class EmbeddedBackend implements QqShellRunner {
             '${controlDomains.join('、')}',
           );
           return ToolResult.ok(buf.toString());
+        },
+      ),
+      AgentTool(
+        name: 'page_list',
+        description: '列出本机 Agent Pages（可版本化的看板 / 文档）',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'query': <String, dynamic>{'type': 'string'},
+          },
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await pages.list(
+            query: (args['query'] ?? '').toString(),
+          );
+          final List<dynamic> items = r['pages'] is List
+              ? r['pages'] as List
+              : <dynamic>[];
+          if (items.isEmpty) return ToolResult.ok('本机还没有 Page。');
+          final StringBuffer buf = StringBuffer(
+            '**本机 Pages（${items.length}）**\n',
+          );
+          for (final dynamic raw in items) {
+            if (raw is! Map) continue;
+            buf.writeln(
+              '- `${raw['id']}` ${raw['title']}（v${raw['current_version']}'
+              '${raw['pinned'] == true ? '，置顶' : ''}）',
+            );
+          }
+          return ToolResult.ok(buf.toString());
+        },
+      ),
+      AgentTool(
+        name: 'page_publish',
+        description: '创建或更新一个 Page；每次更新追加新版本，HTML 上限 2MB',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'title': <String, dynamic>{'type': 'string'},
+            'html': <String, dynamic>{'type': 'string'},
+            'page_id': <String, dynamic>{
+              'type': 'string',
+              'description': '留空则新建；填写已有 id 则追加版本',
+            },
+          },
+          'required': <String>['title', 'html'],
+        },
+        execute: (args, _) async {
+          final String id = (args['page_id'] ?? '').toString().trim();
+          final Map<String, dynamic> r = id.isEmpty
+              ? await pages.create(
+                  title: (args['title'] ?? '').toString(),
+                  html: (args['html'] ?? '').toString(),
+                  botId: 'agent',
+                )
+              : await pages.save(
+                  id,
+                  (args['html'] ?? '').toString(),
+                  title: (args['title'] ?? '').toString().trim().isEmpty
+                      ? null
+                      : (args['title'] ?? '').toString(),
+                );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '保存 Page 失败'}');
+          }
+          final Map<String, dynamic> page = Map<String, dynamic>.from(
+            r['page'] as Map,
+          );
+          return ToolResult.ok(
+            '已保存 Page「${page['title']}」v${page['current_version']}\n'
+            'tga://pages/${page['id']}',
+            data: page,
+          );
         },
       ),
       AgentTool(

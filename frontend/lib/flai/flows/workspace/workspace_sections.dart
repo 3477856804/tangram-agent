@@ -16,6 +16,7 @@ import 'package:tangram/ui/pages/tga_knowledge_page.dart';
 import 'package:tangram/ui/pages/tga_mapping_page.dart';
 import 'package:tangram/ui/pages/tga_image_page.dart';
 import 'package:tangram/ui/pages/tga_models_page.dart';
+import 'package:tangram/ui/pages/tga_pages_page.dart';
 import 'package:tangram/ui/pages/tga_performance_page.dart';
 import 'package:tangram/ui/pages/tga_persona_page.dart';
 import 'package:tangram/ui/pages/tga_overview_page.dart';
@@ -143,6 +144,12 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
     icon: Icons.account_tree_outlined,
     labelKey: 'sidebar.workflow',
     page: const TgaWorkflowPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.auto_awesome_mosaic_outlined,
+    labelKey: 'sidebar.pages',
+    page: const TgaPagesPage(),
     fullPage: true,
   ),
   NavItem(
