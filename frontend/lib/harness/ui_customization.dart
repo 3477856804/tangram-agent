@@ -133,6 +133,7 @@ class UiCustomizationConfig {
     'sidebar.models',
     'sidebar.groupChat',
     'sidebar.team',
+    'sidebar.computer',
     'sidebar.accountOps',
     'sidebar.graph',
     'sidebar.mapping',
@@ -170,6 +171,7 @@ class UiCustomizationConfig {
     'sidebar.models': '模型管理',
     'sidebar.groupChat': '多模型群聊',
     'sidebar.team': '团队协作',
+    'sidebar.computer': '团队电脑',
     'sidebar.accountOps': '账号运营',
     'sidebar.graph': '知识图谱',
   };

@@ -65,6 +65,7 @@ import 'package:tangram/harness/snapshot_service.dart';
 import 'package:tangram/harness/startup_timeline.dart';
 import 'package:tangram/harness/store.dart';
 import 'package:tangram/harness/super_agent.dart';
+import 'package:tangram/harness/team_computer.dart';
 import 'package:tangram/harness/team_space.dart';
 import 'package:tangram/harness/video_studio.dart';
 import 'package:tangram/harness/web_search.dart';
@@ -135,6 +136,9 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// 团队协作沙箱：本机协作空间 + 角色权限 + 审计日志。
   late final TeamSpaceService team = TeamSpaceService(store);
+
+  /// Team Computer：共享工作区 + 每智能体独立浏览器 profile + 检查点。
+  late final TeamComputerService computer = TeamComputerService(store.root);
 
   /// 硬件自适应调度：真实探针 + 量化/后端/路由建议 + 队列。
   late final HardwareScheduler hardware = HardwareScheduler();
@@ -295,6 +299,7 @@ class EmbeddedBackend implements QqShellRunner {
     'model_group',
     'app_market',
     'team_space',
+    'computer',
     'compute',
     'workspace_mapping',
     'web_search',
@@ -855,6 +860,10 @@ class EmbeddedBackend implements QqShellRunner {
           payload,
         ),
         'team_space' => await team.handle(_action(payload, 'list'), payload),
+        'computer' => await computer.handle(
+          _action(payload, 'list'),
+          payload,
+        ),
         'compute' => await _onCompute(payload),
         'workspace_mapping' => await _workspaceMapping(payload),
         'web_search' => await _webSearchControl(payload),
@@ -982,6 +991,18 @@ class EmbeddedBackend implements QqShellRunner {
     'team_space': <String, dynamic>{
       'architecture': 'local shared dir + roles + append-only audit log',
       'cross_device_sync': false,
+    },
+    'computer': <String, dynamic>{
+      'architecture':
+          'shared workspace + per-bot browser profile + checkpoints + activity',
+      'storage': 'app-private-dir',
+      'browser': 'http',
+      'js': false,
+      'gui_desktop': false,
+      'vm': false,
+      'cross_device_sync': false,
+      'checkpoint_limit_bytes': TeamComputerService.maxCheckpointBytes,
+      'note': '浏览器为 HTTP 模式（不执行 JavaScript）；无虚拟机/图形桌面。',
     },
     'creator': <String, dynamic>{
       'architecture':
@@ -2785,6 +2806,66 @@ class EmbeddedBackend implements QqShellRunner {
 
   // ---- 工具注册（真实执行体）----
 
+  /// 浏览器工具未显式指定智能体时：优先用给定电脑上的第一个智能体，
+  /// 没有则真实创建一个名为「助手」的智能体（工作区与 profile 都会落盘）。
+  Future<Map<String, dynamic>> _resolveComputerBot(
+    String botId,
+    String computerId,
+  ) async {
+    if (botId.isNotEmpty) {
+      return <String, dynamic>{'ok': true, 'bot_id': botId};
+    }
+    final Map<String, dynamic> list =
+        await computer.handle('list', <String, dynamic>{});
+    if (list['ok'] != true) {
+      return <String, dynamic>{'ok': false, 'error': '读取 Team Computer 失败'};
+    }
+    final List<dynamic> comps =
+        (list['computers'] as List?) ?? const <dynamic>[];
+    if (comps.isEmpty) {
+      return <String, dynamic>{'ok': false, 'error': '本机没有 Team Computer'};
+    }
+    Map<dynamic, dynamic>? target;
+    for (final dynamic raw in comps) {
+      if (raw is! Map) continue;
+      if (computerId.isNotEmpty && '${raw['id']}' == computerId) {
+        target = raw;
+        break;
+      }
+    }
+    target ??= comps.first as Map;
+    final String cid = '${target['id']}';
+    final Map<String, dynamic> bots = await computer.handle(
+      'bots',
+      <String, dynamic>{'computer_id': cid},
+    );
+    final List<dynamic> existing =
+        (bots['bots'] as List?) ?? const <dynamic>[];
+    if (existing.isNotEmpty && existing.first is Map) {
+      return <String, dynamic>{
+        'ok': true,
+        'bot_id': '${(existing.first as Map)['id']}',
+        'computer_id': cid,
+      };
+    }
+    final Map<String, dynamic> created = await computer.handle(
+      'add_bot',
+      <String, dynamic>{'computer_id': cid, 'name': '助手'},
+    );
+    if (created['ok'] != true) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '${created['error'] ?? '创建默认智能体失败'}',
+      };
+    }
+    final Map<dynamic, dynamic> bot = created['bot'] as Map;
+    return <String, dynamic>{
+      'ok': true,
+      'bot_id': '${bot['id']}',
+      'computer_id': cid,
+    };
+  }
+
   void _registerTools() {
     tools.registerAll(<AgentTool>[
       AgentTool(
@@ -3057,6 +3138,281 @@ class EmbeddedBackend implements QqShellRunner {
             );
           }
           return ToolResult.ok(buf.toString());
+        },
+      ),
+      AgentTool(
+        name: 'computer_list',
+        description: '列出本机 Team Computer、智能体与工作区统计（真实目录）',
+        tier: ApprovalTier.read,
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await computer.handle(
+            'list',
+            <String, dynamic>{},
+          );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '读取电脑失败'}');
+          }
+          final List<dynamic> comps =
+              (r['computers'] as List?) ?? const <dynamic>[];
+          if (comps.isEmpty) return ToolResult.ok('本机还没有 Team Computer。');
+          final StringBuffer buf = StringBuffer('**Team Computer**\n');
+          for (final dynamic raw in comps) {
+            if (raw is! Map) continue;
+            buf.writeln(
+              '- `${raw['id']}` ${raw['name']}（${raw['kind']}，'
+              '${raw['bot_count']} 个智能体，${raw['file_count']} 个文件）',
+            );
+            final Map<String, dynamic> bots = await computer.handle(
+              'bots',
+              <String, dynamic>{'computer_id': '${raw['id']}'},
+            );
+            for (final dynamic b
+                in (bots['bots'] as List?) ?? const <dynamic>[]) {
+              if (b is! Map) continue;
+              buf.writeln('  - `${b['id']}` ${b['name']} · ${b['file_count']} 文件');
+            }
+          }
+          buf.writeln('\n浏览器：HTTP 模式，不执行 JavaScript。');
+          return ToolResult.ok(buf.toString());
+        },
+      ),
+      AgentTool(
+        name: 'computer_files',
+        description: '列出 Team Computer 工作区文件（可限定智能体目录）',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'computer_id': <String, dynamic>{'type': 'string'},
+            'bot_id': <String, dynamic>{'type': 'string'},
+            'path': <String, dynamic>{'type': 'string'},
+          },
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await computer.handle(
+            'files',
+            <String, dynamic>{
+              'computer_id': (args['computer_id'] ?? '').toString(),
+              'bot_id': (args['bot_id'] ?? '').toString(),
+              'path': (args['path'] ?? '').toString(),
+            },
+          );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '读取文件失败'}');
+          }
+          final List<dynamic> files =
+              (r['files'] as List?) ?? const <dynamic>[];
+          if (files.isEmpty) return ToolResult.ok('工作区里还没有文件。');
+          final StringBuffer buf = StringBuffer('**工作区文件**\n');
+          for (final dynamic raw in files.take(100)) {
+            if (raw is! Map) continue;
+            buf.writeln('- ${raw['path']}（${raw['size']} B）');
+          }
+          return ToolResult.ok(buf.toString());
+        },
+      ),
+      AgentTool(
+        name: 'computer_write',
+        description: '把文本写入 Team Computer 工作区（限制在电脑目录内）',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'path': <String, dynamic>{'type': 'string'},
+            'text': <String, dynamic>{'type': 'string'},
+            'computer_id': <String, dynamic>{'type': 'string'},
+            'bot_id': <String, dynamic>{'type': 'string'},
+          },
+          'required': <String>['path', 'text'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await computer.handle(
+            'write',
+            <String, dynamic>{
+              'computer_id': (args['computer_id'] ?? '').toString(),
+              'bot_id': (args['bot_id'] ?? '').toString(),
+              'path': (args['path'] ?? '').toString(),
+              'text': (args['text'] ?? '').toString(),
+            },
+          );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '写入失败'}');
+          }
+          return ToolResult.ok('已写入 ${r['path']}', data: r);
+        },
+      ),
+      AgentTool(
+        name: 'browser_open',
+        description:
+            '用 HTTP 模式打开网页并返回可操作快照（不执行 JavaScript，'
+            '仅 http/https）',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'url': <String, dynamic>{'type': 'string'},
+            'bot_id': <String, dynamic>{'type': 'string'},
+            'computer_id': <String, dynamic>{'type': 'string'},
+          },
+          'required': <String>['url'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> bot = await _resolveComputerBot(
+            (args['bot_id'] ?? '').toString(),
+            (args['computer_id'] ?? '').toString(),
+          );
+          if (bot['ok'] != true) {
+            return ToolResult.error('${bot['error'] ?? '没有可用智能体'}');
+          }
+          final Map<String, dynamic> r = await computer.handle(
+            'navigate',
+            <String, dynamic>{
+              'bot_id': bot['bot_id'],
+              'url': (args['url'] ?? '').toString(),
+            },
+          );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '打开失败'}');
+          }
+          return ToolResult.ok(
+            '${r['display'] ?? ''}\n\n（HTTP 模式，不执行 JavaScript）',
+            data: <String, dynamic>{
+              ...r,
+              'bot_id': bot['bot_id'],
+              'computer_id': bot['computer_id'],
+            },
+          );
+        },
+      ),
+      AgentTool(
+        name: 'browser_snapshot',
+        description: '读取当前网页快照（链接 ref / 表单字段 ref）',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'bot_id': <String, dynamic>{'type': 'string'},
+            'computer_id': <String, dynamic>{'type': 'string'},
+          },
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> bot = await _resolveComputerBot(
+            (args['bot_id'] ?? '').toString(),
+            (args['computer_id'] ?? '').toString(),
+          );
+          if (bot['ok'] != true) {
+            return ToolResult.error('${bot['error'] ?? '没有可用智能体'}');
+          }
+          final Map<String, dynamic> r = await computer.handle(
+            'snapshot',
+            <String, dynamic>{'bot_id': bot['bot_id']},
+          );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '读取快照失败'}');
+          }
+          if (r['snapshot'] == null) {
+            return ToolResult.ok('该智能体还没有打开网页。');
+          }
+          return ToolResult.ok('${r['display'] ?? ''}');
+        },
+      ),
+      AgentTool(
+        name: 'browser_act',
+        description:
+            '操作网页：click/fill/submit/back/forward/reload；ref 来自快照',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'action': <String, dynamic>{'type': 'string'},
+            'ref': <String, dynamic>{'type': 'string'},
+            'value': <String, dynamic>{'type': 'string'},
+            'bot_id': <String, dynamic>{'type': 'string'},
+            'computer_id': <String, dynamic>{'type': 'string'},
+          },
+          'required': <String>['action'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> bot = await _resolveComputerBot(
+            (args['bot_id'] ?? '').toString(),
+            (args['computer_id'] ?? '').toString(),
+          );
+          if (bot['ok'] != true) {
+            return ToolResult.error('${bot['error'] ?? '没有可用智能体'}');
+          }
+          final Map<String, dynamic> r = await computer.handle(
+            'act',
+            <String, dynamic>{
+              'bot_id': bot['bot_id'],
+              'action': (args['action'] ?? '').toString(),
+              'ref': (args['ref'] ?? '').toString(),
+              'value': (args['value'] ?? '').toString(),
+            },
+          );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '页面操作失败'}');
+          }
+          final String display = (r['display'] ?? '').toString();
+          return ToolResult.ok(
+            display.isEmpty ? '操作已执行' : display,
+            data: r,
+          );
+        },
+      ),
+      AgentTool(
+        name: 'computer_checkpoint',
+        description: '为 Team Computer 创建真实工作区检查点（目录副本 + SHA256 清单）',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'computer_id': <String, dynamic>{'type': 'string'},
+            'note': <String, dynamic>{'type': 'string'},
+          },
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await computer.handle(
+            'checkpoint',
+            <String, dynamic>{
+              'computer_id': (args['computer_id'] ?? '').toString(),
+              'note': (args['note'] ?? '').toString(),
+            },
+          );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '创建检查点失败'}');
+          }
+          final Map<dynamic, dynamic> cp = r['checkpoint'] as Map;
+          return ToolResult.ok(
+            '已创建检查点 ${cp['rev']}（${cp['entries']} 个文件，'
+            '${cp['total_bytes']} 字节）',
+            data: Map<String, dynamic>.from(cp),
+          );
+        },
+      ),
+      AgentTool(
+        name: 'computer_restore',
+        description: '恢复 Team Computer 检查点（恢复前自动备份当前工作区）',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'computer_id': <String, dynamic>{'type': 'string'},
+            'rev': <String, dynamic>{'type': 'string'},
+          },
+          'required': <String>['rev'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await computer.handle(
+            'restore',
+            <String, dynamic>{
+              'computer_id': (args['computer_id'] ?? '').toString(),
+              'rev': (args['rev'] ?? '').toString(),
+            },
+          );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '恢复检查点失败'}');
+          }
+          return ToolResult.ok('${r['note'] ?? '已恢复检查点'}');
         },
       ),
       AgentTool(
@@ -7219,6 +7575,8 @@ class EmbeddedBackend implements QqShellRunner {
     if (boot != null) await boot;
     // 再卸载插件树（可逆撤销工具/接缝注册），关闭热流控制器。
     // 幂等：forTest 场景下 _kernel 可能为 null。
+    // 释放 Team Computer 浏览器的 HTTP 连接。
+    computer.dispose();
     await _kernel?.dispose();
     await _hotController.close();
   }
