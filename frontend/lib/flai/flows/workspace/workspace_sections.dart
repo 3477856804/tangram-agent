@@ -5,6 +5,7 @@ import 'package:tangram/harness/ui_customization.dart';
 import 'package:tangram/ui/pages/tga_3d_page.dart';
 import 'package:tangram/ui/pages/tga_account_ops_page.dart';
 import 'package:tangram/ui/pages/tga_app_market_page.dart';
+import 'package:tangram/ui/pages/tga_artifacts_page.dart';
 import 'package:tangram/ui/pages/tga_channels_page.dart';
 import 'package:tangram/ui/pages/tga_calls_page.dart';
 import 'package:tangram/ui/pages/tga_cognition_page.dart';
@@ -26,6 +27,7 @@ import 'package:tangram/ui/pages/tga_overview_page.dart';
 import 'package:tangram/ui/pages/tga_run_page.dart';
 import 'package:tangram/ui/pages/tga_sandbox_page.dart';
 import 'package:tangram/ui/pages/tga_schedule_page.dart';
+import 'package:tangram/ui/pages/tga_search_page.dart';
 import 'package:tangram/ui/pages/tga_security_page.dart';
 import 'package:tangram/ui/pages/tga_snapshot_page.dart';
 import 'package:tangram/ui/pages/tga_sphere_graph_page.dart';
@@ -273,6 +275,18 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
     icon: Icons.call_outlined,
     labelKey: 'sidebar.calls',
     page: const TgaCallsPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.travel_explore_rounded,
+    labelKey: 'sidebar.globalSearch',
+    page: const TgaSearchPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.inventory_outlined,
+    labelKey: 'sidebar.artifacts',
+    page: const TgaArtifactsPage(),
     fullPage: true,
   ),
   NavItem(

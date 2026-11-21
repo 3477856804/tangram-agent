@@ -40,6 +40,7 @@ import 'package:http/http.dart' as http;
 import 'package:tangram/agent/sandbox/sandboxed_shell.dart';
 import 'package:tangram/app_version.dart';
 import 'package:tangram/harness/app_package.dart';
+import 'package:tangram/harness/artifacts.dart';
 import 'package:tangram/harness/audit_log.dart';
 import 'package:tangram/harness/builtin_plugins.dart';
 import 'package:tangram/harness/call_service.dart';
@@ -54,6 +55,7 @@ import 'package:tangram/harness/im_service.dart';
 import 'package:tangram/harness/integration_registry.dart';
 import 'package:tangram/harness/knowledge_base.dart';
 import 'package:tangram/harness/local_inference.dart';
+import 'package:tangram/harness/local_search.dart';
 import 'package:tangram/harness/mcp_client.dart';
 import 'package:tangram/harness/model3d.dart';
 import 'package:tangram/harness/plugin_kernel.dart';
@@ -151,6 +153,12 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// 语音通话记录：真实转写落盘。
   late final CallService calls = CallService(store);
+
+  /// 本机全局搜索：只读真实落盘的对话 / 页面 / 知识库 / 通话等。
+  late final LocalSearchService search = LocalSearchService(store.root);
+
+  /// 本地产物：工作区、Pages 版本与 Team Computer 文件。
+  late final ArtifactService artifacts = ArtifactService(store.root);
 
   /// 硬件自适应调度：真实探针 + 量化/后端/路由建议 + 队列。
   late final HardwareScheduler hardware = HardwareScheduler();
@@ -314,6 +322,8 @@ class EmbeddedBackend implements QqShellRunner {
     'computer',
     'integration',
     'call',
+    'search',
+    'artifact',
     'compute',
     'workspace_mapping',
     'web_search',
@@ -883,6 +893,11 @@ class EmbeddedBackend implements QqShellRunner {
           payload,
         ),
         'call' => await calls.handle(_action(payload, 'list'), payload),
+        'search' => await search.handle(_action(payload, 'query'), payload),
+        'artifact' => await artifacts.handle(
+          _action(payload, 'list'),
+          payload,
+        ),
         'compute' => await _onCompute(payload),
         'workspace_mapping' => await _workspaceMapping(payload),
         'web_search' => await _webSearchControl(payload),
@@ -1041,6 +1056,26 @@ class EmbeddedBackend implements QqShellRunner {
       'entries_limit': CallStore.maxEntries,
       'bot_initiated': false,
       'note': '通话由用户在通话页发起；真实转写落盘，未实现的自动外呼不伪装。',
+    },
+    'search': <String, dynamic>{
+      'architecture':
+          'local keyword scan over chats/pages/knowledge/calls/routines/workflows/integrations',
+      'network': false,
+      'sources': <String>[
+        'chat',
+        'page',
+        'knowledge',
+        'call',
+        'routine',
+        'workflow',
+        'integration',
+      ],
+    },
+    'artifact': <String, dynamic>{
+      'architecture': 'real files under work/, pages/ and computer/homes/',
+      'sources': <String>['work', 'page', 'computer'],
+      'read_limit_bytes': ArtifactService.maxReadBytes,
+      'upload': false,
     },
     'creator': <String, dynamic>{
       'architecture':
@@ -3673,6 +3708,107 @@ class EmbeddedBackend implements QqShellRunner {
             );
           }
           return ToolResult.ok(buf.toString());
+        },
+      ),
+      AgentTool(
+        name: 'search_all',
+        description:
+            '在本机真实数据里搜索对话、页面、知识库、通话、Routine、工作流与集成',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'query': <String, dynamic>{'type': 'string'},
+            'limit': <String, dynamic>{'type': 'integer'},
+            'types': <String, dynamic>{
+              'type': 'array',
+              'items': <String, dynamic>{'type': 'string'},
+            },
+          },
+          'required': <String>['query'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await search.handle(
+            'query',
+            <String, dynamic>{
+              'query': (args['query'] ?? '').toString(),
+              'limit': args['limit'] ?? 30,
+              'types': args['types'] is List ? args['types'] : <dynamic>[],
+            },
+          );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '搜索失败'}');
+          }
+          final List<dynamic> results =
+              (r['results'] as List?) ?? const <dynamic>[];
+          if (results.isEmpty) {
+            return ToolResult.ok('没有找到与「${r['query']}」匹配的本机内容。');
+          }
+          final StringBuffer buf = StringBuffer(
+            '**搜索「${r['query']}」：${r['total']} 条**\n',
+          );
+          for (final dynamic raw in results) {
+            if (raw is! Map) continue;
+            buf.writeln('- [${raw['type']}] ${raw['title']}：${raw['snippet']}');
+          }
+          return ToolResult.ok(buf.toString(), data: r);
+        },
+      ),
+      AgentTool(
+        name: 'artifact_list',
+        description: '列出本机真实产物（工作区 / Pages 版本 / Team Computer 文件）',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'source': <String, dynamic>{'type': 'string'},
+            'query': <String, dynamic>{'type': 'string'},
+          },
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await artifacts.handle(
+            'list',
+            <String, dynamic>{
+              'source': (args['source'] ?? '').toString(),
+              'query': (args['query'] ?? '').toString(),
+            },
+          );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '读取产物失败'}');
+          }
+          final List<dynamic> list =
+              (r['artifacts'] as List?) ?? const <dynamic>[];
+          if (list.isEmpty) return ToolResult.ok('本机还没有产物文件。');
+          final StringBuffer buf = StringBuffer(
+            '**产物（${r['total']}）**\n',
+          );
+          for (final dynamic raw in list.take(80)) {
+            if (raw is! Map) continue;
+            buf.writeln('- ${raw['id']}（${raw['kind']}，${raw['size']} B）');
+          }
+          return ToolResult.ok(buf.toString(), data: r);
+        },
+      ),
+      AgentTool(
+        name: 'artifact_read',
+        description: '读取本机产物的 UTF-8 文本（图片/音视频不支持）',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'id': <String, dynamic>{'type': 'string'},
+          },
+          'required': <String>['id'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await artifacts.handle(
+            'read',
+            <String, dynamic>{'id': (args['id'] ?? '').toString()},
+          );
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '读取失败'}');
+          }
+          return ToolResult.ok('${r['text']}', data: r);
         },
       ),
       AgentTool(

@@ -170,6 +170,7 @@ class TgaStrings {
     'sidebar.computer': {'cn': '电脑', 'tw': '電腦', 'en': 'Computer'},
     'sidebar.integration': {'cn': '集成', 'tw': '整合', 'en': 'Integrations'},
     'sidebar.calls': {'cn': '通话', 'tw': '通話', 'en': 'Calls'},
+    'sidebar.artifacts': {'cn': '产物', 'tw': '產物', 'en': 'Artifacts'},
     'sidebar.creator': {'cn': '创客', 'tw': '創客', 'en': 'Creator'},
     'sidebar.customize': {'cn': '界面', 'tw': '介面', 'en': 'Customize'},
     'sidebar.uiPlugins': {'cn': '插件槽', 'tw': '外掛槽', 'en': 'UI Plugins'},
@@ -291,6 +292,7 @@ class TgaStrings {
     'sidebar.more': {'cn': '更多…', 'tw': '更多…', 'en': 'More…'},
     'sidebar.conversations': {'cn': '会话', 'tw': '對話', 'en': 'Chats'},
     'sidebar.search': {'cn': '搜索会话', 'tw': '搜尋對話', 'en': 'Search chats'},
+    'sidebar.globalSearch': {'cn': '搜索', 'tw': '搜尋', 'en': 'Search'},
     'sidebar.starred': {'cn': '已收藏', 'tw': '已收藏', 'en': 'Starred'},
     'sidebar.empty': {'cn': '还没有会话', 'tw': '還沒有對話', 'en': 'No chats yet'},
     'sidebar.noMatch': {
