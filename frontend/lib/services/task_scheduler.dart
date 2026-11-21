@@ -201,6 +201,33 @@ class TaskScheduler extends ChangeNotifier {
       } on Object {
         // Super Agent 未就绪不影响定时任务。
       }
+      // 多时间表 Routine：由本调度器在进程存活期间真实触发。
+      // 后端 `routine` 控制域会再次校验「是否到点」并推进 next_run，
+      // 同时把执行结果写入运行历史，页面与这里并发 tick 也不会重复执行。
+      try {
+        final env3 = await backend.sendControl(
+            'routine', <String, dynamic>{'action': 'due'});
+        final dynamic rp = env3.payload;
+        if (rp is Map && rp['ok'] == true) {
+          final List<dynamic> due =
+              (rp['due'] as List?) ?? const <dynamic>[];
+          for (final dynamic raw in due) {
+            if (raw is! Map) continue;
+            final String id = '${raw['id'] ?? ''}';
+            if (id.isEmpty) continue;
+            // 不阻塞调度循环：startRun 会在 chat 之前先推进 next_run，
+            // 即使推理耗时较长，下一轮 tick 也不会重复触发。
+            unawaited(backend.sendControl('routine', <String, dynamic>{
+              'action': 'run',
+              'id': id,
+              'scheduled': true,
+            }));
+            notifyListeners();
+          }
+        }
+      } on Object {
+        // Routine 调度失败不影响其它定时能力；下一轮重试。
+      }
       // 账号运营：发布「approved + 已到点」的定时草稿。
       // 如实说明：Timer 只随 App 进程存活而运行；进程被系统杀死/退到后台
       // 停止执行时不会发布，重新启动后的下一轮检查会补发已到期草稿。

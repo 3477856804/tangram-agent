@@ -60,6 +60,7 @@ import 'package:tangram/harness/proot_sandbox.dart';
 import 'package:tangram/harness/qq_sandbox.dart';
 import 'package:tangram/harness/security_policy.dart';
 import 'package:tangram/harness/pages_service.dart';
+import 'package:tangram/harness/routine_service.dart';
 import 'package:tangram/harness/snapshot_service.dart';
 import 'package:tangram/harness/startup_timeline.dart';
 import 'package:tangram/harness/store.dart';
@@ -121,6 +122,9 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// Agent 生成的版本化 Pages（看板 / 文档）。
   late final PagesService pages = PagesService(store);
+
+  /// 多时间表 Routine（cron + 时区 + 运行历史）。
+  late final RoutineService routines = RoutineService(store);
 
   /// Agent 应用市场：行业工作站模板安装 / 导入 / 导出。
   late final AppPackageService appPackages = AppPackageService(
@@ -287,6 +291,7 @@ class EmbeddedBackend implements QqShellRunner {
     'workflow',
     'snapshot',
     'pages',
+    'routine',
     'model_group',
     'app_market',
     'team_space',
@@ -522,6 +527,297 @@ class EmbeddedBackend implements QqShellRunner {
     }
   }
 
+  // ---- routine：多时间表 + 时区 + 真实运行历史 ----
+
+  bool _legacySchedulesMigrated = false;
+  final Set<String> _routineRunning = <String>{};
+
+  /// Routine 控制域：
+  /// list/get/create/update/delete/toggle/duplicate/validate/history/due/run。
+  ///
+  /// 真实语义：`next_run_at` 由 RoutineStore 按 cron + 时区计算；`run` 真正
+  /// 调用内置 chat 并把结果写回运行历史；`due` 只返回已到点的启用项。
+  Future<Map<String, dynamic>> _routine(Map<String, dynamic> p) async {
+    final String action = _action(p, 'list');
+    final String id = (p['id'] ?? '').toString().trim();
+    switch (action) {
+      case 'list':
+        await _migrateLegacySchedules();
+        return routines.list(
+          query: (p['query'] ?? '').toString(),
+          activeOnly: p['active_only'] == true,
+        );
+      case 'get':
+        return routines.get(id);
+      case 'create':
+      case 'add':
+        await _migrateLegacySchedules();
+        return routines.create(
+          name: (p['name'] ?? p['title'] ?? '').toString(),
+          prompt: (p['prompt'] ?? p['text'] ?? '').toString(),
+          crons: _routineCrons(p),
+          timezone: (p['timezone'] ?? 'local').toString(),
+          active: p['active'] != false,
+          notify: p['notify'] != false,
+          inChat: p['in_chat'] == true,
+          modelProvider: _nullableText(p['model_provider']),
+          modelId: _nullableText(p['model_id']),
+          thinkingLevel: _nullableText(p['thinking_level']),
+          oneShotAt: _parseTime(p['once_at']),
+        );
+      case 'update':
+        final String? modelProvider = _nullableText(p['model_provider']);
+        final String? modelId = _nullableText(p['model_id']);
+        final String? thinkingLevel = _nullableText(p['thinking_level']);
+        return routines.update(
+          id,
+          name: p['name'] == null ? null : '${p['name']}',
+          prompt: p['prompt'] == null ? null : '${p['prompt']}',
+          crons: p.containsKey('crons') ? _routineCrons(p) : null,
+          timezone: p['timezone'] == null ? null : '${p['timezone']}',
+          active: p['active'] is bool ? p['active'] as bool : null,
+          notify: p['notify'] is bool ? p['notify'] as bool : null,
+          inChat: p['in_chat'] is bool ? p['in_chat'] as bool : null,
+          modelProvider: modelProvider,
+          clearModelProvider:
+              p.containsKey('model_provider') && modelProvider == null,
+          modelId: modelId,
+          clearModelId: p.containsKey('model_id') && modelId == null,
+          thinkingLevel: thinkingLevel,
+          clearThinkingLevel:
+              p.containsKey('thinking_level') && thinkingLevel == null,
+          oneShotAt: _parseTime(p['once_at']),
+        );
+      case 'delete':
+        return routines.delete(id);
+      case 'toggle':
+        return routines.setActive(
+          id,
+          p['enabled'] is bool ? p['enabled'] as bool : p['active'] == true,
+        );
+      case 'duplicate':
+        return routines.duplicate(
+          id,
+          name: p['name'] == null ? null : '${p['name']}',
+        );
+      case 'validate':
+        final List<String> crons = _routineCrons(p);
+        final String zone = (p['timezone'] ?? 'local').toString();
+        final String? invalid = RoutineStore.validateSchedule(crons, zone);
+        return invalid == null
+            ? <String, dynamic>{
+                'ok': true,
+                'crons': crons,
+                'timezone': zone,
+                'next_run_at': _nextRunPreview(crons, zone),
+              }
+            : _err(invalid);
+      case 'history':
+        final dynamic cursor = p['before'];
+        return routines.historyDetailed(
+          id,
+          before: cursor is Map
+              ? cursor.map(
+                  (dynamic k, dynamic v) => MapEntry(k.toString(), v),
+                )
+              : null,
+          limit: p['limit'] is num ? (p['limit'] as num).toInt() : 30,
+        );
+      case 'due':
+        return routines.due(now: _parseTime(p['now']));
+      case 'run':
+        return _runRoutine(
+          id,
+          scheduled: p['scheduled'] == true,
+          now: _parseTime(p['now']),
+        );
+      default:
+        return _err('未知 routine 动作：$action');
+    }
+  }
+
+  /// 真实执行一条 Routine：先推进计划时间并写 running 记录，再调用 chat。
+  Future<Map<String, dynamic>> _runRoutine(
+    String id, {
+    required bool scheduled,
+    DateTime? now,
+  }) async {
+    if (id.isEmpty) return _err('缺少 Routine id');
+    if (_routineRunning.contains(id)) {
+      return <String, dynamic>{
+        'ok': true,
+        'skipped': true,
+        'reason': 'Routine 正在运行中',
+      };
+    }
+    if (scheduled) {
+      // 双重检查：内置调度器与页面可能同时 tick，只有真正到期才执行。
+      final Map<String, dynamic> due = await routines.due(now: now);
+      final List<dynamic> items =
+          (due['due'] as List?) ?? const <dynamic>[];
+      final bool isDue = items.whereType<Map>().any(
+        (Map r) => '${r['id']}' == id,
+      );
+      if (!isDue) {
+        return <String, dynamic>{
+          'ok': true,
+          'skipped': true,
+          'reason': '未到点或已停用',
+        };
+      }
+    }
+    _routineRunning.add(id);
+    try {
+      final Map<String, dynamic> started = await routines.startRun(
+        id,
+        trigger: scheduled ? 'schedule' : 'manual',
+        now: now,
+      );
+      if (started['ok'] != true) return started;
+      final Map<dynamic, dynamic> run = started['run'] as Map;
+      final Map<dynamic, dynamic> routine = started['routine'] as Map;
+      final String name = '${routine['name'] ?? 'Routine'}';
+      final String prompt = '${routine['prompt'] ?? ''}';
+      final String text =
+          '【定时例程 · $name】\n$prompt\n\n请执行这项例程，并把结果如实汇报。';
+      String reply = '';
+      String error = '';
+      bool ok = false;
+      try {
+        final Map<String, dynamic> r = await _chat(<String, dynamic>{
+          'text': text,
+          'session_id': 'routine:$id',
+        });
+        ok = r['ok'] == true;
+        reply = '${r['reply'] ?? r['text'] ?? ''}'.trim();
+        if (!ok) error = '${r['error'] ?? 'ok=false'}';
+      } on Object catch (e) {
+        error = '$e';
+      }
+      final String runId = '${run['id'] ?? ''}';
+      if (runId.isNotEmpty) {
+        await routines.finishRun(
+          runId,
+          ok: ok,
+          result: reply,
+          error: error,
+          now: now,
+        );
+      }
+      return <String, dynamic>{
+        'ok': ok,
+        'run_id': runId,
+        'routine': routine,
+        'result': reply.length > 500 ? '${reply.substring(0, 500)}…' : reply,
+        'error': error,
+      };
+    } finally {
+      _routineRunning.remove(id);
+    }
+  }
+
+  /// 旧版 `schedules.json`（每日 HH:mm / every:N）一次性迁移为 Routine。
+  /// 迁移成功后把旧文件改名为 `.migrated`，不删除用户数据。
+  Future<void> _migrateLegacySchedules() async {
+    if (_legacySchedulesMigrated) return;
+    _legacySchedulesMigrated = true;
+    try {
+      final Map<String, dynamic> existing = await routines.list();
+      final dynamic list = existing['routines'];
+      if (list is List && list.isNotEmpty) return;
+      final List<Map<String, dynamic>> records =
+          await store.readRecords('schedules');
+      if (records.isEmpty) return;
+      bool migratedAny = false;
+      for (final Map<String, dynamic> record in records) {
+        final String name =
+            (record['title'] ?? record['name'] ?? '').toString().trim();
+        final String prompt = (record['prompt'] ?? '').toString().trim();
+        final String? cron = _legacyCron('${record['cron'] ?? ''}');
+        if (name.isEmpty || prompt.isEmpty || cron == null) continue;
+        final Map<String, dynamic> created = await routines.create(
+          name: name,
+          prompt: prompt,
+          crons: <String>[cron],
+          active: record['enabled'] != false,
+        );
+        if (created['ok'] == true) migratedAny = true;
+      }
+      if (migratedAny) {
+        final File old = store.file('schedules.json');
+        if (await old.exists()) {
+          await old.rename('${old.path}.migrated');
+        }
+      }
+    } on Object {
+      // 迁移失败不影响新 Routine；旧文件保留，下次启动仍可重试。
+    }
+  }
+
+  static String? _legacyCron(String raw) {
+    final String text = raw.trim();
+    final RegExpMatch? daily =
+        RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(text);
+    if (daily != null) {
+      final int h = int.tryParse(daily.group(1)!) ?? -1;
+      final int m = int.tryParse(daily.group(2)!) ?? -1;
+      if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+      return '$m $h * * *';
+    }
+    final RegExpMatch? interval =
+        RegExp(r'^every:(\d{1,4})$').firstMatch(text);
+    if (interval != null) {
+      final int n = int.tryParse(interval.group(1)!) ?? 0;
+      if (n >= 1 && n <= 59) return '*/$n * * * *';
+      if (n >= 60 && n % 60 == 0 && n ~/ 60 <= 23) {
+        return '0 */${n ~/ 60} * * *';
+      }
+      if (n == 1440) return '0 0 * * *';
+      return null;
+    }
+    return CronExpression.isValid(text) ? text : null;
+  }
+
+  static List<String> _routineCrons(Map<String, dynamic> p) {
+    final dynamic raw = p['crons'];
+    if (raw is List) {
+      return RoutineStore.normalizeCrons(raw);
+    }
+    final dynamic single = p['cron'] ?? p['schedule'];
+    if (single is String && single.trim().isNotEmpty) {
+      return RoutineStore.normalizeCrons(<dynamic>[single]);
+    }
+    return <String>[];
+  }
+
+  static String? _nullableText(dynamic value) {
+    if (value == null) return null;
+    final String text = value.toString().trim();
+    return text.isEmpty ? null : text;
+  }
+
+  static DateTime? _parseTime(dynamic value) {
+    if (value == null) return null;
+    return DateTime.tryParse(value.toString());
+  }
+
+  static String? _nextRunPreview(List<String> crons, String zone) {
+    final String? invalid = RoutineStore.validateSchedule(crons, zone);
+    if (invalid != null) return null;
+    final DateTime now = DateTime.now().toUtc();
+    try {
+      final RoutineZone tz = RoutineZone.parse(zone);
+      if (isOneShotCrons(crons)) return null;
+      final DateTime? anchor =
+          nextCronDateAcrossStrict(crons, now, tz);
+      if (anchor == null) return null;
+      return nextRoutineRunDateAcross(crons, anchor, now, tz)
+          ?.toIso8601String();
+    } on FormatException {
+      return null;
+    }
+  }
+
   /// 统一分发入口。任何异常都转成结构化 error，绝不让 UI 拿到未捕获异常。
   Future<BackendReply> dispatch(
     String topic,
@@ -552,6 +848,7 @@ class EmbeddedBackend implements QqShellRunner {
         'workflow' => await workflows.handle(_action(payload, 'list'), payload),
         'snapshot' => await snapshots.handle(_action(payload, 'list'), payload),
         'pages' => await _pages(payload),
+        'routine' => await _routine(payload),
         'model_group' => await _modelGroup(payload),
         'app_market' => await appPackages.handle(
           _action(payload, 'list'),
@@ -661,6 +958,16 @@ class EmbeddedBackend implements QqShellRunner {
       'storage': 'app-private-json+html',
       'public_link_enabled': false,
       'max_html_bytes': PagesRepository.maxHtmlBytes,
+    },
+    'routine': <String, dynamic>{
+      'architecture':
+          'multi-cron + timezone + one-shot + run history + in-app scheduler',
+      'storage': 'app-private-json',
+      'max_crons': 12,
+      'history_limit': RoutineStore.maxRuns,
+      'one_shot': true,
+      'background': false,
+      'note': 'App 进程存活期间由内置调度器按时间表触发',
     },
     'model_group': <String, dynamic>{
       'architecture': 'parallel members + cross-compare + moderator synthesis',
@@ -2589,6 +2896,167 @@ class EmbeddedBackend implements QqShellRunner {
             'tga://pages/${page['id']}',
             data: page,
           );
+        },
+      ),
+      AgentTool(
+        name: 'routine_list',
+        description: '列出本机 Routine（定时例程）及其下次运行时间',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'query': <String, dynamic>{'type': 'string'},
+            'active_only': <String, dynamic>{'type': 'boolean'},
+          },
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await _routine(<String, dynamic>{
+            'action': 'list',
+            'query': (args['query'] ?? '').toString(),
+            'active_only': args['active_only'] == true,
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '读取 Routine 失败'}');
+          }
+          final List<dynamic> items =
+              (r['routines'] as List?) ?? const <dynamic>[];
+          if (items.isEmpty) return ToolResult.ok('本机还没有 Routine。');
+          final StringBuffer buf = StringBuffer(
+            '**本机 Routine（${items.length}）**\n',
+          );
+          for (final dynamic raw in items) {
+            if (raw is! Map) continue;
+            final String next = (raw['next_run_at'] ?? '').toString();
+            buf.writeln(
+              '- `${raw['id']}` ${raw['name']}'
+              '（${raw['active'] == true ? '启用' : '暂停'}，'
+              '${formatCrons(
+                (raw['crons'] as List? ?? const <dynamic>[])
+                    .map((dynamic e) => e.toString())
+                    .toList(),
+              )}'
+              '${next.isEmpty ? '' : '，下次 ${formatRunAt(DateTime.parse(next))}'}）',
+            );
+          }
+          return ToolResult.ok(buf.toString());
+        },
+      ),
+      AgentTool(
+        name: 'routine_create',
+        description: '创建定时 Routine（cron + 时区），到点自动执行提示词',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'name': <String, dynamic>{'type': 'string'},
+            'prompt': <String, dynamic>{'type': 'string'},
+            'crons': <String, dynamic>{
+              'type': 'array',
+              'items': <String, dynamic>{'type': 'string'},
+              'description': '5 段 cron，如 "30 9 * * 1-5"；一次性用 @once + once_at',
+            },
+            'timezone': <String, dynamic>{
+              'type': 'string',
+              'description': 'local / UTC / Asia/Shanghai / UTC+8',
+            },
+            'once_at': <String, dynamic>{
+              'type': 'string',
+              'description': 'ISO 时间；仅 @once 使用',
+            },
+            'active': <String, dynamic>{'type': 'boolean'},
+          },
+          'required': <String>['name', 'prompt', 'crons'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await _routine(<String, dynamic>{
+            'action': 'create',
+            'name': (args['name'] ?? '').toString(),
+            'prompt': (args['prompt'] ?? '').toString(),
+            'crons': args['crons'] is List ? args['crons'] : <dynamic>[],
+            'timezone': (args['timezone'] ?? 'local').toString(),
+            'once_at': args['once_at'],
+            'active': args['active'] != false,
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '创建 Routine 失败'}');
+          }
+          final Map<dynamic, dynamic> routine = r['routine'] as Map;
+          return ToolResult.ok(
+            '已创建 Routine「${routine['name']}」\n'
+            '时间表：${formatCrons(
+              (routine['crons'] as List? ?? const <dynamic>[])
+                  .map((dynamic e) => e.toString())
+                  .toList(),
+            )}\n'
+            '时区：${routine['timezone']}',
+            data: Map<String, dynamic>.from(routine),
+          );
+        },
+      ),
+      AgentTool(
+        name: 'routine_run',
+        description: '立即执行一条 Routine 并返回真实结果',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'id': <String, dynamic>{'type': 'string'},
+          },
+          'required': <String>['id'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await _routine(<String, dynamic>{
+            'action': 'run',
+            'id': (args['id'] ?? '').toString(),
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '执行 Routine 失败'}');
+          }
+          final String result = (r['result'] ?? '').toString().trim();
+          return ToolResult.ok(
+            result.isEmpty ? 'Routine 已执行（后端未返回文本）' : result,
+            data: Map<String, dynamic>.from(r),
+          );
+        },
+      ),
+      AgentTool(
+        name: 'routine_history',
+        description: '查看一条 Routine 的最近运行记录',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'id': <String, dynamic>{'type': 'string'},
+            'limit': <String, dynamic>{'type': 'integer'},
+          },
+          'required': <String>['id'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await _routine(<String, dynamic>{
+            'action': 'history',
+            'id': (args['id'] ?? '').toString(),
+            'limit': args['limit'] ?? 10,
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '读取运行历史失败'}');
+          }
+          final List<dynamic> runs =
+              (r['runs'] as List?) ?? const <dynamic>[];
+          if (runs.isEmpty) return ToolResult.ok('这条 Routine 还没有运行记录。');
+          final StringBuffer buf = StringBuffer('**最近运行**\n');
+          for (final dynamic raw in runs) {
+            if (raw is! Map) continue;
+            final String errText = (raw['error'] ?? '').toString();
+            final String duration =
+                (raw['duration_label'] ?? '').toString();
+            buf.writeln(
+              '- ${formatRunAt(DateTime.parse('${raw['created_at']}'))} '
+              '${raw['status']}'
+              '${duration.isEmpty ? '' : '（$duration）'}'
+              '${errText.isEmpty ? '' : '：$errText'}',
+            );
+          }
+          return ToolResult.ok(buf.toString());
         },
       ),
       AgentTool(
