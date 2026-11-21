@@ -39,11 +39,13 @@ class McpCallResult {
 
 class McpClient {
   McpClient(this.url, {this.headers = const <String, String>{}, http.Client? client})
-      : _client = client ?? http.Client();
+      : _client = client ?? http.Client(),
+        _ownsClient = client == null;
 
   final String url;
   final Map<String, String> headers;
   final http.Client _client;
+  final bool _ownsClient;
 
   String? _sessionId;
   int _rpcId = 0;
@@ -68,10 +70,11 @@ class McpClient {
         'version': kAppVersion,
       },
     });
+    String title = '';
     final result = resp['result'];
     if (result is Map) {
       final info = result['serverInfo'];
-      if (info is Map) return (info['name'] ?? '').toString();
+      if (info is Map) title = (info['name'] ?? '').toString();
     }
     // initialized 是通知（无 id），失败不致命。
     try {
@@ -80,7 +83,7 @@ class McpClient {
       // 有些服务端不接受该通知名，忽略即可。
     }
     _initialized = true;
-    return '';
+    return title;
   }
 
   /// 列出工具。未初始化会先 initialize。
@@ -219,5 +222,7 @@ class McpClient {
   static String _trim(String s) =>
       s.length > 200 ? '${s.substring(0, 200)}…' : s;
 
-  void dispose() => _client.close();
+  void dispose() {
+    if (_ownsClient) _client.close();
+  }
 }

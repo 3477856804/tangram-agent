@@ -168,6 +168,7 @@ class TgaStrings {
     'sidebar.appMarket': {'cn': '应用', 'tw': '應用', 'en': 'App Market'},
     'sidebar.team': {'cn': '团队', 'tw': '團隊', 'en': 'Team'},
     'sidebar.computer': {'cn': '电脑', 'tw': '電腦', 'en': 'Computer'},
+    'sidebar.integration': {'cn': '集成', 'tw': '整合', 'en': 'Integrations'},
     'sidebar.creator': {'cn': '创客', 'tw': '創客', 'en': 'Creator'},
     'sidebar.customize': {'cn': '界面', 'tw': '介面', 'en': 'Customize'},
     'sidebar.uiPlugins': {'cn': '插件槽', 'tw': '外掛槽', 'en': 'UI Plugins'},

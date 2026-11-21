@@ -51,6 +51,7 @@ const Map<String, _NavGroup> _navGroupByLabelKey = <String, _NavGroup>{
   'sidebar.groupChat': _NavGroup.collaboration,
   'sidebar.team': _NavGroup.collaboration,
   'sidebar.computer': _NavGroup.collaboration,
+  'sidebar.integration': _NavGroup.system,
   'sidebar.channels': _NavGroup.collaboration,
   'sidebar.accountOps': _NavGroup.collaboration,
   'sidebar.training': _NavGroup.system,

@@ -50,6 +50,7 @@ import 'package:tangram/harness/account_ops.dart';
 import 'package:tangram/harness/creator_runtime.dart';
 import 'package:tangram/harness/hardware_scheduler.dart';
 import 'package:tangram/harness/im_service.dart';
+import 'package:tangram/harness/integration_registry.dart';
 import 'package:tangram/harness/knowledge_base.dart';
 import 'package:tangram/harness/local_inference.dart';
 import 'package:tangram/harness/mcp_client.dart';
@@ -72,6 +73,7 @@ import 'package:tangram/harness/web_search.dart';
 import 'package:tangram/harness/workflow.dart';
 import 'package:tangram/harness/workspace_mapping.dart';
 import 'package:tangram/services/model_registry.dart' show kBuiltinFreeModels;
+import 'package:tangram/services/secret_vault.dart';
 import 'package:tangram/services/ssh_sandbox.dart';
 import 'package:tangram/services/update_service.dart';
 
@@ -139,6 +141,12 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// Team Computer：共享工作区 + 每智能体独立浏览器 profile + 检查点。
   late final TeamComputerService computer = TeamComputerService(store.root);
+
+  /// Integrations：MCP / OpenAPI / GraphQL，凭据走系统安全存储。
+  late final IntegrationRegistry integrations = IntegrationRegistry(
+    store.root,
+    vault: const FlutterSecretVault(),
+  );
 
   /// 硬件自适应调度：真实探针 + 量化/后端/路由建议 + 队列。
   late final HardwareScheduler hardware = HardwareScheduler();
@@ -300,6 +308,7 @@ class EmbeddedBackend implements QqShellRunner {
     'app_market',
     'team_space',
     'computer',
+    'integration',
     'compute',
     'workspace_mapping',
     'web_search',
@@ -864,6 +873,10 @@ class EmbeddedBackend implements QqShellRunner {
           _action(payload, 'list'),
           payload,
         ),
+        'integration' => await integrations.handle(
+          _action(payload, 'list'),
+          payload,
+        ),
         'compute' => await _onCompute(payload),
         'workspace_mapping' => await _workspaceMapping(payload),
         'web_search' => await _webSearchControl(payload),
@@ -1003,6 +1016,16 @@ class EmbeddedBackend implements QqShellRunner {
       'cross_device_sync': false,
       'checkpoint_limit_bytes': TeamComputerService.maxCheckpointBytes,
       'note': '浏览器为 HTTP 模式（不执行 JavaScript）；无虚拟机/图形桌面。',
+    },
+    'integration': <String, dynamic>{
+      'architecture':
+          'mcp + openapi + graphql clients + per-record secrets + append-only log',
+      'kinds': <String>['mcp', 'openapi', 'graphql'],
+      'auth': <String>['none', 'bearer', 'header', 'query'],
+      'secret_storage': 'platform-secure-storage',
+      'stdio_supported': false,
+      'oauth_supported': false,
+      'note': '凭据只存系统安全存储，不进入模型上下文；OAuth 流程未实现。',
     },
     'creator': <String, dynamic>{
       'architecture':
@@ -3416,6 +3439,171 @@ class EmbeddedBackend implements QqShellRunner {
         },
       ),
       AgentTool(
+        name: 'integration_list',
+        description: '列出已接入的 MCP / OpenAPI / GraphQL 集成（不含凭据）',
+        tier: ApprovalTier.read,
+        execute: (args, _) async {
+          final Map<String, dynamic> r =
+              await integrations.handle('list', <String, dynamic>{});
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '读取集成失败'}');
+          }
+          final List<dynamic> items =
+              (r['integrations'] as List?) ?? const <dynamic>[];
+          if (items.isEmpty) return ToolResult.ok('还没有接入任何集成。');
+          final StringBuffer buf = StringBuffer('**已接入集成**\n');
+          for (final dynamic raw in items) {
+            if (raw is! Map) continue;
+            buf.writeln(
+              '- `${raw['id']}` ${raw['name']}（${raw['kind']}'
+              '${raw['enabled'] == true ? '' : '，已停用'}'
+              '${raw['last_test_ok'] == true ? '，连接正常' : ''}）',
+            );
+            for (final dynamic t
+                in (raw['tools'] as List?) ?? const <dynamic>[]) {
+              if (t is Map) buf.writeln('  - ${t['name']}');
+            }
+          }
+          return ToolResult.ok(buf.toString());
+        },
+      ),
+      AgentTool(
+        name: 'integration_tools',
+        description: '读取某个集成的工具 / 操作列表（refresh=true 时真实重连刷新）',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'id': <String, dynamic>{'type': 'string'},
+            'refresh': <String, dynamic>{'type': 'boolean'},
+          },
+          'required': <String>['id'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r =
+              await integrations.handle('tools', <String, dynamic>{
+            'id': (args['id'] ?? '').toString(),
+            'refresh': args['refresh'] == true,
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '读取工具失败'}');
+          }
+          final List<dynamic> tools =
+              (r['tools'] as List?) ?? const <dynamic>[];
+          if (tools.isEmpty) return ToolResult.ok('该集成没有可用工具。');
+          final StringBuffer buf = StringBuffer('**工具**\n');
+          for (final dynamic raw in tools) {
+            if (raw is! Map) continue;
+            buf.writeln('- `${raw['name']}` ${raw['description'] ?? ''}');
+            final dynamic schema = raw['input_schema'];
+            if (schema is Map && schema['properties'] is Map) {
+              buf.writeln('  参数：${(schema['properties'] as Map).keys.join('、')}');
+            }
+          }
+          return ToolResult.ok(buf.toString());
+        },
+      ),
+      AgentTool(
+        name: 'integration_call',
+        description: '调用集成工具：MCP tools/call、OpenAPI 操作或 GraphQL 查询',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'id': <String, dynamic>{'type': 'string'},
+            'tool': <String, dynamic>{'type': 'string'},
+            'arguments': <String, dynamic>{
+              'type': 'object',
+              'description': '工具参数；GraphQL 可用 query / variables',
+            },
+          },
+          'required': <String>['id'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r =
+              await integrations.handle('call', <String, dynamic>{
+            'id': (args['id'] ?? '').toString(),
+            'tool': (args['tool'] ?? '').toString(),
+            'arguments': args['arguments'] is Map
+                ? args['arguments']
+                : <String, dynamic>{},
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error(
+              '${r['error'] ?? '调用失败'}${'${r['text'] ?? ''}'.isEmpty ? '' : '\n${r['text']}'}',
+            );
+          }
+          final String text = '${r['text'] ?? ''}'.trim();
+          return ToolResult.ok(text.isEmpty ? '调用成功（无文本返回）' : text, data: r);
+        },
+      ),
+      AgentTool(
+        name: 'integration_test',
+        description: '真实重连并刷新某个集成的工具列表',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'id': <String, dynamic>{'type': 'string'},
+          },
+          'required': <String>['id'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r =
+              await integrations.handle('test', <String, dynamic>{
+            'id': (args['id'] ?? '').toString(),
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '连接失败'}');
+          }
+          return ToolResult.ok(
+            '连接成功，${(r['tools'] as List?)?.length ?? 0} 个工具'
+            '${'${r['note'] ?? ''}'.isEmpty ? '' : '；${r['note']}'}',
+          );
+        },
+      ),
+      AgentTool(
+        name: 'integration_add',
+        description: '接入一个 HTTP MCP / OpenAPI / GraphQL 服务（凭据进安全存储）',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'name': <String, dynamic>{'type': 'string'},
+            'kind': <String, dynamic>{'type': 'string'},
+            'url': <String, dynamic>{'type': 'string'},
+            'auth_type': <String, dynamic>{'type': 'string'},
+            'token': <String, dynamic>{'type': 'string'},
+            'header_name': <String, dynamic>{'type': 'string'},
+            'query_name': <String, dynamic>{'type': 'string'},
+            'spec_url': <String, dynamic>{'type': 'string'},
+          },
+          'required': <String>['name', 'kind', 'url'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r =
+              await integrations.handle('add', <String, dynamic>{
+            'name': (args['name'] ?? '').toString(),
+            'kind': (args['kind'] ?? '').toString(),
+            'url': (args['url'] ?? '').toString(),
+            'auth_type': (args['auth_type'] ?? 'none').toString(),
+            'token': (args['token'] ?? '').toString(),
+            'header_name': (args['header_name'] ?? 'X-API-Key').toString(),
+            'query_name': (args['query_name'] ?? 'api_key').toString(),
+            'spec_url': (args['spec_url'] ?? '').toString(),
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '接入失败'}');
+          }
+          final Map<dynamic, dynamic> item = r['integration'] as Map;
+          return ToolResult.ok(
+            '已接入「${item['name']}」'
+            '${r['tested'] == true ? '，连接成功' : '，但连接测试失败：${r['error'] ?? ''}'}',
+            data: Map<String, dynamic>.from(item),
+          );
+        },
+      ),
+      AgentTool(
         name: 'self_test',
         description: '运行内置真实自检并逐项报告结果',
         tier: ApprovalTier.read,
@@ -4897,6 +5085,69 @@ class EmbeddedBackend implements QqShellRunner {
         client.dispose();
         failed.add(<String, dynamic>{'name': name, 'error': '$e'});
       }
+    }
+    // Integrations 里的 MCP 服务同样真实注册进 AgentLoop；凭据由
+    // IntegrationRegistry 从系统安全存储读取，工具名用 int.<集成>.<工具>。
+    try {
+      final Map<String, dynamic> reg =
+          await integrations.handle('list', <String, dynamic>{});
+      for (final dynamic raw
+          in (reg['integrations'] as List?) ?? const <dynamic>[]) {
+        if (raw is! Map) continue;
+        if ('${raw['kind']}' != 'mcp' || raw['enabled'] != true) continue;
+        final String id = '${raw['id']}';
+        final String name = '${raw['name']}';
+        final Map<String, dynamic> toolsRes =
+            await integrations.handle('tools', <String, dynamic>{'id': id});
+        if (toolsRes['ok'] != true) {
+          failed.add(<String, dynamic>{
+            'name': name,
+            'error': '${toolsRes['error'] ?? '读取工具失败'}',
+          });
+          continue;
+        }
+        final List<String> toolNames = <String>[];
+        for (final dynamic t
+            in (toolsRes['tools'] as List?) ?? const <dynamic>[]) {
+          if (t is! Map) continue;
+          final String toolName = '${t['name']}';
+          if (toolName.isEmpty) continue;
+          final String full = 'int.$name.$toolName';
+          if (tools.contains(full)) continue;
+          tools.register(
+            AgentTool(
+              name: full,
+              description: '[集成:$name] ${t['description'] ?? ''}',
+              parameters: t['input_schema'] is Map
+                  ? Map<String, dynamic>.from(t['input_schema'] as Map)
+                  : <String, dynamic>{},
+              tier: ApprovalTier.write,
+              execute: (args, _) async {
+                final Map<String, dynamic> r = await integrations.handle(
+                  'call',
+                  <String, dynamic>{
+                    'id': id,
+                    'tool': toolName,
+                    'arguments': args,
+                  },
+                );
+                return r['ok'] == true
+                    ? ToolResult.ok('${r['text'] ?? ''}')
+                    : ToolResult.error('${r['error'] ?? '调用失败'}');
+              },
+            ),
+          );
+          _mcpToolNames.add(full);
+          toolNames.add(toolName);
+        }
+        connected.add(<String, dynamic>{
+          'name': name,
+          'server': 'integration',
+          'tools': toolNames,
+        });
+      }
+    } on Object catch (e) {
+      failed.add(<String, dynamic>{'name': 'integrations', 'error': '$e'});
     }
     StartupTimeline.global.mark('mcp.sync', background: true);
     return <String, dynamic>{
@@ -7577,6 +7828,7 @@ class EmbeddedBackend implements QqShellRunner {
     // 幂等：forTest 场景下 _kernel 可能为 null。
     // 释放 Team Computer 浏览器的 HTTP 连接。
     computer.dispose();
+    integrations.dispose();
     await _kernel?.dispose();
     await _hotController.close();
   }

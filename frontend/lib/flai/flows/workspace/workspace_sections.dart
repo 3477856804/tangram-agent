@@ -16,6 +16,7 @@ import 'package:tangram/ui/pages/tga_group_chat_page.dart';
 import 'package:tangram/ui/pages/tga_knowledge_page.dart';
 import 'package:tangram/ui/pages/tga_mapping_page.dart';
 import 'package:tangram/ui/pages/tga_image_page.dart';
+import 'package:tangram/ui/pages/tga_integrations_page.dart';
 import 'package:tangram/ui/pages/tga_models_page.dart';
 import 'package:tangram/ui/pages/tga_pages_page.dart';
 import 'package:tangram/ui/pages/tga_performance_page.dart';
@@ -259,6 +260,12 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
     icon: Icons.desktop_windows_outlined,
     labelKey: 'sidebar.computer',
     page: const TgaComputerPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.extension_outlined,
+    labelKey: 'sidebar.integration',
+    page: const TgaIntegrationsPage(),
     fullPage: true,
   ),
   NavItem(
