@@ -135,6 +135,7 @@ class UiCustomizationConfig {
     'sidebar.team',
     'sidebar.computer',
     'sidebar.integration',
+    'sidebar.calls',
     'sidebar.accountOps',
     'sidebar.graph',
     'sidebar.mapping',
@@ -174,6 +175,7 @@ class UiCustomizationConfig {
     'sidebar.team': '团队协作',
     'sidebar.computer': '团队电脑',
     'sidebar.integration': '集成接入',
+    'sidebar.calls': '语音通话',
     'sidebar.accountOps': '账号运营',
     'sidebar.graph': '知识图谱',
   };

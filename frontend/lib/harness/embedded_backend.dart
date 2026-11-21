@@ -42,6 +42,7 @@ import 'package:tangram/app_version.dart';
 import 'package:tangram/harness/app_package.dart';
 import 'package:tangram/harness/audit_log.dart';
 import 'package:tangram/harness/builtin_plugins.dart';
+import 'package:tangram/harness/call_service.dart';
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/downloader.dart';
 import 'package:tangram/harness/explanation_level.dart';
@@ -147,6 +148,9 @@ class EmbeddedBackend implements QqShellRunner {
     store.root,
     vault: const FlutterSecretVault(),
   );
+
+  /// 语音通话记录：真实转写落盘。
+  late final CallService calls = CallService(store);
 
   /// 硬件自适应调度：真实探针 + 量化/后端/路由建议 + 队列。
   late final HardwareScheduler hardware = HardwareScheduler();
@@ -309,6 +313,7 @@ class EmbeddedBackend implements QqShellRunner {
     'team_space',
     'computer',
     'integration',
+    'call',
     'compute',
     'workspace_mapping',
     'web_search',
@@ -877,6 +882,7 @@ class EmbeddedBackend implements QqShellRunner {
           _action(payload, 'list'),
           payload,
         ),
+        'call' => await calls.handle(_action(payload, 'list'), payload),
         'compute' => await _onCompute(payload),
         'workspace_mapping' => await _workspaceMapping(payload),
         'web_search' => await _webSearchControl(payload),
@@ -1026,6 +1032,15 @@ class EmbeddedBackend implements QqShellRunner {
       'stdio_supported': false,
       'oauth_supported': false,
       'note': '凭据只存系统安全存储，不进入模型上下文；OAuth 流程未实现。',
+    },
+    'call': <String, dynamic>{
+      'architecture':
+          'device STT -> chat -> Edge TTS, transcript persisted per call',
+      'storage': 'app-private-json',
+      'history_limit': CallStore.maxCalls,
+      'entries_limit': CallStore.maxEntries,
+      'bot_initiated': false,
+      'note': '通话由用户在通话页发起；真实转写落盘，未实现的自动外呼不伪装。',
     },
     'creator': <String, dynamic>{
       'architecture':
@@ -3601,6 +3616,63 @@ class EmbeddedBackend implements QqShellRunner {
             '${r['tested'] == true ? '，连接成功' : '，但连接测试失败：${r['error'] ?? ''}'}',
             data: Map<String, dynamic>.from(item),
           );
+        },
+      ),
+      AgentTool(
+        name: 'call_history',
+        description: '查看真实语音通话记录与逐句转写',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'limit': <String, dynamic>{'type': 'integer'},
+            'query': <String, dynamic>{'type': 'string'},
+            'id': <String, dynamic>{'type': 'string'},
+          },
+        },
+        execute: (args, _) async {
+          final String id = (args['id'] ?? '').toString();
+          if (id.isNotEmpty) {
+            final Map<String, dynamic> r = await calls.handle(
+              'get',
+              <String, dynamic>{'id': id},
+            );
+            if (r['ok'] != true) {
+              return ToolResult.error('${r['error'] ?? '通话不存在'}');
+            }
+            final Map<dynamic, dynamic> call = r['call'] as Map;
+            final StringBuffer buf = StringBuffer(
+              '**${call['bot_name']}** · ${call['status']} · '
+              '${(call['duration_ms'] as num? ?? 0) ~/ 1000} 秒\n',
+            );
+            for (final dynamic e in (call['transcript'] as List? ?? <dynamic>[])) {
+              if (e is! Map) continue;
+              final String who = '${e['speaker']}' == 'user' ? '你' : '对方';
+              buf.writeln('$who：${e['text']}');
+            }
+            return ToolResult.ok(buf.toString(), data: Map<String, dynamic>.from(call));
+          }
+          final Map<String, dynamic> r = await calls.handle('list', <String, dynamic>{
+            'limit': args['limit'] ?? 20,
+            'query': (args['query'] ?? '').toString(),
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '读取通话记录失败'}');
+          }
+          final List<dynamic> list =
+              (r['calls'] as List?) ?? const <dynamic>[];
+          if (list.isEmpty) return ToolResult.ok('还没有语音通话记录。');
+          final StringBuffer buf = StringBuffer('**最近通话**\n');
+          for (final dynamic raw in list) {
+            if (raw is! Map) continue;
+            final int seconds =
+                (raw['duration_ms'] as num? ?? 0).toInt() ~/ 1000;
+            buf.writeln(
+              '- `${raw['id']}` ${raw['bot_name']} · ${raw['status']} · '
+              '$seconds 秒 · ${raw['entry_count']} 句 · ${raw['started_at']}',
+            );
+          }
+          return ToolResult.ok(buf.toString());
         },
       ),
       AgentTool(

@@ -6,6 +6,7 @@ import 'package:tangram/ui/pages/tga_3d_page.dart';
 import 'package:tangram/ui/pages/tga_account_ops_page.dart';
 import 'package:tangram/ui/pages/tga_app_market_page.dart';
 import 'package:tangram/ui/pages/tga_channels_page.dart';
+import 'package:tangram/ui/pages/tga_calls_page.dart';
 import 'package:tangram/ui/pages/tga_cognition_page.dart';
 import 'package:tangram/ui/pages/tga_compute_page.dart';
 import 'package:tangram/ui/pages/tga_computer_page.dart';
@@ -266,6 +267,12 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
     icon: Icons.extension_outlined,
     labelKey: 'sidebar.integration',
     page: const TgaIntegrationsPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.call_outlined,
+    labelKey: 'sidebar.calls',
+    page: const TgaCallsPage(),
     fullPage: true,
   ),
   NavItem(
