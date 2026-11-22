@@ -98,6 +98,9 @@ class TaskScheduler extends ChangeNotifier {
   Timer? _timer;
   bool _running = false;
 
+  /// 进程启动后是否已对 Routine 的残留 running 记录做过崩溃对账。
+  bool _routineReconciled = false;
+
   /// 运行历史（最近 [TaskRetryPolicy.maxRunHistory] 条）。
   /// 元素字段：id / name / attempt / ok / error / ts / outcome；
   /// outcome 取 'success' | 'failure' | 'retry_scheduled'，attempt 为 1 基尝试次数。
@@ -227,6 +230,42 @@ class TaskScheduler extends ChangeNotifier {
         }
       } on Object {
         // Routine 调度失败不影响其它定时能力；下一轮重试。
+      }
+      // Routine 失败重试与崩溃对账：进程启动后先对账一次（残留 running
+      // 记录改为失败并安排重试），再把到点的失败运行逐个重跑；失败会继续
+      // 记 attempts 与下次重试时刻，最多 3 次，绝不静默丢弃。
+      try {
+        if (!_routineReconciled) {
+          _routineReconciled = true;
+          try {
+            await backend.sendControl(
+                'routine', <String, dynamic>{'action': 'reconcile'});
+          } on Object {
+            // 对账失败留待下一轮再试。
+            _routineReconciled = false;
+          }
+        }
+        final env4 = await backend.sendControl(
+            'routine', <String, dynamic>{'action': 'retry_due'});
+        final dynamic rp4 = env4.payload;
+        if (rp4 is Map && rp4['ok'] == true) {
+          final List<dynamic> retries =
+              (rp4['retries'] as List?) ?? const <dynamic>[];
+          for (final dynamic raw in retries) {
+            if (raw is! Map) continue;
+            final String runId = '${raw['id'] ?? ''}';
+            if (runId.isEmpty) continue;
+            // 不阻塞调度循环：resumeRun 会先把记录恢复为 running，
+            // 并发 tick 也不会重复重跑同一条记录。
+            unawaited(backend.sendControl('routine', <String, dynamic>{
+              'action': 'retry',
+              'run_id': runId,
+            }));
+            notifyListeners();
+          }
+        }
+      } on Object {
+        // Routine 重试失败不影响其它定时能力；下一轮重试。
       }
       // 账号运营：发布「approved + 已到点」的定时草稿。
       // 如实说明：Timer 只随 App 进程存活而运行；进程被系统杀死/退到后台
