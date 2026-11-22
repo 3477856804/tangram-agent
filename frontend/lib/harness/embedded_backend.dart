@@ -63,6 +63,7 @@ import 'package:tangram/harness/prompt_kit.dart';
 import 'package:tangram/harness/proot_sandbox.dart';
 import 'package:tangram/harness/qq_sandbox.dart';
 import 'package:tangram/harness/security_policy.dart';
+import 'package:tangram/harness/pages_http_server.dart';
 import 'package:tangram/harness/pages_service.dart';
 import 'package:tangram/harness/routine_service.dart';
 import 'package:tangram/harness/snapshot_service.dart';
@@ -128,6 +129,9 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// Agent 生成的版本化 Pages（看板 / 文档）。
   late final PagesService pages = PagesService(store);
+
+  /// Pages 本地分享服务（127.0.0.1 临时端口，懒创建，用完可停）。
+  PagesHttpServer? _pagesServer;
 
   /// 多时间表 Routine（cron + 时区 + 运行历史）。
   late final RoutineService routines = RoutineService(store);
@@ -551,6 +555,19 @@ class EmbeddedBackend implements QqShellRunner {
           (p['id'] ?? '').toString(),
           version: p['version'] is int ? p['version'] as int : null,
         );
+      case 'serve':
+        // 启动本机分享服务并返回该页面的真实可打开地址；
+        // 仅链接可见页面可分享，私有页面如实拒绝。
+        _pagesServer ??= PagesHttpServer(pages);
+        final Map<String, dynamic> started = await _pagesServer!.start();
+        if (started['ok'] != true) return started;
+        final Map<String, dynamic> shared =
+            await _pagesServer!.shareUrl((p['id'] ?? '').toString());
+        if (shared['ok'] != true) return shared;
+        return <String, dynamic>{...started, ...shared};
+      case 'stop':
+        await _pagesServer?.stop();
+        return <String, dynamic>{'ok': true, 'serving': false};
       default:
         return _err('未知 Pages 动作：$action');
     }
@@ -562,10 +579,13 @@ class EmbeddedBackend implements QqShellRunner {
   final Set<String> _routineRunning = <String>{};
 
   /// Routine 控制域：
-  /// list/get/create/update/delete/toggle/duplicate/validate/history/due/run。
+  /// list/get/create/update/delete/toggle/duplicate/validate/history/due/run/
+  /// reconcile/retry_due/retry。
   ///
   /// 真实语义：`next_run_at` 由 RoutineStore 按 cron + 时区计算；`run` 真正
-  /// 调用内置 chat 并把结果写回运行历史；`due` 只返回已到点的启用项。
+  /// 调用内置 chat 并把结果写回运行历史；`due` 只返回已到点的启用项；
+  /// 失败的运行由 `retry_due`/`retry` 按退避重跑（最多 3 次），
+  /// `reconcile` 把进程被杀残留的 running 记录改为失败并安排重试。
   Future<Map<String, dynamic>> _routine(Map<String, dynamic> p) async {
     final String action = _action(p, 'list');
     final String id = (p['id'] ?? '').toString().trim();
@@ -660,6 +680,15 @@ class EmbeddedBackend implements QqShellRunner {
           scheduled: p['scheduled'] == true,
           now: _parseTime(p['now']),
         );
+      case 'reconcile':
+        return routines.reconcileStaleRuns(now: _parseTime(p['now']));
+      case 'retry_due':
+        return routines.dueRetries(now: _parseTime(p['now']));
+      case 'retry':
+        return _retryRoutine(
+          (p['run_id'] ?? '').toString(),
+          now: _parseTime(p['now']),
+        );
       default:
         return _err('未知 routine 动作：$action');
     }
@@ -705,44 +734,110 @@ class EmbeddedBackend implements QqShellRunner {
       if (started['ok'] != true) return started;
       final Map<dynamic, dynamic> run = started['run'] as Map;
       final Map<dynamic, dynamic> routine = started['routine'] as Map;
-      final String name = '${routine['name'] ?? 'Routine'}';
-      final String prompt = '${routine['prompt'] ?? ''}';
-      final String text =
-          '【定时例程 · $name】\n$prompt\n\n请执行这项例程，并把结果如实汇报。';
-      String reply = '';
-      String error = '';
-      bool ok = false;
-      try {
-        final Map<String, dynamic> r = await _chat(<String, dynamic>{
-          'text': text,
-          'session_id': 'routine:$id',
-        });
-        ok = r['ok'] == true;
-        reply = '${r['reply'] ?? r['text'] ?? ''}'.trim();
-        if (!ok) error = '${r['error'] ?? 'ok=false'}';
-      } on Object catch (e) {
-        error = '$e';
-      }
-      final String runId = '${run['id'] ?? ''}';
-      if (runId.isNotEmpty) {
-        await routines.finishRun(
-          runId,
-          ok: ok,
-          result: reply,
-          error: error,
-          now: now,
-        );
-      }
-      return <String, dynamic>{
-        'ok': ok,
-        'run_id': runId,
-        'routine': routine,
-        'result': reply.length > 500 ? '${reply.substring(0, 500)}…' : reply,
-        'error': error,
-      };
+      // 必须 await：不 await 就直接返回 Future，finally 会立刻把 id 从
+      // _routineRunning 里摘掉，chat 还在跑时就可能被并发重跑。
+      return await _executeRoutineRun(
+        id: id,
+        runId: '${run['id'] ?? ''}',
+        routine: routine,
+        now: now,
+      );
     } finally {
       _routineRunning.remove(id);
     }
+  }
+
+  /// 重跑一条失败的运行：恢复记录为 running 后再次调用 chat，
+  /// 成功则结束，失败则继续记 attempts 与下次重试时刻。
+  /// Routine 已停用时跳过重跑并把记录标记为 skipped，不再重试。
+  Future<Map<String, dynamic>> _retryRoutine(
+    String runId, {
+    DateTime? now,
+  }) async {
+    if (runId.isEmpty) return _err('缺少运行记录 id');
+    final Map<String, dynamic> got = await routines.getRun(runId);
+    if (got['ok'] != true) return got;
+    final Map<dynamic, dynamic> run = got['run'] as Map;
+    final String routineId = '${run['routine_id'] ?? ''}';
+    if (routineId.isEmpty) return _err('运行记录缺少 Routine id');
+    if (_routineRunning.contains(routineId)) {
+      return <String, dynamic>{
+        'ok': true,
+        'skipped': true,
+        'reason': 'Routine 正在运行中',
+      };
+    }
+    final Map<String, dynamic> detail = await routines.get(routineId);
+    if (detail['ok'] != true) return detail;
+    final Map<dynamic, dynamic> routine = detail['routine'] as Map;
+    if (routine['active'] != true) {
+      await routines.skipRun(runId, now: now);
+      return <String, dynamic>{
+        'ok': true,
+        'skipped': true,
+        'reason': 'Routine 已停用，不再重跑',
+      };
+    }
+    _routineRunning.add(routineId);
+    try {
+      final Map<String, dynamic> resumed =
+          await routines.resumeRun(runId, now: now);
+      if (resumed['ok'] != true) return resumed;
+      // 必须 await：理由同 _runRoutine，finally 必须等 chat 跑完才摘 guard。
+      return await _executeRoutineRun(
+        id: routineId,
+        runId: runId,
+        routine: routine,
+        now: now,
+      );
+    } finally {
+      _routineRunning.remove(routineId);
+    }
+  }
+
+  /// 一次 Routine 执行的 chat 部分（首跑与重跑共用）：
+  /// 调用 chat，把结果写入运行记录；失败时 finishRun 会记 attempts 与
+  /// 下次重试时刻，成功则清掉重试安排。
+  Future<Map<String, dynamic>> _executeRoutineRun({
+    required String id,
+    required String runId,
+    required Map<dynamic, dynamic> routine,
+    DateTime? now,
+  }) async {
+    final String name = '${routine['name'] ?? 'Routine'}';
+    final String prompt = '${routine['prompt'] ?? ''}';
+    final String text =
+        '【定时例程 · $name】\n$prompt\n\n请执行这项例程，并把结果如实汇报。';
+    String reply = '';
+    String error = '';
+    bool ok = false;
+    try {
+      final Map<String, dynamic> r = await _chat(<String, dynamic>{
+        'text': text,
+        'session_id': 'routine:$id',
+      });
+      ok = r['ok'] == true;
+      reply = '${r['reply'] ?? r['text'] ?? ''}'.trim();
+      if (!ok) error = '${r['error'] ?? 'ok=false'}';
+    } on Object catch (e) {
+      error = '$e';
+    }
+    if (runId.isNotEmpty) {
+      await routines.finishRun(
+        runId,
+        ok: ok,
+        result: reply,
+        error: error,
+        now: now,
+      );
+    }
+    return <String, dynamic>{
+      'ok': ok,
+      'run_id': runId,
+      'routine': routine,
+      'result': reply.length > 500 ? '${reply.substring(0, 500)}…' : reply,
+      'error': error,
+    };
   }
 
   /// 旧版 `schedules.json`（每日 HH:mm / every:N）一次性迁移为 Routine。
