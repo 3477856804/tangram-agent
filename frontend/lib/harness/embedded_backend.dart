@@ -4664,8 +4664,10 @@ class EmbeddedBackend implements QqShellRunner {
     return _ok(<String, dynamic>{
       'name': name,
       'format': format,
+      // 统计按原始网格（真实尺寸/单位）；渲染顶点归一化到单位盒，
+      // 否则偏离原点的导入模型在画布上会缩成一点或偏出画面。
       'stats': stats.toJson(),
-      'mesh': mesh.toJson(),
+      'mesh': mesh.normalized().toJson(),
       if (path.isNotEmpty) 'path': path,
       if (note.isNotEmpty) 'note': note,
     });
@@ -4746,7 +4748,7 @@ class EmbeddedBackend implements QqShellRunner {
     });
   }
 
-  /// 导出当前网格为 OBJ 或二进制 STL（真实写盘，返回字节数与路径）。
+  /// 导出当前网格为 OBJ、二进制 STL 或 ASCII PLY（真实写盘，返回字节数与路径）。
   Future<Map<String, dynamic>> _model3dExport(Map<String, dynamic> p) async {
     final Mesh3D? mesh = _mesh3d;
     if (mesh == null) return _err('还没有载入模型；先生成或导入一个模型');
@@ -4765,11 +4767,18 @@ class EmbeddedBackend implements QqShellRunner {
     } else if (format == 'stl') {
       out = File('${dir.path}/$safe.stl');
       await out.writeAsBytes(mesh.toStlBinary(name: safe), flush: true);
+    } else if (format == 'stl_ascii') {
+      out = File('${dir.path}/$safe.stl');
+      await out.writeAsString(mesh.toStlAscii(name: safe), flush: true);
+    } else if (format == 'ply') {
+      out = File('${dir.path}/$safe.ply');
+      await out.writeAsString(mesh.toPly(name: safe), flush: true);
     } else {
-      return _err('不支持的导出格式：$format（支持 obj / stl）');
+      return _err('不支持的导出格式：$format（支持 obj / stl / stl_ascii / ply）');
     }
     return _ok(<String, dynamic>{
       'format': format,
+      'ext': format == 'stl_ascii' ? 'stl' : format,
       'path': out.path,
       'bytes': out.lengthSync(),
       'name': safe,
