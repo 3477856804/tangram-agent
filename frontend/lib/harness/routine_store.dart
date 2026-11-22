@@ -13,6 +13,11 @@
 ///
 /// 本批次只实现「时间表触发 + 手动触发」；webhook / 邮件 / GitHub / 变更
 /// 触发字段保留在记录里，但未接通前不允许作为唯一触发条件，避免假能力。
+///
+/// 失败重试与崩溃对账（对照 Rakazo 的运行模型）：一次运行失败后记录保留
+/// attempts 与 nextAttemptAt，由调度器到点重跑，最多 3 次；进程被杀时
+/// 残留的 running 记录在下次启动时由 reconcileStaleRuns 改为失败并安排
+/// 重试，绝不静默丢弃。
 
 import 'dart:async';
 import 'dart:convert';
@@ -25,6 +30,12 @@ import 'routine_schedule.dart';
 const int routineNameMaxLength = 80;
 
 /// 一次 Routine 运行记录。
+///
+/// 失败重试（对照 Rakazo 的运行模型「先执行、失败则由持久化备份任务兜底」）：
+/// 一次运行失败后不会静默消失——记录保留 `attempts`（已失败次数）与
+/// `nextAttemptAt`（下次重试时刻，指数退避 60s / 300s / 900s，最多 3 次），
+/// 调度器到点重跑；进程被杀时残留的 `running` 记录由
+/// `reconcileStaleRuns` 在下次启动时改为失败并安排重试，而不是丢弃。
 class RoutineRunRecord {
   const RoutineRunRecord({
     required this.id,
@@ -37,6 +48,8 @@ class RoutineRunRecord {
     this.lateSince,
     this.error = '',
     this.result = '',
+    this.attempts = 0,
+    this.nextAttemptAt,
   });
 
   final String id;
@@ -49,6 +62,19 @@ class RoutineRunRecord {
   final DateTime? lateSince;
   final String error;
   final String result;
+
+  /// 已失败次数（成功为 0）。达到 [RoutineStore.maxRetries] 后不再重试。
+  final int attempts;
+
+  /// 下次重试时刻；为 null 表示不重试（成功、或已达最大重试次数）。
+  final DateTime? nextAttemptAt;
+
+  /// 失败后是否还应重试（attempts 记失败次数：首跑失败为 1，
+  /// 第 3 次重试失败为 4，此时不再重试）。
+  bool get retryDue =>
+      status == 'failure' &&
+      attempts <= RoutineStore.maxRetries &&
+      nextAttemptAt != null;
 
   int? get durationMs => startedAt == null || completedAt == null
       ? null
@@ -65,6 +91,8 @@ class RoutineRunRecord {
     'late_since': lateSince?.toIso8601String(),
     'error': error,
     'result': result,
+    'attempts': attempts,
+    'next_attempt_at': nextAttemptAt?.toIso8601String(),
   };
 
   static RoutineRunRecord? tryParse(Map<String, dynamic> raw) {
@@ -94,6 +122,11 @@ class RoutineRunRecord {
       lateSince: DateTime.tryParse('${raw['late_since']}'),
       error: (raw['error'] ?? '').toString(),
       result: (raw['result'] ?? '').toString(),
+      // 旧记录没有这两个字段时默认 0 / null，不影响历史读取。
+      attempts: raw['attempts'] is num
+          ? (raw['attempts'] as num).toInt()
+          : int.tryParse('${raw['attempts']}') ?? 0,
+      nextAttemptAt: DateTime.tryParse('${raw['next_attempt_at']}'),
     );
   }
 }
@@ -284,6 +317,20 @@ class RoutineStore {
 
   /// 全局最多保留的运行记录条数。
   static const int maxRuns = 500;
+
+  /// 失败重试的最大次数（与 TaskRetryPolicy 的 3 次一致）。
+  static const int maxRetries = 3;
+
+  /// 第 1/2/3 次失败后的等待秒数（与 TaskRetryPolicy.backoffSeconds 一致，
+  /// 此处单独定义以免 harness 层反向依赖 services 层造成循环引用）。
+  static const List<int> retryBackoffSeconds = <int>[60, 300, 900];
+
+  /// 第 [attempts] 次失败（从 1 开始）后的下次重试时刻；
+  /// attempts 已达上限时返回 null，表示不再重试。
+  static DateTime? nextRetryAt(int attempts, DateTime now) {
+    if (attempts < 1 || attempts > retryBackoffSeconds.length) return null;
+    return now.add(Duration(seconds: retryBackoffSeconds[attempts - 1]));
+  }
 
   Future<void> _tail = Future<void>.value();
 
@@ -784,6 +831,9 @@ class RoutineStore {
   }
 
   /// 结束一次运行：写 success / failure 与结果摘要。
+  ///
+  /// 失败时如实记 attempts + 1，并按退避安排下次重试（最多 [maxRetries]
+  /// 次）；成功或已达上限时 nextAttemptAt 为 null，不再重试。
   Future<Map<String, dynamic>> finishRun(
     String runId, {
     required bool ok,
@@ -798,6 +848,10 @@ class RoutineStore {
       if (index < 0) return _err('运行记录不存在：$runId');
       final RoutineRunRecord current = runs[index];
       final DateTime finished = (now ?? DateTime.now()).toUtc();
+      final int attempts = ok ? current.attempts : current.attempts + 1;
+      final DateTime? nextAttemptAt = ok
+          ? null
+          : nextRetryAt(attempts, finished);
       final RoutineRunRecord updated = RoutineRunRecord(
         id: current.id,
         routineId: current.routineId,
@@ -809,11 +863,159 @@ class RoutineStore {
         lateSince: current.lateSince,
         error: error.length > 1000 ? '${error.substring(0, 1000)}…' : error,
         result: result.length > 2000 ? '${result.substring(0, 2000)}…' : result,
+        attempts: attempts,
+        nextAttemptAt: nextAttemptAt,
       );
       runs[index] = updated;
       await _writeRuns(runs);
       return <String, dynamic>{'ok': true, 'run': updated.toJson()};
     }).catchError((Object e) => _err('记录运行结果失败：$e'));
+  }
+
+  /// 取一条运行记录。
+  Future<Map<String, dynamic>> getRun(String runId) async {
+    final List<RoutineRunRecord> runs = await _readRuns();
+    final List<RoutineRunRecord> found =
+        runs.where((RoutineRunRecord r) => r.id == runId).toList();
+    if (found.isEmpty) return _err('运行记录不存在：$runId');
+    return <String, dynamic>{'ok': true, 'run': found.first.toJson()};
+  }
+
+  /// 把一条失败运行恢复为 running，准备重跑。
+  ///
+  /// 仅接受 status == 'failure' 且未达最大重试次数的记录；重跑本身不推进
+  /// next_run（首跑时已推进），只更新开始时间并清空上次错误。
+  Future<Map<String, dynamic>> resumeRun(
+    String runId, {
+    DateTime? now,
+  }) async {
+    return _guard(() async {
+      final List<RoutineRunRecord> runs = await _readRuns();
+      final int index =
+          runs.indexWhere((RoutineRunRecord r) => r.id == runId);
+      if (index < 0) return _err('运行记录不存在：$runId');
+      final RoutineRunRecord current = runs[index];
+      if (current.status != 'failure') {
+        return _err('该运行不可重跑（状态：${current.status}）');
+      }
+      if (current.attempts > maxRetries) {
+        return _err('该运行已达最大重试次数，不再重跑');
+      }
+      final DateTime started = (now ?? DateTime.now()).toUtc();
+      final RoutineRunRecord updated = RoutineRunRecord(
+        id: current.id,
+        routineId: current.routineId,
+        trigger: current.trigger,
+        status: 'running',
+        createdAt: current.createdAt,
+        startedAt: started,
+        completedAt: null,
+        lateSince: current.lateSince,
+        error: '',
+        result: current.result,
+        attempts: current.attempts,
+        nextAttemptAt: null,
+      );
+      runs[index] = updated;
+      await _writeRuns(runs);
+      return <String, dynamic>{'ok': true, 'run': updated.toJson()};
+    }).catchError((Object e) => _err('恢复运行失败：$e'));
+  }
+
+  /// 把一条失败运行标记为跳过（Routine 已停用等原因，不再重跑）。
+  Future<Map<String, dynamic>> skipRun(
+    String runId, {
+    DateTime? now,
+  }) async {
+    return _guard(() async {
+      final List<RoutineRunRecord> runs = await _readRuns();
+      final int index =
+          runs.indexWhere((RoutineRunRecord r) => r.id == runId);
+      if (index < 0) return _err('运行记录不存在：$runId');
+      final RoutineRunRecord current = runs[index];
+      if (current.status != 'failure') {
+        return _err('该运行不可跳过（状态：${current.status}）');
+      }
+      final RoutineRunRecord updated = RoutineRunRecord(
+        id: current.id,
+        routineId: current.routineId,
+        trigger: current.trigger,
+        status: 'skipped',
+        createdAt: current.createdAt,
+        startedAt: current.startedAt,
+        completedAt: (now ?? DateTime.now()).toUtc(),
+        lateSince: current.lateSince,
+        error: current.error,
+        result: current.result,
+        attempts: current.attempts,
+        nextAttemptAt: null,
+      );
+      runs[index] = updated;
+      await _writeRuns(runs);
+      return <String, dynamic>{'ok': true, 'run': updated.toJson()};
+    }).catchError((Object e) => _err('跳过运行失败：$e'));
+  }
+
+  /// 已到重试时刻的失败运行（最早到期的在前），供调度器重跑。
+  Future<Map<String, dynamic>> dueRetries({
+    DateTime? now,
+    int limit = 10,
+  }) async {
+    try {
+      final DateTime at = (now ?? DateTime.now()).toUtc();
+      final List<RoutineRunRecord> due = (await _readRuns())
+          .where((RoutineRunRecord r) =>
+              r.status == 'failure' &&
+              r.attempts <= maxRetries &&
+              r.nextAttemptAt != null &&
+              !r.nextAttemptAt!.isAfter(at))
+          .toList()
+        ..sort((RoutineRunRecord a, RoutineRunRecord b) =>
+            a.nextAttemptAt!.compareTo(b.nextAttemptAt!));
+      final List<RoutineRunRecord> capped =
+          due.length <= limit ? due : due.sublist(0, limit);
+      return <String, dynamic>{
+        'ok': true,
+        'retries': capped.map((RoutineRunRecord r) => r.toJson()).toList(),
+      };
+    } on Object catch (e) {
+      return _err('读取待重试运行失败：$e');
+    }
+  }
+
+  /// 崩溃对账：进程被杀时残留的 `running` 记录，在下次启动时改为失败
+  /// 并安排重试（而不是丢弃）；已达最大重试次数的则不再安排。
+  /// 返回本次对账的条数。进程启动后调用一次即可。
+  Future<Map<String, dynamic>> reconcileStaleRuns({
+    DateTime? now,
+  }) async {
+    return _guard(() async {
+      final DateTime at = (now ?? DateTime.now()).toUtc();
+      final List<RoutineRunRecord> runs = await _readRuns();
+      int reconciled = 0;
+      for (int i = 0; i < runs.length; i++) {
+        final RoutineRunRecord r = runs[i];
+        if (r.status != 'running') continue;
+        final int attempts = r.attempts + 1;
+        runs[i] = RoutineRunRecord(
+          id: r.id,
+          routineId: r.routineId,
+          trigger: r.trigger,
+          status: 'failure',
+          createdAt: r.createdAt,
+          startedAt: r.startedAt,
+          completedAt: at,
+          lateSince: r.lateSince,
+          error: '上次运行被进程中断，未完成',
+          result: r.result,
+          attempts: attempts,
+          nextAttemptAt: nextRetryAt(attempts, at),
+        );
+        reconciled++;
+      }
+      if (reconciled > 0) await _writeRuns(runs);
+      return <String, dynamic>{'ok': true, 'reconciled': reconciled};
+    }).catchError((Object e) => _err('对账残留运行失败：$e'));
   }
 
   /// 运行历史，按时间倒序；`before` 为上一页最后一条的 `{created_at,id}`。
