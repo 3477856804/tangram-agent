@@ -182,7 +182,7 @@ class _Tga3DPageState extends State<Tga3DPage> {
       setState(() => _busy = false);
       if (r['ok'] == true) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('已导出 ${r['name']}.$format'
+          content: Text('已导出 ${r['name']}.${r['ext'] ?? format}'
               '（${r['bytes']} 字节）\n${r['path']}'),
         ));
       } else {
@@ -374,6 +374,24 @@ class _Tga3DPageState extends State<Tga3DPage> {
                   subtitle: '50 字节/面，保留法向，通用 3D 打印格式',
                   onTap: _busy ? () {} : () => _export('stl'),
                 ),
+                const TgaTileDivider(),
+                TgaIconTile(
+                  icon: Icons.description_outlined,
+                  iconBg: Tga.iconBlueBg,
+                  iconColor: Tga.iconBlue,
+                  title: '导出 ASCII STL',
+                  subtitle: '可读文本格式，可直接给文本工具或旧版切片软件',
+                  onTap: _busy ? () {} : () => _export('stl_ascii'),
+                ),
+                const TgaTileDivider(),
+                TgaIconTile(
+                  icon: Icons.grid_on_rounded,
+                  iconBg: Tga.iconGoldBg,
+                  iconColor: Tga.iconGold,
+                  title: '导出 ASCII PLY',
+                  subtitle: '点云工具通用格式，与 PLY 导入往返一致',
+                  onTap: _busy ? () {} : () => _export('ply'),
+                ),
               ],
             ),
           ),
@@ -382,7 +400,8 @@ class _Tga3DPageState extends State<Tga3DPage> {
             padding: const EdgeInsets.symmetric(horizontal: 4),
             child: Text(
               '拖拽旋转、双指缩放；「导入」支持 OBJ / STL（ASCII+二进制）/ '
-              'PLY（ASCII）。所有数值由网格真算，导出文件真实写进沙箱目录。',
+              'PLY（ASCII+二进制）；「导出」支持 OBJ / 二进制 STL / ASCII STL / '
+              'ASCII PLY。所有数值由网格真算，导出文件真实写进沙箱目录。',
               style: Tga.caption,
             ),
           ),
