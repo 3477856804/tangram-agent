@@ -3,9 +3,10 @@
 /// 纯 Dart 仓储层，不依赖 Flutter / path_provider，便于独立回归测试。
 /// 移植自 Rakazo `packages/core` + `apps/api/src/content/pages.ts` 的产品语义：
 /// 一个 Page 有标题、当前版本、置顶、私有 / 链接可见三种状态，每次保存都
-/// 追加一个新版本而不是覆盖历史。TGA 是端侧运行时，没有 Rakazo 的 Web
-/// 服务，因此「链接可见」只作为元数据保留，真实分享走导出 HTML 文件 +
-/// 系统分享面板，绝不再造一个打不开的假 URL。
+/// 追加一个新版本而不是覆盖历史。TGA 是端侧运行时，没有 Rakazo 的公网
+/// 服务，因此「链接可见」页面的真实分享由 `PagesHttpServer` 在本机回环
+/// 地址（127.0.0.1 临时端口）上提供一个真实可打开的 URL，绝不伪造公网地址；
+/// 不开服务时仍可走导出 HTML 文件 + 系统分享面板。
 ///
 /// 真实性约束：
 ///  * 版本文件真实落盘到 `pages/<id>/v<n>.html`，临时文件 + 原子改名；
@@ -17,8 +18,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-/// 页面可见性。`link` 表示允许持有分享令牌的人查看；端侧没有服务端，
-/// 该状态只影响 UI 提示与后续同步，不会伪造公网地址。
+/// 页面可见性。`link` 表示允许持有分享令牌的人查看；端侧没有公网服务，
+/// 该状态由 `PagesHttpServer` 在本机回环地址上兑现为真实可打开的 URL，
+/// 绝不伪造公网地址；未开服务时只影响 UI 提示与后续同步。
 enum PageVisibility { private, link }
 
 class TgaPageRecord {
