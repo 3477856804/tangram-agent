@@ -1,8 +1,11 @@
 /// 本机全局搜索：在真实落盘的数据里找对话、页面、知识库、通话、Routine、
-/// 工作流与集成。
+/// 工作流与集成，并读产物文件（work/ 与 Team Computer 的 computer/homes/）
+/// 的真实内容。
 ///
-/// 全部按关键字大小写不敏感匹配，返回命中片段与来源引用；不调用网络、
-/// 不生成示例结果。搜索只读文件，不修改任何数据。
+/// 多词查询按词频打分：每词命中次数累加，标题/文件名命中加权，全部词都
+/// 命中时额外加分；单字查询与原来完全一致。只读文件，不修改任何数据；
+/// 超大文件、二进制文件、浏览器配置与凭据类文件（cookie/secret/token）
+/// 一律跳过，不读不搜。
 library;
 
 import 'dart:convert';
@@ -15,6 +18,10 @@ class LocalSearchService {
 
   static const int maxResults = 100;
   static const int maxScanRecords = 20000;
+
+  /// 产物文件内容搜索：单次最多扫描的文件数与单个文件上限。
+  static const int maxScanFiles = 200;
+  static const int maxFileBytes = 64 * 1024;
 
   Future<Map<String, dynamic>> handle(
     String action,
@@ -32,6 +39,12 @@ class LocalSearchService {
       return <String, dynamic>{'ok': false, 'error': '搜索关键字不能为空'};
     }
     final String q = query.toLowerCase();
+    // 多词查询拆词去重；单字查询 terms == [q]，打分与原来完全一致。
+    final List<String> terms = q
+        .split(RegExp(r'\s+'))
+        .where((String s) => s.isNotEmpty)
+        .toSet()
+        .toList();
     final int limit = (p['limit'] is num)
         ? (p['limit'] as num).toInt().clamp(1, maxResults)
         : 50;
@@ -50,13 +63,14 @@ class LocalSearchService {
       }
     }
 
-    await addAll(_searchTurns(q));
-    await addAll(_searchPages(q));
-    await addAll(_searchKnowledge(q));
-    await addAll(_searchCalls(q));
-    await addAll(_searchRoutines(q));
-    await addAll(_searchWorkflows(q));
-    await addAll(_searchIntegrations(q));
+    await addAll(_searchTurns(terms));
+    await addAll(_searchPages(terms));
+    await addAll(_searchKnowledge(terms));
+    await addAll(_searchCalls(terms));
+    await addAll(_searchRoutines(terms));
+    await addAll(_searchWorkflows(terms));
+    await addAll(_searchIntegrations(terms));
+    await addAll(_searchFiles(terms));
 
     results.sort((Map<String, dynamic> a, Map<String, dynamic> b) {
       final int score = (b['score'] as int).compareTo(a['score'] as int);
@@ -82,18 +96,18 @@ class LocalSearchService {
 
   // ---- 各数据源 ----
 
-  Future<List<Map<String, dynamic>>> _searchTurns(String q) async {
+  Future<List<Map<String, dynamic>>> _searchTurns(List<String> terms) async {
     final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
     final List<Map<String, dynamic>> turns = await _readRecords('turns.json', 'turns');
     for (final Map<String, dynamic> t in turns) {
       final String text = '${t['text'] ?? ''}';
-      final int score = _score(text, q);
+      final int score = _score(text, terms);
       if (score == 0) continue;
       final bool user = '${t['role']}' == 'user';
       out.add(<String, dynamic>{
         'type': 'chat',
         'title': user ? '你说' : '助手回复',
-        'snippet': _snippet(text, q),
+        'snippet': _snippet(text, terms),
         'content': _clip(text, 3000),
         'ref': '${t['session_id'] ?? ''}',
         'ts': _ts(t['ts']),
@@ -104,7 +118,7 @@ class LocalSearchService {
     return out;
   }
 
-  Future<List<Map<String, dynamic>>> _searchPages(String q) async {
+  Future<List<Map<String, dynamic>>> _searchPages(List<String> terms) async {
     final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
     final List<Map<String, dynamic>> pages =
         await _readRecords('pages.json', 'pages');
@@ -126,12 +140,12 @@ class LocalSearchService {
           }
         }
       }
-      final int score = _score(title, q) * 3 + _score(content, q);
+      final int score = _score(title, terms) * 3 + _score(content, terms);
       if (score == 0) continue;
       out.add(<String, dynamic>{
         'type': 'page',
         'title': title,
-        'snippet': _snippet(content.isEmpty ? title : content, q),
+        'snippet': _snippet(content.isEmpty ? title : content, terms),
         'content': _clip(content, 3000),
         'ref': id,
         'ts': '${p['updated_at'] ?? ''}',
@@ -141,7 +155,7 @@ class LocalSearchService {
     return out;
   }
 
-  Future<List<Map<String, dynamic>>> _searchKnowledge(String q) async {
+  Future<List<Map<String, dynamic>>> _searchKnowledge(List<String> terms) async {
     final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
     final File f = File('${_root.path}/knowledge_base.json');
     if (!await f.exists()) return out;
@@ -166,14 +180,14 @@ class LocalSearchService {
         in (data['chunks'] is List ? data['chunks'] as List : <dynamic>[])) {
       if (raw is! Map) continue;
       final String text = '${raw['text'] ?? ''}';
-      final int score = _score(text, q);
+      final int score = _score(text, terms);
       if (score == 0) continue;
       final String docId = '${raw['document_id'] ?? ''}';
       if (docId.isEmpty) continue;
       final Map<String, dynamic> hit = <String, dynamic>{
         'type': 'knowledge',
         'title': titles[docId] ?? '知识库文档',
-        'snippet': _snippet(text, q),
+        'snippet': _snippet(text, terms),
         'content': _clip(text, 3000),
         'ref': docId,
         'ts': '',
@@ -188,7 +202,7 @@ class LocalSearchService {
     return out;
   }
 
-  Future<List<Map<String, dynamic>>> _searchCalls(String q) async {
+  Future<List<Map<String, dynamic>>> _searchCalls(List<String> terms) async {
     final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
     final List<Map<String, dynamic>> calls =
         await _readRecords('calls.json', 'calls');
@@ -199,12 +213,12 @@ class LocalSearchService {
           if (e is Map) text.writeln(e['text'] ?? '');
         }
       }
-      final int score = _score(text.toString(), q);
+      final int score = _score(text.toString(), terms);
       if (score == 0) continue;
       out.add(<String, dynamic>{
         'type': 'call',
         'title': '${c['bot_name'] ?? '通话'}',
-        'snippet': _snippet(text.toString(), q),
+        'snippet': _snippet(text.toString(), terms),
         'content': _clip(text.toString(), 3000),
         'ref': '${c['id'] ?? ''}',
         'ts': '${c['started_at'] ?? ''}',
@@ -214,18 +228,18 @@ class LocalSearchService {
     return out;
   }
 
-  Future<List<Map<String, dynamic>>> _searchRoutines(String q) async {
+  Future<List<Map<String, dynamic>>> _searchRoutines(List<String> terms) async {
     final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
     final List<Map<String, dynamic>> routines =
         await _readRecords('routines/routines.json', 'routines');
     for (final Map<String, dynamic> r in routines) {
       final int score =
-          _score('${r['name'] ?? ''}', q) * 2 + _score('${r['prompt'] ?? ''}', q);
+          _score('${r['name'] ?? ''}', terms) * 2 + _score('${r['prompt'] ?? ''}', terms);
       if (score == 0) continue;
       out.add(<String, dynamic>{
         'type': 'routine',
         'title': '${r['name'] ?? 'Routine'}',
-        'snippet': _snippet('${r['prompt'] ?? ''}', q),
+        'snippet': _snippet('${r['prompt'] ?? ''}', terms),
         'content': _clip(
           '${r['prompt'] ?? ''}\n时区：${r['timezone'] ?? ''}',
           3000,
@@ -238,7 +252,7 @@ class LocalSearchService {
     return out;
   }
 
-  Future<List<Map<String, dynamic>>> _searchWorkflows(String q) async {
+  Future<List<Map<String, dynamic>>> _searchWorkflows(List<String> terms) async {
     final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
     final List<Map<String, dynamic>> flows =
         await _readRecords('workflows.json', 'workflows');
@@ -250,12 +264,12 @@ class LocalSearchService {
           if (s is Map) text.writeln(s['prompt'] ?? s['command'] ?? '');
         }
       }
-      final int score = _score(text.toString(), q);
+      final int score = _score(text.toString(), terms);
       if (score == 0) continue;
       out.add(<String, dynamic>{
         'type': 'workflow',
         'title': '${f['name'] ?? '工作流'}',
-        'snippet': _snippet(text.toString(), q),
+        'snippet': _snippet(text.toString(), terms),
         'content': _clip(text.toString(), 3000),
         'ref': '${f['id'] ?? ''}',
         'ts': '${f['updated_at'] ?? ''}',
@@ -265,13 +279,13 @@ class LocalSearchService {
     return out;
   }
 
-  Future<List<Map<String, dynamic>>> _searchIntegrations(String q) async {
+  Future<List<Map<String, dynamic>>> _searchIntegrations(List<String> terms) async {
     final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
     final List<Map<String, dynamic>> items =
         await _readRecords('integrations.json', 'integrations');
     for (final Map<String, dynamic> i in items) {
       final int score =
-          _score('${i['name'] ?? ''}', q) * 2 + _score('${i['url'] ?? ''}', q);
+          _score('${i['name'] ?? ''}', terms) * 2 + _score('${i['url'] ?? ''}', terms);
       if (score == 0) continue;
       out.add(<String, dynamic>{
         'type': 'integration',
@@ -282,6 +296,92 @@ class LocalSearchService {
         'ts': '${i['updated_at'] ?? ''}',
         'score': score,
       });
+    }
+    return out;
+  }
+
+  /// 产物文件内容搜索：读 work/ 与 computer/homes/ 下文本文件的真实内容。
+  ///
+  /// pages/ 的内容已由 _searchPages（读当前版本 HTML）覆盖，这里不再重复
+  /// 扫，避免同一内容出现两次。只读、不改；超大、二进制、浏览器配置与
+  /// 凭据类文件一律跳过。
+  Future<List<Map<String, dynamic>>> _searchFiles(
+    List<String> terms,
+  ) async {
+    final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
+    const List<String> roots = <String>['work', 'computer/homes'];
+    const Set<String> exts = <String>{
+      '.md',
+      '.txt',
+      '.html',
+      '.json',
+      '.jsonl',
+      '.csv',
+      '.log',
+    };
+    // 文件名里带这些词的一律不读（凭据 / 会话数据，不应出现在搜索结果里）。
+    const List<String> blockedNameParts = <String>[
+      'cookie',
+      'secret',
+      'token',
+      'credential',
+      'password',
+    ];
+    final String prefix =
+        _root.path.endsWith('/') ? _root.path : '${_root.path}/';
+    int scannedFiles = 0;
+    for (final String root in roots) {
+      if (scannedFiles >= maxScanFiles) break;
+      final Directory dir = Directory('$prefix$root');
+      if (!await dir.exists()) continue;
+      await for (final FileSystemEntity e
+          in dir.list(recursive: true, followLinks: false)) {
+        if (scannedFiles >= maxScanFiles) break;
+        if (e is! File) continue;
+        final String rel = e.path.startsWith(prefix)
+            ? e.path.substring(prefix.length)
+            : e.path;
+        if (rel.contains('..')) continue;
+        final String lowerRel = rel.toLowerCase();
+        if (lowerRel.contains('/browser/') ||
+            lowerRel.contains('browser-profile')) {
+          continue;
+        }
+        final String fileName =
+            e.uri.pathSegments.isEmpty ? '' : e.uri.pathSegments.last;
+        final String lowerName = fileName.toLowerCase();
+        if (blockedNameParts.any(lowerName.contains)) continue;
+        final int dot = lowerName.lastIndexOf('.');
+        final String ext = dot < 0 ? '' : lowerName.substring(dot);
+        if (!exts.contains(ext)) continue;
+        int size;
+        try {
+          size = await e.length();
+        } on Object {
+          continue;
+        }
+        if (size > maxFileBytes) continue;
+        String content;
+        try {
+          content = await e.readAsString();
+        } on Object {
+          // 二进制 / 无法解码 → 跳过，不伪造内容。
+          continue;
+        }
+        scannedFiles++;
+        final String plain = ext == '.html' ? _stripHtml(content) : content;
+        final int score = _score(fileName, terms) * 3 + _score(plain, terms);
+        if (score == 0) continue;
+        out.add(<String, dynamic>{
+          'type': 'file',
+          'title': fileName,
+          'snippet': _snippet(plain.isEmpty ? fileName : plain, terms),
+          'content': _clip(plain, 3000),
+          'ref': rel.replaceAll('\\', '/'),
+          'ts': '',
+          'score': score,
+        });
+      }
     }
     return out;
   }
@@ -313,28 +413,48 @@ class LocalSearchService {
     }
   }
 
-  static int _score(String text, String q) {
-    if (text.isEmpty) return 0;
+  /// 词频打分：每词命中次数累加（每词最多计 10 次），全部词都命中时
+  /// 额外 +5；单字查询与原来的子串计数完全一致。
+  static int _score(String text, List<String> terms) {
+    if (text.isEmpty || terms.isEmpty) return 0;
     final String lower = text.toLowerCase();
-    int index = lower.indexOf(q);
-    if (index < 0) return 0;
     int score = 0;
-    while (index >= 0 && score < 10) {
-      score++;
-      index = lower.indexOf(q, index + q.length);
+    int matchedTerms = 0;
+    for (final String term in terms) {
+      int index = lower.indexOf(term);
+      if (index < 0) continue;
+      matchedTerms++;
+      int count = 0;
+      while (index >= 0 && count < 10) {
+        count++;
+        index = lower.indexOf(term, index + term.length);
+      }
+      score += count;
     }
+    if (score == 0) return 0;
+    if (terms.length > 1 && matchedTerms == terms.length) score += 5;
     return score;
   }
 
-  static String _snippet(String text, String q) {
+  /// 命中片段：取任一词最早出现的位置，前后各留上下文；无命中返回截断文本。
+  static String _snippet(String text, List<String> terms) {
     final String lower = text.toLowerCase();
-    final int index = lower.indexOf(q);
-    if (index < 0) return _clip(text.trim(), 120);
-    final int start = index - 40 < 0 ? 0 : index - 40;
-    final int end = index + q.length + 60 > text.length
+    int first = -1;
+    String hit = '';
+    for (final String term in terms) {
+      final int index = lower.indexOf(term);
+      if (index >= 0 && (first < 0 || index < first)) {
+        first = index;
+        hit = term;
+      }
+    }
+    if (first < 0) return _clip(text.trim(), 120);
+    final int start = first - 40 < 0 ? 0 : first - 40;
+    final int end = first + hit.length + 60 > text.length
         ? text.length
-        : index + q.length + 60;
-    final String slice = text.substring(start, end).replaceAll(RegExp(r'\s+'), ' ').trim();
+        : first + hit.length + 60;
+    final String slice =
+        text.substring(start, end).replaceAll(RegExp(r'\s+'), ' ').trim();
     return '${start > 0 ? '…' : ''}$slice${end < text.length ? '…' : ''}';
   }
 
