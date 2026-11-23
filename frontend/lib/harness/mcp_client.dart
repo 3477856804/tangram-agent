@@ -19,6 +19,8 @@ import 'package:http/http.dart' as http;
 
 import 'package:tangram/app_version.dart';
 
+import 'mcp_hardening.dart';
+
 class McpToolInfo {
   const McpToolInfo({
     required this.name,
@@ -28,6 +30,20 @@ class McpToolInfo {
   final String name;
   final String description;
   final Map<String, dynamic> inputSchema;
+}
+
+/// 工具发现的一页结果：工具列表 + 是否因上限截断 + 原因 + 已取页数。
+class McpToolPage {
+  const McpToolPage({
+    required this.tools,
+    required this.truncated,
+    required this.reason,
+    required this.pagesFetched,
+  });
+  final List<McpToolInfo> tools;
+  final bool truncated;
+  final String reason;
+  final int pagesFetched;
 }
 
 class McpCallResult {
@@ -86,27 +102,66 @@ class McpClient {
     return title;
   }
 
-  /// 列出工具。未初始化会先 initialize。
-  Future<List<McpToolInfo>> listTools() async {
+  /// 列出工具（分页跟进 nextCursor，上限 250 个工具 / 20 页，超了截断并记原因）。
+  /// 未初始化会先 initialize。
+  Future<McpToolPage> listToolsPaged() async {
     if (!_initialized) await initialize();
-    final resp = await _rpc('tools/list', <String, dynamic>{});
-    final result = resp['result'];
-    final list = result is Map ? result['tools'] : null;
-    final out = <McpToolInfo>[];
-    if (list is List) {
-      for (final t in list.whereType<Map>()) {
-        final name = (t['name'] ?? '').toString();
-        if (name.isEmpty) continue;
-        out.add(McpToolInfo(
-          name: name,
-          description: (t['description'] ?? '').toString(),
-          inputSchema: t['inputSchema'] is Map
-              ? Map<String, dynamic>.from(t['inputSchema'] as Map)
-              : <String, dynamic>{},
-        ));
+    final List<McpToolInfo> out = <McpToolInfo>[];
+    String? cursor;
+    int pages = 0;
+    bool truncated = false;
+    String reason = '';
+    while (pages < McpHardening.maxPages) {
+      final Map<String, dynamic> params = <String, dynamic>{};
+      if (cursor != null) params['cursor'] = cursor;
+      final Map<String, dynamic> resp = await _rpc('tools/list', params);
+      final dynamic result = resp['result'];
+      pages++;
+      if (result is Map) {
+        final dynamic list = result['tools'];
+        if (list is List) {
+          for (final dynamic t in list.whereType<Map>()) {
+            final String name = (t['name'] ?? '').toString();
+            if (name.isEmpty) continue;
+            out.add(McpToolInfo(
+              name: name,
+              description: (t['description'] ?? '').toString(),
+              inputSchema: t['inputSchema'] is Map
+                  ? Map<String, dynamic>.from(t['inputSchema'] as Map)
+                  : <String, dynamic>{},
+            ));
+          }
+        }
+        final dynamic next = result['nextCursor'];
+        cursor = next is String && next.isNotEmpty ? next : null;
       }
+      if (out.length >= McpHardening.maxTools) {
+        truncated = true;
+        reason =
+            '工具数超过上限 ${McpHardening.maxTools}，已截断到 ${McpHardening.maxTools} 个';
+        break;
+      }
+      if (cursor == null) break;
     }
-    return out;
+    if (!truncated && pages >= McpHardening.maxPages && cursor != null) {
+      truncated = true;
+      reason = '工具分页超过上限 ${McpHardening.maxPages} 页，已截断';
+    }
+    final List<McpToolInfo> kept = out.length > McpHardening.maxTools
+        ? out.sublist(0, McpHardening.maxTools)
+        : out;
+    return McpToolPage(
+      tools: kept,
+      truncated: truncated,
+      reason: reason,
+      pagesFetched: pages,
+    );
+  }
+
+  /// 列出工具。未初始化会先 initialize（走分页版，同样受上限约束）。
+  Future<List<McpToolInfo>> listTools() async {
+    final McpToolPage page = await listToolsPaged();
+    return page.tools;
   }
 
   /// 调用工具，返回聚合文本内容。
@@ -166,7 +221,7 @@ class McpClient {
     try {
       resp = await _client
           .post(Uri.parse(url), headers: _baseHeaders, body: body)
-          .timeout(const Duration(seconds: 15));
+          .timeout(McpHardening.requestTimeout);
     } on Object catch (e) {
       throw StateError('连接 MCP 服务失败：$e');
     }
