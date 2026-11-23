@@ -57,6 +57,29 @@ class ProotSandbox {
   static const String kRootfsUrl =
       'https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/aarch64/alpine-minirootfs-3.20.3-aarch64.tar.gz';
 
+  /// 多源下载：国内网络访问 GitHub raw / cdimage 经常超时。
+  /// 依次尝试镜像，每个文件都用同一份 SHA256 校验，镜像内容必须一致。
+  /// jsDelivr / 清华 / 阿里云的实测速度明显优于原始地址。
+  static const List<String> kProotMirrors = <String>[
+    'https://cdn.jsdelivr.net/gh/CypherpunkArmory/UserLAnd-Assets-Support@master/assets/arm64/proot',
+    'https://ghproxy.net/https://raw.githubusercontent.com/CypherpunkArmory/UserLAnd-Assets-Support/master/assets/arm64/proot',
+    kProotUrl,
+  ];
+  static const List<String> kTallocMirrors = <String>[
+    'https://cdn.jsdelivr.net/gh/CypherpunkArmory/UserLAnd-Assets-Support@master/assets/arm64/libtalloc.so.2',
+    'https://ghproxy.net/https://raw.githubusercontent.com/CypherpunkArmory/UserLAnd-Assets-Support/master/assets/arm64/libtalloc.so.2',
+    kTallocUrl,
+  ];
+  static const List<String> kUbuntuRootfsMirrors = <String>[
+    'https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cdimage/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz',
+    'https://mirrors.aliyun.com/ubuntu-cdimage/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz',
+    kUbuntuRootfsUrl,
+  ];
+  static const List<String> kAlpineRootfsMirrors = <String>[
+    'https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.20/releases/aarch64/alpine-minirootfs-3.20.3-aarch64.tar.gz',
+    kRootfsUrl,
+  ];
+
   static const int kProotBytes = 231416;
   static const int kTallocBytes = 75648;
   static const int kUbuntuRootfsBytes = 29936675;
@@ -82,6 +105,11 @@ class ProotSandbox {
     if (url == kRootfsUrl) return kRootfsSha256;
     return '';
   }
+
+  /// 数组顺序即尝试顺序：先国内镜像，后官方源。
+  static List<String> rootfsMirrorsFor(String profile) => profile == 'alpine'
+      ? kAlpineRootfsMirrors
+      : kUbuntuRootfsMirrors;
 
   /// 新装默认 profile；已装环境的 READY.json 没写 profile 时按 alpine 解释。
   static const String kDefaultProfile = 'ubuntu';
@@ -286,12 +314,15 @@ class ProotSandbox {
       final File rootfsTmp =
           File('${extDir.path}/${rootfsArchiveFor(profile)}');
       await _downloadStream(
-          client, kProotUrl, prootBin, kTallocBytes + rootfsBytes,
-          expectedSha256: kProotSha256);
-      await _downloadStream(client, kTallocUrl, tallocLib, rootfsBytes,
-          expectedSha256: kTallocSha256);
-      await _downloadStream(client, rootfsUrlFor(profile), rootfsTmp, 0,
-          expectedSha256: sha256ForUrl(rootfsUrlFor(profile)));
+          client, kProotMirrors, prootBin, kTallocBytes + rootfsBytes,
+          label: 'proot', expectedSha256: kProotSha256);
+      await _downloadStream(client, kTallocMirrors, tallocLib, rootfsBytes,
+          label: 'libtalloc', expectedSha256: kTallocSha256);
+      await _downloadStream(
+          client, rootfsMirrorsFor(profile), rootfsTmp, 0,
+          label: '${distroLabelFor(profile)} rootfs',
+          expectedSha256:
+              profile == 'alpine' ? kRootfsSha256 : kUbuntuRootfsSha256);
 
       _step = 'extracting';
       _report('extract', _received, _total, 0);
@@ -368,31 +399,71 @@ class ProotSandbox {
     }
   }
 
-  /// 单文件流式下载：resp.contentLength 为该文件 total（未知传 -1）；
+  /// 单文件多源流式下载：按 [urls] 顺序尝试镜像，任何一个成功且 SHA256
+  /// 校验通过即返回；全部失败才如实抛错。失败源会删除半截文件并把进度
+  /// 回退到该文件起点，保证界面显示的是真实已接收字节。
+  Future<void> _downloadStream(
+    http.Client client,
+    List<String> urls,
+    File target,
+    int remainingKnown, {
+    required String label,
+    String expectedSha256 = '',
+  }) async {
+    Object? lastError;
+    for (final String url in urls) {
+      final int baseReceived = _received;
+      final int baseDone = _doneBytes;
+      try {
+        await _downloadOne(
+          client,
+          url,
+          target,
+          remainingKnown,
+          label: label,
+          expectedSha256: expectedSha256,
+        );
+        return;
+      } on Object catch (e) {
+        lastError = e;
+        _received = baseReceived;
+        _doneBytes = baseDone;
+        try {
+          if (target.existsSync()) target.deleteSync();
+        } on Object {
+          // 删除失败时下一次会覆盖写，不阻断换源。
+        }
+        _report('download', _received, _total, 0);
+      }
+    }
+    throw StateError('$label 下载失败（已尝试 ${urls.length} 个源）：$lastError');
+  }
+
+  /// 单个源的真实流式下载。resp.contentLength 为该文件 total（未知传 -1）；
   /// 逐 chunk 累计 _received，按 ~250ms 节流上报 download 进度。
   /// [remainingKnown] 为后续文件已核实的字节常量之和，用于推算全局 total。
-  Future<void> _downloadStream(
+  Future<void> _downloadOne(
     http.Client client,
     String url,
     File target,
     int remainingKnown, {
+    required String label,
     String expectedSha256 = '',
   }) async {
-    final request = http.Request('GET', Uri.parse(url))
-      ..followRedirects = true;
+    final Uri uri = Uri.parse(url);
+    final request = http.Request('GET', uri)..followRedirects = true;
     final http.StreamedResponse resp;
     try {
+      // 国内网络握手可能较慢，给 60 秒；单个源仍失败会继续换下一个镜像。
       resp = await client
           .send(request)
-          .timeout(const Duration(seconds: 30));
+          .timeout(const Duration(seconds: 60));
     } on Object catch (e) {
-      throw StateError('下载 ${Uri.parse(url).pathSegments.last} '
-          '连接失败：$e');
+      throw StateError('$label 连接失败（${uri.host}）：$e');
     }
     if (resp.statusCode != 200) {
       await resp.stream.drain<void>();
-      throw StateError('下载 ${Uri.parse(url).pathSegments.last} '
-          '失败：HTTP ${resp.statusCode}');
+      throw StateError('$label 下载失败（${uri.host}）：HTTP ${resp.statusCode}');
     }
     final int? respLen = resp.contentLength;
     final int fileTotal = (respLen != null && respLen > 0) ? respLen : -1;
@@ -400,9 +471,9 @@ class ProotSandbox {
     final IOSink sink = target.openWrite();
     final int base = _received;
     try {
-      // 30s 无字节即判停滞，如实失败（不谎报进度）。
+      // 60s 无字节才算停滞；慢速移动网络下 30s 容易误判。
       await for (final List<int> chunk in
-          resp.stream.timeout(const Duration(seconds: 30))) {
+          resp.stream.timeout(const Duration(seconds: 60))) {
         sink.add(chunk);
         _received += chunk.length;
         _tickDownloadProgress(fileTotal, remainingKnown);
@@ -414,7 +485,7 @@ class ProotSandbox {
     _received = base + written; // 以真实落盘字节为准
     _doneBytes += written;
     if (fileTotal > 0 && written != fileTotal) {
-      throw StateError('${target.path} 不完整：$written / $fileTotal 字节');
+      throw StateError('$label 不完整：$written / $fileTotal 字节');
     }
     // 完整性校验：proot/rootfs 是要执行或解包落盘的二进制，长度一致但内容
     // 被替换（恶意 ELF / 损坏镜像）只能靠摘要发现。不符则删除并如实失败，
@@ -431,7 +502,7 @@ class ProotSandbox {
         }
         _doneBytes -= written;
         _received = base;
-        throw StateError('${target.path} SHA256 校验失败：期望 $expectedSha256，'
+        throw StateError('$label SHA256 校验失败：期望 $expectedSha256，'
             '实际 $actual（下载内容可能被替换/损坏），已删除拒绝使用');
       }
     }
