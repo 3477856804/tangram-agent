@@ -52,6 +52,14 @@ class SpeechToTextVoiceProvider implements VoiceProvider {
       ((db + 60.0) / 60.0).clamp(0.0, 1.0);
 
   @override
+  VoiceProviderKind get kind => VoiceProviderKind.local;
+
+  /// 平台识别器是否在位只有初始化时才知道；这里只做「本实现本身可用」
+  /// 的自检，真实可用性由 startConversation 的 VoiceError 如实回流。
+  @override
+  Future<void> checkAvailable() async {}
+
+  @override
   Stream<VoiceEvent> get conversationEvents => _events.stream;
 
   @override
