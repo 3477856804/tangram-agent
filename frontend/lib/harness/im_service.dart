@@ -10,6 +10,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:tangram/harness/approval_gate.dart';
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/feishu_direct.dart';
 import 'package:tangram/harness/gateway_discovery.dart';
@@ -123,6 +124,10 @@ class ImService {
 
   /// 飞书 OpenAPI 主动发送客户端（凭据来自设备授权流落盘文件）。
   FeishuBotApi? _feishuApi;
+
+  /// 分级审批门（默认 ask）：主动外发先过用户设的门。
+  /// 惰性构造，策略落盘应用私有目录（见 approval_gate.dart）。
+  ApprovalGate? _approvalGate;
 
   // ---- 微信 iLink 直连（真码由腾讯 ilinkai.weixin.qq.com 下发，5 分钟
   // 有效，无需任何外部网关；协议移植自 im/adapters/wechat_ilink.py）----
@@ -422,6 +427,45 @@ class ImService {
           'error': '未知渠道：$connector（支持 qq / wechat / feishu）',
           'results': results,
         };
+      }
+      // 分级审批（默认 ask）：主动外发先过用户设的门；deny 直接拒绝；
+      // ask 且无一次性批准时记一条待审批并返回 needs-approval，不发送。
+      // 目标为空时不走审批，直接让各渠道的既有校验报「需要目标」。
+      if (to.isNotEmpty) {
+        final ApprovalGate gate = _approvalGate ??= ApprovalGate(store.root);
+        final String level = await gate.decide(
+          ApprovalGate.categoryOutbound,
+          key: id,
+        );
+        if (level == ApprovalGate.levelDeny) {
+          results.add(<String, dynamic>{
+            'ok': false,
+            'connector': id,
+            'error': 'approval-deny:$id（主动发送被审批策略拒绝）',
+          });
+          continue;
+        }
+        if (level == ApprovalGate.levelAsk) {
+          final bool approved = await gate.consumeApproval(
+            ApprovalGate.categoryOutbound,
+            key: id,
+            subject: to,
+          );
+          if (!approved) {
+            final Map<String, dynamic> entry = await gate.requestApproval(
+              category: ApprovalGate.categoryOutbound,
+              key: id,
+              subject: to,
+              detail: '主动发送 $id',
+            );
+            results.add(<String, dynamic>{
+              'ok': false,
+              'connector': id,
+              'error': 'needs-approval:${entry['id']}',
+            });
+            continue;
+          }
+        }
       }
       try {
         results.add(await fn());
