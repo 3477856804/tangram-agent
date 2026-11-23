@@ -506,7 +506,8 @@ class EmbeddedBackend implements QqShellRunner {
     return <String, dynamic>{...result, 'bind_supported': bindSupported};
   }
 
-  /// Pages 控制域：列表 / 创建 / 读取 / 保存 / 元数据 / 删除 / 导出。
+  /// Pages 控制域：列表 / 创建 / 读取 / 保存 / 元数据 / 删除 / 导出 /
+  /// 审批钉选 / 版本 diff / 回滚 / 分享服务。
   Future<Map<String, dynamic>> _pages(Map<String, dynamic> p) async {
     final String action = _action(p, 'list');
     switch (action) {
@@ -555,6 +556,24 @@ class EmbeddedBackend implements QqShellRunner {
           (p['id'] ?? '').toString(),
           version: p['version'] is int ? p['version'] as int : null,
         );
+      case 'approve':
+        // 审批钉选：只有用户明确批准的版本才钉选为分享与默认读取的版本。
+        return pages.approve(
+          (p['id'] ?? '').toString(),
+          p['version'] is int ? p['version'] as int : -1,
+        );
+      case 'diff':
+        return pages.diff(
+          (p['id'] ?? '').toString(),
+          p['from'] is int ? p['from'] as int : -1,
+          p['to'] is int ? p['to'] as int : -1,
+        );
+      case 'rollback':
+        // 回滚以旧版本内容追加新版本，历史不改写，钉选不动。
+        return pages.rollback(
+          (p['id'] ?? '').toString(),
+          p['version'] is int ? p['version'] as int : -1,
+        );
       case 'serve':
         // 启动本机分享服务并返回该页面的真实可打开地址；
         // 仅链接可见页面可分享，私有页面如实拒绝。
@@ -580,12 +599,16 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// Routine 控制域：
   /// list/get/create/update/delete/toggle/duplicate/validate/history/due/run/
-  /// reconcile/retry_due/retry。
+  /// reconcile/retry_due/retry/webhook_deliver/check_changes。
   ///
   /// 真实语义：`next_run_at` 由 RoutineStore 按 cron + 时区计算；`run` 真正
   /// 调用内置 chat 并把结果写回运行历史；`due` 只返回已到点的启用项；
   /// 失败的运行由 `retry_due`/`retry` 按退避重跑（最多 3 次），
   /// `reconcile` 把进程被杀残留的 running 记录改为失败并安排重试。
+  /// `webhook_deliver` 只接受已开启 webhook 且未暂停的 Routine 的投递，
+  /// 同一 delivery_id 重复投递只执行一次；`check_changes` 由调用方喂
+  /// 文本快照，仓储比对 sha256，变化时执行一次、首次只建基线。
+  /// 两种新触发都不做真实网络轮询、不主动拉取外部内容。
   Future<Map<String, dynamic>> _routine(Map<String, dynamic> p) async {
     final String action = _action(p, 'list');
     final String id = (p['id'] ?? '').toString().trim();
@@ -689,6 +712,19 @@ class EmbeddedBackend implements QqShellRunner {
           (p['run_id'] ?? '').toString(),
           now: _parseTime(p['now']),
         );
+      case 'webhook_deliver':
+        return _deliverWebhookRoutine(
+          id,
+          deliveryId: _nullableText(p['delivery_id']),
+          payloadSummary: _nullableText(p['payload_summary']),
+          now: _parseTime(p['now']),
+        );
+      case 'check_changes':
+        return _checkRoutineChange(
+          id,
+          (p['snapshot'] ?? '').toString(),
+          now: _parseTime(p['now']),
+        );
       default:
         return _err('未知 routine 动作：$action');
     }
@@ -741,6 +777,7 @@ class EmbeddedBackend implements QqShellRunner {
         runId: '${run['id'] ?? ''}',
         routine: routine,
         now: now,
+        trigger: scheduled ? 'schedule' : 'manual',
       );
     } finally {
       _routineRunning.remove(id);
@@ -789,9 +826,98 @@ class EmbeddedBackend implements QqShellRunner {
         runId: runId,
         routine: routine,
         now: now,
+        trigger: '${run['trigger'] ?? 'schedule'}',
       );
     } finally {
       _routineRunning.remove(routineId);
+    }
+  }
+
+  /// webhook 投递：仓储先校验（存在 / 已开启 / 未暂停）并做重放防护，
+  /// 通过后开始一次运行，再复用 _executeRoutineRun 真正调用 chat。
+  /// 重复 delivery_id 直接返回首次运行记录，不再执行。
+  Future<Map<String, dynamic>> _deliverWebhookRoutine(
+    String id, {
+    String? deliveryId,
+    String? payloadSummary,
+    DateTime? now,
+  }) async {
+    if (id.isEmpty) return _err('缺少 Routine id');
+    if (_routineRunning.contains(id)) {
+      return <String, dynamic>{
+        'ok': true,
+        'skipped': true,
+        'reason': 'Routine 正在运行中',
+      };
+    }
+    _routineRunning.add(id);
+    try {
+      final Map<String, dynamic> delivered = await routines.deliverWebhook(
+        id,
+        deliveryId: deliveryId,
+        payloadSummary: payloadSummary,
+        now: now,
+      );
+      if (delivered['ok'] != true) return delivered;
+      if (delivered['duplicate'] == true) return delivered;
+      final Map<dynamic, dynamic> run = delivered['run'] as Map;
+      final Map<dynamic, dynamic> routine = delivered['routine'] as Map;
+      // 必须 await：理由同 _runRoutine，finally 必须等 chat 跑完才摘 guard。
+      return await _executeRoutineRun(
+        id: id,
+        runId: '${run['id'] ?? ''}',
+        routine: routine,
+        now: now,
+        trigger: 'webhook',
+        triggerNote:
+            payloadSummary == null || payloadSummary.trim().isEmpty
+            ? null
+            : 'Webhook 载荷摘要：${payloadSummary.trim()}',
+      );
+    } finally {
+      _routineRunning.remove(id);
+    }
+  }
+
+  /// 变化检测：调用方喂来被 watch 内容的当前文本快照，仓储比对 sha256；
+  /// 未变化或首次建基线时直接返回，不执行；变化时开始一次运行，
+  /// 再复用 _executeRoutineRun 真正调用 chat。
+  /// 本方法不做真实网络轮询、不主动拉取外部内容。
+  Future<Map<String, dynamic>> _checkRoutineChange(
+    String id,
+    String snapshot, {
+    DateTime? now,
+  }) async {
+    if (id.isEmpty) return _err('缺少 Routine id');
+    if (_routineRunning.contains(id)) {
+      return <String, dynamic>{
+        'ok': true,
+        'skipped': true,
+        'reason': 'Routine 正在运行中',
+      };
+    }
+    _routineRunning.add(id);
+    try {
+      final Map<String, dynamic> checked = await routines.checkChange(
+        id,
+        snapshot,
+        now: now,
+      );
+      if (checked['ok'] != true) return checked;
+      if (checked['triggered'] != true) return checked;
+      final Map<dynamic, dynamic> run = checked['run'] as Map;
+      final Map<dynamic, dynamic> routine = checked['routine'] as Map;
+      // 必须 await：理由同 _runRoutine，finally 必须等 chat 跑完才摘 guard。
+      return await _executeRoutineRun(
+        id: id,
+        runId: '${run['id'] ?? ''}',
+        routine: routine,
+        now: now,
+        trigger: 'change_detect',
+        triggerNote: '检测到被 watch 内容变化（sha256：${checked['hash'] ?? ''}）',
+      );
+    } finally {
+      _routineRunning.remove(id);
     }
   }
 
@@ -803,11 +929,21 @@ class EmbeddedBackend implements QqShellRunner {
     required String runId,
     required Map<dynamic, dynamic> routine,
     DateTime? now,
+    String trigger = 'schedule',
+    String? triggerNote,
   }) async {
     final String name = '${routine['name'] ?? 'Routine'}';
     final String prompt = '${routine['prompt'] ?? ''}';
+    final String label = switch (trigger) {
+      'manual' => '手动例程',
+      'webhook' => 'Webhook 例程',
+      'change_detect' => '变化检测例程',
+      _ => '定时例程',
+    };
     final String text =
-        '【定时例程 · $name】\n$prompt\n\n请执行这项例程，并把结果如实汇报。';
+        '【$label · $name】\n$prompt\n'
+        '${triggerNote == null ? '' : '$triggerNote\n'}'
+        '\n请执行这项例程，并把结果如实汇报。';
     String reply = '';
     String error = '';
     bool ok = false;
@@ -1099,13 +1235,16 @@ class EmbeddedBackend implements QqShellRunner {
     },
     'routine': <String, dynamic>{
       'architecture':
-          'multi-cron + timezone + one-shot + run history + in-app scheduler',
+          'multi-cron + timezone + one-shot + run history + in-app scheduler'
+          ' + webhook trigger + change-detect trigger',
       'storage': 'app-private-json',
       'max_crons': 12,
       'history_limit': RoutineStore.maxRuns,
       'one_shot': true,
       'background': false,
-      'note': 'App 进程存活期间由内置调度器按时间表触发',
+      'note': 'App 进程存活期间由内置调度器按时间表触发；'
+          'webhook 由外部投递触发（须开启且未暂停，同一 delivery_id 只执行一次）；'
+          '变化检测由调用方喂文本快照触发（仓储只比对 sha256，不做网络轮询）',
     },
     'model_group': <String, dynamic>{
       'architecture': 'parallel members + cross-compare + moderator synthesis',
