@@ -14,6 +14,14 @@
 /// 本批次只实现「时间表触发 + 手动触发」；webhook / 邮件 / GitHub / 变更
 /// 触发字段保留在记录里，但未接通前不允许作为唯一触发条件，避免假能力。
 ///
+/// Webhook 与变化检测触发（round-7，对照 Rakazo 的运行模型「事件触发
+/// Routine」）：`trigger` 为 `webhook` 的 Routine 由外部投递触发，
+/// 须显式开启 `webhook_enabled`，投递时按 `delivery_id` 做重放防护；
+/// `trigger` 为 `change` 的 Routine 由调用方喂文本快照触发，仓储只比对
+/// 快照的 sha256，变化时执行一次，首次快照只建基线。两种触发都不做真实
+/// 网络轮询、不主动拉取外部内容；运行历史里分别记 `webhook` /
+/// `change_detect`，失败同样进重试队列。
+///
 /// 失败重试与崩溃对账（对照 Rakazo 的运行模型）：一次运行失败后记录保留
 /// attempts 与 nextAttemptAt，由调度器到点重跑，最多 3 次；进程被杀时
 /// 残留的 running 记录在下次启动时由 reconcileStaleRuns 改为失败并安排
@@ -24,7 +32,20 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart';
+
 import 'routine_schedule.dart';
+
+/// Routine 触发类型：`schedule`（时间表，默认）、`webhook`（外部投递）、
+/// `change`（被 watch 内容变化）。
+const Set<String> routineTriggerTypes = <String>{
+  'schedule',
+  'webhook',
+  'change',
+};
+
+/// webhook 投递去重记录：每个 Routine 最多保留的 delivery_id 条数。
+const int maxWebhookDeliveriesPerRoutine = 200;
 
 /// 名称上限与 Rakazo 一致。
 const int routineNameMaxLength = 80;
@@ -132,6 +153,11 @@ class RoutineRunRecord {
 }
 
 /// 一条 Routine。
+///
+/// `trigger` 决定触发方式：`schedule` 按 crons 时间表；`webhook` 由外部
+/// 投递触发（须同时开启 [webhookEnabled]）；`change` 由调用方喂文本快照
+/// 触发（仓储比对快照 sha256）。非时间表触发的 Routine 可以没有 crons，
+/// 也不参与 [RoutineStore.due] 的到点判定。
 class RoutineRecord {
   const RoutineRecord({
     required this.id,
@@ -151,6 +177,9 @@ class RoutineRecord {
     required this.thinkingLevel,
     required this.createdAt,
     required this.updatedAt,
+    this.trigger = 'schedule',
+    this.watchTarget,
+    this.lastChangeHash,
     this.anchorAt,
     this.lastRunAt,
     this.nextRunAt,
@@ -171,6 +200,16 @@ class RoutineRecord {
   final String? modelProvider;
   final String? modelId;
   final String? thinkingLevel;
+
+  /// 触发类型：'schedule' | 'webhook' | 'change'。
+  final String trigger;
+
+  /// 变化检测触发时被 watch 内容的描述（如地址、文件路径或标签），
+  /// 仅作展示与排查用；快照本身由调用方传入，不由仓储拉取。
+  final String? watchTarget;
+
+  /// 上次变化检测快照的 sha256（hex）；为 null 表示尚未建立基线。
+  final String? lastChangeHash;
 
   /// 间隔相位锚点：非整除步长从这次计划触发开始递推。
   final DateTime? anchorAt;
@@ -201,6 +240,10 @@ class RoutineRecord {
     bool? clearModelId,
     String? thinkingLevel,
     bool? clearThinkingLevel,
+    String? trigger,
+    String? watchTarget,
+    bool? clearWatchTarget,
+    String? lastChangeHash,
     DateTime? anchorAt,
     bool? clearAnchor,
     DateTime? lastRunAt,
@@ -232,6 +275,11 @@ class RoutineRecord {
       thinkingLevel: clearThinkingLevel == true
           ? null
           : (thinkingLevel ?? this.thinkingLevel),
+      trigger: trigger ?? this.trigger,
+      watchTarget: clearWatchTarget == true
+          ? null
+          : (watchTarget ?? this.watchTarget),
+      lastChangeHash: lastChangeHash ?? this.lastChangeHash,
       anchorAt: clearAnchor == true ? null : (anchorAt ?? this.anchorAt),
       lastRunAt: lastRunAt ?? this.lastRunAt,
       nextRunAt: clearNextRun == true ? null : (nextRunAt ?? this.nextRunAt),
@@ -256,6 +304,9 @@ class RoutineRecord {
     'model_provider': modelProvider,
     'model_id': modelId,
     'thinking_level': thinkingLevel,
+    'trigger': trigger,
+    'watch_target': watchTarget,
+    'last_change_hash': lastChangeHash,
     'anchor_at': anchorAt?.toIso8601String(),
     'last_run_at': lastRunAt?.toIso8601String(),
     'next_run_at': nextRunAt?.toIso8601String(),
@@ -274,7 +325,11 @@ class RoutineRecord {
               .where((String e) => e.isNotEmpty)
               .toList()
         : <String>[];
-    if (crons.isEmpty) return null;
+    // 触发类型未知时按时间表处理，不崩；非时间表触发允许没有 crons。
+    final String trigger = routineTriggerTypes.contains(raw['trigger'])
+        ? '${raw['trigger']}'
+        : 'schedule';
+    if (crons.isEmpty && trigger == 'schedule') return null;
     final DateTime? created = DateTime.tryParse('${raw['created_at']}');
     final DateTime? updated = DateTime.tryParse('${raw['updated_at']}');
     if (created == null || updated == null) return null;
@@ -294,6 +349,9 @@ class RoutineRecord {
       modelProvider: _nullable(raw['model_provider']),
       modelId: _nullable(raw['model_id']),
       thinkingLevel: _nullable(raw['thinking_level']),
+      trigger: trigger,
+      watchTarget: _nullable(raw['watch_target']),
+      lastChangeHash: _nullable(raw['last_change_hash']),
       anchorAt: DateTime.tryParse('${raw['anchor_at']}'),
       lastRunAt: DateTime.tryParse('${raw['last_run_at']}'),
       nextRunAt: DateTime.tryParse('${raw['next_run_at']}'),
@@ -337,6 +395,43 @@ class RoutineStore {
   Directory get _dir => Directory('${root.path}/routines');
   File get _indexFile => File('${_dir.path}/routines.json');
   File get _runsFile => File('${_dir.path}/runs.json');
+
+  /// webhook 投递去重记录：`{"deliveries": {routineId: {deliveryId: runId}}}`。
+  /// 只记 delivery_id → 首次运行 id 的映射，不存载荷内容。
+  File get _webhookFile => File('${_dir.path}/webhook_deliveries.json');
+
+  Future<Map<String, Map<String, String>>> _readWebhookDeliveries() async {
+    if (!await _webhookFile.exists()) return <String, Map<String, String>>{};
+    try {
+      final dynamic decoded = jsonDecode(await _webhookFile.readAsString());
+      if (decoded is Map && decoded['deliveries'] is Map) {
+        final Map<String, Map<String, String>> out =
+            <String, Map<String, String>>{};
+        (decoded['deliveries'] as Map).forEach((dynamic routineId, dynamic v) {
+          if (v is! Map) return;
+          final Map<String, String> seen = <String, String>{};
+          v.forEach((dynamic deliveryId, dynamic runId) {
+            final String d = deliveryId.toString().trim();
+            final String r = runId.toString().trim();
+            if (d.isNotEmpty && r.isNotEmpty) seen[d] = r;
+          });
+          if (seen.isNotEmpty) out[routineId.toString()] = seen;
+        });
+        return out;
+      }
+    } on Object {
+      // 去重记录损坏时按空处理（最坏是重复投递多跑一次，
+      // 不阻塞 webhook 本身）；不冒充数据。
+    }
+    return <String, Map<String, String>>{};
+  }
+
+  Future<void> _writeWebhookDeliveries(
+    Map<String, Map<String, String>> all,
+  ) async {
+    if (!await _dir.exists()) await _dir.create(recursive: true);
+    await _writeJson(_webhookFile, <String, dynamic>{'deliveries': all});
+  }
 
   /// 所有写操作串行执行，避免并发创建/推进 next_run 时互相覆盖。
   Future<T> _guard<T>(Future<T> Function() work) {
@@ -531,6 +626,9 @@ class RoutineStore {
   // ---------------------------------------------------------------- 写入
 
   /// 创建 Routine。`oneShotAt` 仅用于 `@once`。
+  ///
+  /// `trigger` 为 `webhook` / `change` 时 crons 可以为空（不参与到点
+  /// 判定，`next_run_at` 为 null）；为 `schedule` 时仍按时间表校验与排期。
   Future<Map<String, dynamic>> create({
     required String name,
     required String prompt,
@@ -539,6 +637,9 @@ class RoutineStore {
     bool active = true,
     bool notify = true,
     bool inChat = false,
+    String trigger = 'schedule',
+    bool webhookEnabled = false,
+    String? watchTarget,
     String? modelProvider,
     String? modelId,
     String? thinkingLevel,
@@ -552,19 +653,25 @@ class RoutineStore {
         return _err('名称不能超过 $routineNameMaxLength 个字符');
       }
       if (p.isEmpty) return _err('请填写提示词');
+      if (!routineTriggerTypes.contains(trigger)) {
+        return _err('不支持的触发类型：$trigger');
+      }
       final List<String> normalized = normalizeCrons(crons);
-      final String? invalid = validateSchedule(normalized, timezone);
+      final bool isSchedule = trigger == 'schedule';
+      final String? invalid = (isSchedule || normalized.isNotEmpty)
+          ? validateSchedule(normalized, timezone)
+          : null;
       if (invalid != null) return _err(invalid);
       final DateTime now = DateTime.now().toUtc();
       DateTime? next;
       DateTime? anchor;
-      if (isOneShotCrons(normalized)) {
+      if (isSchedule && isOneShotCrons(normalized)) {
         if (oneShotAt == null) return _err('一次性 Routine 必须指定运行时刻');
         final DateTime at = oneShotAt.toUtc();
         if (!at.isAfter(now)) return _err('一次性 Routine 的运行时刻必须晚于当前时间');
         next = active ? at : null;
         if (active) anchor = at;
-      } else if (active) {
+      } else if (isSchedule && active) {
         try {
           final RoutineZone zone = RoutineZone.parse(timezone);
           anchor = nextCronDateAcrossStrict(normalized, now, zone);
@@ -583,13 +690,17 @@ class RoutineStore {
         active: active,
         notify: notify,
         inChat: inChat,
-        webhookEnabled: false,
+        webhookEnabled: webhookEnabled,
         githubEnabled: false,
         messageProvider: null,
         emailSenders: null,
         modelProvider: modelProvider,
         modelId: modelId,
         thinkingLevel: thinkingLevel,
+        trigger: trigger,
+        watchTarget: watchTarget?.trim().isEmpty == true
+            ? null
+            : watchTarget?.trim(),
         anchorAt: anchor,
         lastRunAt: null,
         nextRunAt: next,
@@ -603,7 +714,7 @@ class RoutineStore {
     }).catchError((Object e) => _err('创建 Routine 失败：$e'));
   }
 
-  /// 更新 Routine；时间表 / 时区 / 启用状态变化时重算下次运行。
+  /// 更新 Routine；时间表 / 时区 / 启用状态 / 触发类型变化时重算下次运行。
   Future<Map<String, dynamic>> update(
     String id, {
     String? name,
@@ -613,6 +724,10 @@ class RoutineStore {
     bool? active,
     bool? notify,
     bool? inChat,
+    String? trigger,
+    bool? webhookEnabled,
+    String? watchTarget,
+    bool clearWatchTarget = false,
     String? modelProvider,
     bool clearModelProvider = false,
     String? modelId,
@@ -634,23 +749,31 @@ class RoutineStore {
         return _err('名称不能超过 $routineNameMaxLength 个字符');
       }
       if (p.isEmpty) return _err('请填写提示词');
+      if (trigger != null && !routineTriggerTypes.contains(trigger)) {
+        return _err('不支持的触发类型：$trigger');
+      }
       final List<String> nextCrons =
           crons == null ? current.crons : normalizeCrons(crons);
       final String zoneName = timezone ?? current.timezone;
       final bool nextActive = active ?? current.active;
-      final String? invalid = validateSchedule(nextCrons, zoneName);
+      final String nextTrigger = trigger ?? current.trigger;
+      final bool nextIsSchedule = nextTrigger == 'schedule';
+      final String? invalid = (nextIsSchedule || nextCrons.isNotEmpty)
+          ? validateSchedule(nextCrons, zoneName)
+          : null;
       if (invalid != null) return _err(invalid);
 
       final DateTime now = DateTime.now().toUtc();
       final bool scheduleChanged =
           crons != null ||
           (timezone != null && timezone != current.timezone) ||
-          (active != null && active != current.active);
+          (active != null && active != current.active) ||
+          (trigger != null && trigger != current.trigger);
 
       DateTime? anchor = current.anchorAt;
       DateTime? next = current.nextRunAt;
       if (scheduleChanged) {
-        if (!nextActive) {
+        if (!nextActive || !nextIsSchedule) {
           next = null;
           anchor = null;
         } else if (isOneShotCrons(nextCrons)) {
@@ -680,6 +803,10 @@ class RoutineStore {
         active: nextActive,
         notify: notify,
         inChat: inChat,
+        trigger: nextTrigger,
+        webhookEnabled: webhookEnabled,
+        watchTarget: watchTarget,
+        clearWatchTarget: clearWatchTarget,
         modelProvider: modelProvider,
         clearModelProvider: clearModelProvider,
         modelId: modelId,
@@ -711,6 +838,11 @@ class RoutineStore {
       final List<RoutineRunRecord> runs = await _readRuns();
       runs.removeWhere((RoutineRunRecord r) => r.routineId == id);
       await _writeRuns(runs);
+      final Map<String, Map<String, String>> deliveries =
+          await _readWebhookDeliveries();
+      if (deliveries.remove(id) != null) {
+        await _writeWebhookDeliveries(deliveries);
+      }
       return <String, dynamic>{'ok': true, 'deleted': id};
     }).catchError((Object e) => _err('删除 Routine 失败：$e'));
   }
@@ -738,13 +870,15 @@ class RoutineStore {
         active: false,
         notify: source.notify,
         inChat: source.inChat,
-        webhookEnabled: false,
+        webhookEnabled: source.webhookEnabled,
         githubEnabled: false,
         messageProvider: null,
         emailSenders: null,
         modelProvider: source.modelProvider,
         modelId: source.modelId,
         thinkingLevel: source.thinkingLevel,
+        trigger: source.trigger,
+        watchTarget: source.watchTarget,
         anchorAt: null,
         lastRunAt: null,
         nextRunAt: null,
@@ -762,6 +896,10 @@ class RoutineStore {
   /// 开始一次运行：推进 last/next，写入 running 记录。
   ///
   /// 对一次性 Routine，开始即停用（即使最终失败，也不会再次误触发）。
+  ///
+  /// [trigger] 为本次运行的触发来源（'schedule' / 'manual' / 'webhook' /
+  /// 'change_detect'），记入运行历史；只有时间表触发的 Routine 才按
+  /// cron 推进下次运行，webhook / 变化检测触发不碰时间表。
   Future<Map<String, dynamic>> startRun(
     String id, {
     String trigger = 'schedule',
@@ -771,63 +909,233 @@ class RoutineStore {
       final List<RoutineRecord> all = await _readIndex();
       final int index = all.indexWhere((RoutineRecord r) => r.id == id);
       if (index < 0) return _err('Routine 不存在：$id');
-      final RoutineRecord routine = all[index];
-      final DateTime started = (now ?? DateTime.now()).toUtc();
-      final DateTime? lateSince = routine.nextRunAt;
-      DateTime? next = routine.nextRunAt;
-      DateTime? anchor = routine.anchorAt;
-      bool active = routine.active;
-      // 手动运行暂停中的 Routine 只执行一次，不替用户重新启用或改期。
-      if (!active) {
-        next = routine.nextRunAt;
-        anchor = routine.anchorAt;
-      } else if (routine.oneShot) {
-        active = false;
+      return _beginRunLocked(
+        all,
+        index,
+        trigger: trigger,
+        started: (now ?? DateTime.now()).toUtc(),
+      );
+    }).catchError((Object e) => _err('启动 Routine 失败：$e'));
+  }
+
+  /// 在一次 [_guard] 内开始运行（供 startRun / deliverWebhook /
+  /// checkChange 共用，避免在 guard 内再调 startRun 造成死锁）。
+  ///
+  /// 调用方须已在 guard 内读好 [routines] 并确认 [index] 有效；
+  /// 本方法负责写索引与运行记录。
+  Future<Map<String, dynamic>> _beginRunLocked(
+    List<RoutineRecord> routines,
+    int index, {
+    required String trigger,
+    required DateTime started,
+  }) async {
+    final RoutineRecord routine = routines[index];
+    final DateTime? lateSince = routine.nextRunAt;
+    DateTime? next = routine.nextRunAt;
+    DateTime? anchor = routine.anchorAt;
+    bool active = routine.active;
+    // 手动运行暂停中的 Routine 只执行一次，不替用户重新启用或改期。
+    if (!active) {
+      next = routine.nextRunAt;
+      anchor = routine.anchorAt;
+    } else if (routine.trigger == 'schedule' && routine.oneShot) {
+      active = false;
+      next = null;
+      anchor = null;
+    } else if (routine.trigger == 'schedule') {
+      try {
+        final RoutineZone zone = RoutineZone.parse(routine.timezone);
+        next = nextRoutineRunDateAcross(
+          routine.crons,
+          anchor ?? started,
+          started,
+          zone,
+        );
+      } on FormatException {
         next = null;
-        anchor = null;
-      } else {
-        try {
-          final RoutineZone zone = RoutineZone.parse(routine.timezone);
-          next = nextRoutineRunDateAcross(
-            routine.crons,
-            anchor ?? started,
-            started,
-            zone,
-          );
-        } on FormatException {
-          next = null;
+      }
+    }
+    // webhook / change 触发：不推进时间表（next/anchor 保持原值，
+    // 这类 Routine 的 next_run_at 本来就是 null）。
+    final RoutineRecord updated = routine.copyWith(
+      active: active,
+      nextRunAt: next,
+      clearNextRun: next == null,
+      anchorAt: anchor,
+      clearAnchor: anchor == null,
+      lastRunAt: started,
+      updatedAt: started,
+    );
+    routines[index] = updated;
+    await _writeIndex(routines);
+
+    final RoutineRunRecord run = RoutineRunRecord(
+      id: _newId('run'),
+      routineId: routine.id,
+      trigger: trigger,
+      status: 'running',
+      createdAt: started,
+      startedAt: started,
+      lateSince: lateSince,
+    );
+    final List<RoutineRunRecord> runs = await _readRuns();
+    runs.add(run);
+    await _writeRuns(runs);
+    return <String, dynamic>{
+      'ok': true,
+      'run': run.toJson(),
+      'routine': updated.toJson(),
+    };
+  }
+
+  // ------------------------------------------------------------ webhook 触发
+
+  /// 外部 webhook 投递：仅当 Routine 存在、`webhook_enabled` 为真且未暂停
+  /// 时开始一次运行（运行历史 trigger 记 `webhook`）；否则返回明确的
+  /// 拒绝原因，不执行、不记运行。
+  ///
+  /// 重放防护：同一 [deliveryId] 重复投递只执行一次，再次投递返回
+  /// `{'ok': true, 'duplicate': true, 'run': 首次运行记录}`，不产生新运行。
+  /// 不传 [deliveryId] 时不去重，每次投递都执行一次。
+  /// [payloadSummary] 为调用方提供的载荷摘要（不存原始载荷），只原样返回
+  /// 给后端拼进执行提示词，最长 500 字。
+  Future<Map<String, dynamic>> deliverWebhook(
+    String id, {
+    String? deliveryId,
+    String? payloadSummary,
+    DateTime? now,
+  }) async {
+    return _guard(() async {
+      final List<RoutineRecord> all = await _readIndex();
+      final int index = all.indexWhere((RoutineRecord r) => r.id == id);
+      if (index < 0) return _err('Routine 不存在：$id');
+      final RoutineRecord routine = all[index];
+      if (!routine.webhookEnabled) {
+        return _err('该 Routine 未启用 webhook 触发');
+      }
+      if (!routine.active) {
+        return _err('Routine 已暂停，webhook 投递被拒绝');
+      }
+      final String? did = (deliveryId ?? '').trim().isEmpty
+          ? null
+          : deliveryId!.trim();
+      final Map<String, Map<String, String>> deliveries =
+          await _readWebhookDeliveries();
+      if (did != null) {
+        final String? existingRunId = deliveries[id]?[did];
+        if (existingRunId != null) {
+          final Map<String, dynamic> got = await getRun(existingRunId);
+          return <String, dynamic>{
+            'ok': true,
+            'duplicate': true,
+            'delivery_id': did,
+            if (got['ok'] == true) 'run': got['run'],
+          };
         }
       }
-      final RoutineRecord updated = routine.copyWith(
-        active: active,
-        nextRunAt: next,
-        clearNextRun: next == null,
-        anchorAt: anchor,
-        clearAnchor: anchor == null,
-        lastRunAt: started,
-        updatedAt: started,
+      final DateTime at = (now ?? DateTime.now()).toUtc();
+      final Map<String, dynamic> started = await _beginRunLocked(
+        all,
+        index,
+        trigger: 'webhook',
+        started: at,
       );
-      all[index] = updated;
-      await _writeIndex(all);
-
-      final RoutineRunRecord run = RoutineRunRecord(
-        id: _newId('run'),
-        routineId: id,
-        trigger: trigger,
-        status: 'running',
-        createdAt: started,
-        startedAt: started,
-        lateSince: lateSince,
-      );
-      final List<RoutineRunRecord> runs = await _readRuns();
-      runs.add(run);
-      await _writeRuns(runs);
+      if (started['ok'] != true) return started;
+      final String runId = '${(started['run'] as Map)['id'] ?? ''}';
+      final String summary = (payloadSummary ?? '').trim();
+      if (did != null && runId.isNotEmpty) {
+        final Map<String, String> seen =
+            deliveries.putIfAbsent(id, () => <String, String>{});
+        seen[did] = runId;
+        while (seen.length > maxWebhookDeliveriesPerRoutine) {
+          seen.remove(seen.keys.first);
+        }
+        await _writeWebhookDeliveries(deliveries);
+      }
       return <String, dynamic>{
         'ok': true,
-        'run': run.toJson(),
-        'routine': updated.toJson(),
+        'duplicate': false,
+        'delivery_id': did,
+        'payload_summary': summary.length > 500
+            ? '${summary.substring(0, 500)}…'
+            : summary,
+        'run': started['run'],
+        'routine': started['routine'],
       };
-    }).catchError((Object e) => _err('启动 Routine 失败：$e'));
+    }).catchError((Object e) => _err('webhook 投递失败：$e'));
+  }
+
+  // ---------------------------------------------------------- 变化检测触发
+
+  /// 变化检测：调用方传入被 watch 内容的当前文本快照（仓储不做真实网络
+  /// 轮询、不拉取外部内容），对快照算 sha256 并与上次记录比对。
+  ///
+  /// 仅当 Routine 存在、触发类型为 `change` 且未暂停时才可能执行：
+  /// 首次快照只记录基线（`baseline: true`）不触发；内容不变（哈希相同）
+  /// 不跑；内容变了更新哈希并开始一次运行（运行历史 trigger 记
+  /// `change_detect`），失败同样进重试队列。
+  Future<Map<String, dynamic>> checkChange(
+    String id,
+    String currentSnapshot, {
+    DateTime? now,
+  }) async {
+    return _guard(() async {
+      final List<RoutineRecord> all = await _readIndex();
+      final int index = all.indexWhere((RoutineRecord r) => r.id == id);
+      if (index < 0) return _err('Routine 不存在：$id');
+      final RoutineRecord routine = all[index];
+      if (routine.trigger != 'change') {
+        return _err('该 Routine 不是变化检测触发类型');
+      }
+      if (!routine.active) {
+        return _err('Routine 已暂停，变化检测被拒绝');
+      }
+      final String hash =
+          sha256.convert(utf8.encode(currentSnapshot)).toString();
+      final String? previous = routine.lastChangeHash;
+      final DateTime at = (now ?? DateTime.now()).toUtc();
+      if (previous == null) {
+        all[index] = routine.copyWith(
+          lastChangeHash: hash,
+          updatedAt: at,
+        );
+        await _writeIndex(all);
+        return <String, dynamic>{
+          'ok': true,
+          'triggered': false,
+          'baseline': true,
+          'hash': hash,
+        };
+      }
+      if (previous == hash) {
+        return <String, dynamic>{
+          'ok': true,
+          'triggered': false,
+          'changed': false,
+          'hash': hash,
+        };
+      }
+      all[index] = routine.copyWith(
+        lastChangeHash: hash,
+        updatedAt: at,
+      );
+      final Map<String, dynamic> started = await _beginRunLocked(
+        all,
+        index,
+        trigger: 'change_detect',
+        started: at,
+      );
+      if (started['ok'] != true) return started;
+      return <String, dynamic>{
+        'ok': true,
+        'triggered': true,
+        'changed': true,
+        'hash': hash,
+        'previous_hash': previous,
+        'run': started['run'],
+        'routine': started['routine'],
+      };
+    }).catchError((Object e) => _err('变化检测失败：$e'));
   }
 
   /// 结束一次运行：写 success / failure 与结果摘要。
