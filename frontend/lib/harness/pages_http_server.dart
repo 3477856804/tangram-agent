@@ -83,7 +83,9 @@ class PagesHttpServer {
     return <String, dynamic>{
       'ok': true,
       'url': '${baseUrl!}/pages/$id',
-      'version': page['current_version'],
+      // 实际提供的版本：有钉选时为钉选版本，否则为最新版（与 get 的默认一致）。
+      'version': detail['version'],
+      'pinned_version': page['pinned_version'],
       'port': _server!.port,
       'base_url': baseUrl,
     };
