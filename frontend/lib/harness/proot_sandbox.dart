@@ -331,6 +331,7 @@ class ProotSandbox {
       // * Alpine：pkg / apt 两个 Termux 风格命令真实映射到 apk。
       // 脚本失败不影响系统包管理器本体。
       await _writeCompatShims(profile);
+      await _ensureAptSources();
 
       // 恢复可执行位：tar 头里的 mode 无法用 dart:io 直接落位，
       // 统一交给系统 toybox chmod（系统二进制，任何 targetSdk 都可执行）。
@@ -479,9 +480,12 @@ class ProotSandbox {
   bool _shimsReady = false;
 
   /// Ubuntu 的 pkg 兼容层：只映射到 apt-get，绝不覆盖原生 apt/dpkg。
-  /// `install` 前先 `apt-get update`：ubuntu-base 镜像不带包索引，
+  /// `install` 前先 `apt-get update`：ubuntu-base 镜像首次安装时包索引为空，
   /// 直接 install 会报 `Unable to locate package`（真实用户反馈）。
+  /// 版本标记用于识别并升级老环境的旧脚本（旧脚本里也有 `apt-get update`
+  /// 这一行，不能只按该字符串判断）。
   static const String _ubuntuPkgBody = '''#!/bin/sh
+# TGA_SHIM_VERSION=2
 # TGA: Ubuntu 环境，pkg 兼容层映射到 apt-get；原生 apt/dpkg 未被覆盖。
 export DEBIAN_FRONTEND=noninteractive
 cmd="\$1"; [ \$# -gt 0 ] && shift
@@ -489,10 +493,16 @@ args=""
 for a in "\$@"; do
   [ "\$a" = "-y" ] || [ "\$a" = "--yes" ] || args="\$args \$a"
 done
+# Termux 习惯：pkg install python 在 Ubuntu 上没有 python 包，映射到 python3。
+mapped=""
+for a in \$args; do
+  [ "\$a" = "python" ] && a="python3"
+  mapped="\$mapped \$a"
+done
 case "\$cmd" in
   install|add)
     apt-get update || exit \$?
-    exec apt-get install -y \$args ;;
+    exec apt-get install -y \$mapped ;;
   uninstall|remove|purge) exec apt-get remove -y \$args ;;
   update) exec apt-get update ;;
   upgrade) apt-get update || exit \$?; exec apt-get upgrade -y ;;
@@ -562,6 +572,56 @@ esac
     }
   }
 
+  /// 保证 Ubuntu 里有可用的 apt 源。ubuntu-base 自带 ports.ubuntu.com，
+  /// 但个别安装/迁移会把 sources 丢空；此时 `apt-get update` 不报错却
+  /// 拿不到任何索引，install 就会报 `Unable to locate package`。
+  Future<void> _ensureAptSources() async {
+    if (profile != 'ubuntu') return;
+    final Directory etcApt = Directory('${rootfsDir.path}/etc/apt');
+    try {
+      if (!etcApt.existsSync()) etcApt.createSync(recursive: true);
+      bool hasSources = false;
+      bool hasNonComment(File f) {
+        try {
+          final String text = f.readAsStringSync();
+          return text.split('\n').any((String line) {
+            final String t = line.trim();
+            return t.isNotEmpty && !t.startsWith('#');
+          });
+        } on Object {
+          return false;
+        }
+      }
+
+      final File legacy = File('${etcApt.path}/sources.list');
+      if (legacy.existsSync()) hasSources = hasNonComment(legacy);
+      final Directory dropIn = Directory('${etcApt.path}/sources.list.d');
+      if (!hasSources && dropIn.existsSync()) {
+        for (final FileSystemEntity e in dropIn.listSync()) {
+          if (e is! File) continue;
+          if (!e.path.endsWith('.list') && !e.path.endsWith('.sources')) {
+            continue;
+          }
+          if (hasNonComment(e)) {
+            hasSources = true;
+            break;
+          }
+        }
+      }
+      if (hasSources) return;
+      if (FileSystemEntity.typeSync(legacy.path, followLinks: false) !=
+          FileSystemEntityType.notFound) {
+        legacy.deleteSync();
+      }
+      legacy.writeAsStringSync('''deb http://ports.ubuntu.com/ubuntu-ports noble main universe restricted multiverse
+deb http://ports.ubuntu.com/ubuntu-ports noble-updates main universe restricted multiverse
+deb http://ports.ubuntu.com/ubuntu-ports noble-security main universe restricted multiverse
+''', flush: true);
+    } on Object {
+      // 源修复失败不阻断命令；apt 会打印真实错误。
+    }
+  }
+
   /// 已装用户的兼容层补齐：Ubuntu 只要求 pkg；Alpine 要求 pkg + apt。
   Future<void> _ensureCompatShims() async {
     if (_shimsReady) return;
@@ -577,7 +637,9 @@ esac
       if (p == 'ubuntu') {
         try {
           final String body = await File('${bin.path}/pkg').readAsString();
-          if (!body.contains('apt-get update')) {
+          // 旧脚本里同样有 `apt-get update` 字符串（update 分支），
+          // 必须按版本标记判断，否则永远不会升级。
+          if (!body.contains('TGA_SHIM_VERSION=2')) {
             await _writeCompatShims(p);
             return;
           }
@@ -639,7 +701,10 @@ esac
     Duration timeout = const Duration(seconds: 60),
   }) async {
     if (requireInstalled && !installed) return null;
-    if (installed) await _ensureCompatShims();
+    if (installed) {
+      await _ensureAptSources();
+      await _ensureCompatShims();
+    }
     final String guestCwd = cwd == '.'
         ? '/root'
         : (cwd.startsWith('/') ? cwd : '/root/$cwd');
