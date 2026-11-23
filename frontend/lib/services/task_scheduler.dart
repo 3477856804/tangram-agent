@@ -234,8 +234,7 @@ class TaskScheduler extends ChangeNotifier {
       // Routine 失败重试与崩溃对账：进程启动后先对账一次（残留 running
       // 记录改为失败并安排重试），再把到点的失败运行逐个重跑；失败会继续
       // 记 attempts 与下次重试时刻，最多 3 次，绝不静默丢弃。
-      try {
-        if (!_routineReconciled) {
+      try {        if (!_routineReconciled) {
           _routineReconciled = true;
           try {
             await backend.sendControl(
@@ -267,6 +266,11 @@ class TaskScheduler extends ChangeNotifier {
       } on Object {
         // Routine 重试失败不影响其它定时能力；下一轮重试。
       }
+      // 变化检测触发（change_detect）钩子：本调度器不做真实网络轮询、
+      // 不主动拉取任何外部内容；需要变化检测的 Routine 由调用方（页面 /
+      // 集成）在拿到被 watch 内容的新快照时调 feedChangeSnapshot 喂快照，
+      // 后端仓储只比对 sha256，变化时执行一次、首次快照只建基线。
+      // 见 RoutineStore.checkChange 与后端 routine 控制域 check_changes。
       // 账号运营：发布「approved + 已到点」的定时草稿。
       // 如实说明：Timer 只随 App 进程存活而运行；进程被系统杀死/退到后台
       // 停止执行时不会发布，重新启动后的下一轮检查会补发已到期草稿。
@@ -277,6 +281,32 @@ class TaskScheduler extends ChangeNotifier {
       // 后端未连接等异常：本轮静默跳过，下个周期再试（不谎报执行）。
     } finally {
       _running = false;
+    }
+  }
+
+  /// 变化检测喂快照钩子：调用方拿到被 watch 内容的新文本快照后调这里，
+  /// 经后端 `routine` 控制域的 `check_changes` 动作喂给仓储；
+  /// 仓储比对快照 sha256，变化时执行一次、首次只建基线、不变不跑。
+  /// 本方法不拉取任何外部内容；后端未连接等异常返回 ok=false，不抛异常。
+  Future<Map<String, dynamic>> feedChangeSnapshot(
+    String routineId,
+    String snapshot,
+  ) async {
+    try {
+      final env = await backend.sendControl('routine', <String, dynamic>{
+        'action': 'check_changes',
+        'id': routineId,
+        'snapshot': snapshot,
+      });
+      final dynamic payload = env.payload;
+      if (payload is Map) {
+        return payload.map(
+          (dynamic k, dynamic v) => MapEntry(k.toString(), v),
+        );
+      }
+      return <String, dynamic>{'ok': false, 'error': '后端返回了非预期结构'};
+    } on Object catch (e) {
+      return <String, dynamic>{'ok': false, 'error': '$e'};
     }
   }
 
