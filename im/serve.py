@@ -84,6 +84,40 @@ from im.agp_bridge import (  # noqa: E402
 _AUDIT_LOG: AuditLog | None = None
 
 
+# ---- 沙箱人工接管（backend/app/sandbox/provider.py）----
+# 进程内唯一的接管管理器（_sandbox_exec 门禁共用它）；惰性导入，
+# 导入失败时门禁按「未接管」放行并记 stderr 警告，绝不阻断沙箱执行。
+_TAKEOVER: Any = None
+
+
+def _sandbox_takeover_block() -> str | None:
+    """接管门禁：被人工接管时返回拒绝文本（不执行命令）；否则返回 None。
+
+    只读租约元数据（持有人 / 原因标签 / 租约 id / 剩余秒数），
+    绝不读命令全文与密钥。拒绝本身由工具入口的审计统一记录
+    （结果以「工具执行失败」开头，记 failed + output_chars 元数据）。
+    """
+    global _TAKEOVER
+    try:
+        if _TAKEOVER is None:
+            from backend.app.sandbox.provider import get_takeover
+
+            _TAKEOVER = get_takeover()
+        lease = _TAKEOVER.active_lease()
+        if lease is None:
+            return None
+        return (
+            "工具执行失败：沙箱正被人工接管（takeover-active，"
+            f"持有人 {lease.holder}，原因 {lease.reason}，"
+            f"租约 {lease.id}，剩余 {lease.remaining_seconds()}s），"
+            "自动执行已暂停，请等待接管释放后再试"
+        )
+    except Exception as exc:  # noqa: BLE001 - 门禁读取失败绝不阻断沙箱执行
+        print(f"[sandbox] 接管状态读取失败（已忽略，继续执行）：{exc}",
+              file=sys.stderr, flush=True)
+        return None
+
+
 def _audit_log() -> AuditLog:
     global _AUDIT_LOG
     if _AUDIT_LOG is None:
@@ -488,7 +522,13 @@ def _sandbox_exec(command: str, timeout_s: float = 60.0) -> str:
     可见文件系统只有只读的系统目录（/usr、/etc 等）与可写的工作区
     （宿主 ~/.tangram/agent_ws，沙箱内为 /workspace）；宿主 home、凭据、
     代码仓库都不在挂载视图里，看不到也改不了。命令经文件传入，不拼 shell 字符串。
+
+    人工接管门禁：被接管时直接返回拒绝文本，不写命令文件、不启动沙箱。
     """
+    # 接管门禁必须在任何写盘 / 执行之前：被接管时命令文件都不落盘。
+    blocked = _sandbox_takeover_block()
+    if blocked is not None:
+        return blocked
     import shlex
     import subprocess
     import tempfile
