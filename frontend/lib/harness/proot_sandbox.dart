@@ -332,6 +332,7 @@ class ProotSandbox {
       // 脚本失败不影响系统包管理器本体。
       await _writeCompatShims(profile);
       await _ensureAptSources();
+      await _ensureAptConf();
 
       // 恢复可执行位：tar 头里的 mode 无法用 dart:io 直接落位，
       // 统一交给系统 toybox chmod（系统二进制，任何 targetSdk 都可执行）。
@@ -622,6 +623,29 @@ deb http://ports.ubuntu.com/ubuntu-ports noble-security main universe restricted
     }
   }
 
+  /// proot 的 fake root 不支持 setresuid / getgroups，apt 默认会降权到
+  /// `_apt` 用户，导致 update 直接失败：
+  ///   E: getgroups ... Function not implemented
+  ///   E: Failed to set new user ids - setresuid (1: Operation not permitted)
+  /// 写入 apt 配置强制以 root 运行下载方法，是 proot 下的标准做法。
+  Future<void> _ensureAptConf() async {
+    if (profile != 'ubuntu') return;
+    final Directory dir = Directory('${rootfsDir.path}/etc/apt/apt.conf.d');
+    try {
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      final File f = File('${dir.path}/99tga-proot');
+      const String body = '''// TGA: proot 无法 setresuid/getgroups，apt 必须以 root 运行下载方法。
+APT::Sandbox::User "root";
+''';
+      if (!f.existsSync() ||
+          !f.readAsStringSync().contains('APT::Sandbox::User')) {
+        f.writeAsStringSync(body, flush: true);
+      }
+    } on Object {
+      // 配置写不进去时 apt 会打印真实错误，不静默伪造成功。
+    }
+  }
+
   /// 已装用户的兼容层补齐：Ubuntu 只要求 pkg；Alpine 要求 pkg + apt。
   Future<void> _ensureCompatShims() async {
     if (_shimsReady) return;
@@ -703,6 +727,7 @@ deb http://ports.ubuntu.com/ubuntu-ports noble-security main universe restricted
     if (requireInstalled && !installed) return null;
     if (installed) {
       await _ensureAptSources();
+      await _ensureAptConf();
       await _ensureCompatShims();
     }
     final String guestCwd = cwd == '.'
