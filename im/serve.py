@@ -59,6 +59,13 @@ for _p in (str(_ROOT), str(_BACKEND_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from im.approval import (
+    CATEGORY_SANDBOX,
+    LEVEL_ASK,
+    LEVEL_DENY,
+    ApprovalPolicy,
+)
+from im.audit import AuditLog, outbound_decision, safe_append
 from im.gateway import Gateway, MultimodalMessage  # noqa: E402
 from im import brain  # noqa: E402
 from harness.version import PRODUCT_VERSION  # noqa: E402 - 版本唯一真源
@@ -71,6 +78,31 @@ from im.agp_bridge import (  # noqa: E402
     ws_read_frame,
     ws_text_frame,
 )
+
+# ---- IM 网关审计日志（im/audit.py）----
+# 惰性单例：构造时不写文件；写盘失败只警告，绝不阻断发送 / 沙箱执行。
+_AUDIT_LOG: AuditLog | None = None
+
+
+def _audit_log() -> AuditLog:
+    global _AUDIT_LOG
+    if _AUDIT_LOG is None:
+        _AUDIT_LOG = AuditLog()
+    return _AUDIT_LOG
+
+
+# ---- 分级审批（im/approval.py）----
+# 惰性单例：构造时不写文件；写盘失败只警告，绝不阻断发送 / 沙箱执行。
+# 与 Gateway 共享同一个实例（见 build_gateway），一次性批准在两边通用。
+_APPROVAL_POLICY: ApprovalPolicy | None = None
+
+
+def _approval_policy() -> ApprovalPolicy:
+    global _APPROVAL_POLICY
+    if _APPROVAL_POLICY is None:
+        _APPROVAL_POLICY = ApprovalPolicy()
+    return _APPROVAL_POLICY
+
 
 # 微信 context_token 登记表：主动推送（提醒）需要最近会话的 context_token
 wx_ctx: dict[str, str] = {}
@@ -542,18 +574,59 @@ def _exec_agent_tool(name: str, args: dict, svc) -> str:
         if name == "sandbox":
             command = str(args.get("command") or "")
             if not command.strip():
+                # 空命令被工具入口拒绝：记 denied，不记命令原文。
+                safe_append(_audit_log(), category="im.tool", action="sandbox",
+                            decision="denied", actor="agent",
+                            detail="tool=sandbox reason=empty-command")
                 return "工具执行失败：command 为空"
             # 命名空间沙箱依赖 Linux 的 unshare/chroot；Windows 上直接给出
             # 明确原因，而不是让子进程抛 FileNotFoundError 或吐一段乱码 stderr。
             # 放在工具入口而不是 _sandbox_exec 内部，是为了让底层执行器本身
             # 在任意平台都能被单元测试覆盖（命令文件唯一性等）。
             if os.name == "nt":
+                safe_append(_audit_log(), category="im.tool", action="sandbox",
+                            decision="denied", actor="agent",
+                            detail="tool=sandbox reason=unsupported-platform")
                 return (
                     "工具执行失败：网关的命名空间沙箱仅在 Linux 可用"
                     "（依赖 unshare/chroot）。Windows 请改用 APP 内置沙箱，"
                     "或在 WSL 中运行网关。"
                 )
-            return _sandbox_exec(command)
+            # 分级审批：沙箱执行默认 ask；破坏性命令强制 deny（见 im/approval.py）。
+            # 未批准时记一条待审批并返回 needs-approval，不执行命令。
+            # 审批记录里只记命令的第一个词 + 长度，绝不记完整命令与输出。
+            _approval = _approval_policy()
+            _level = _approval.decide_sandbox(command)
+            if _level == LEVEL_DENY:
+                safe_append(_audit_log(), category="im.tool", action="sandbox",
+                            decision="denied", actor="agent",
+                            detail="tool=sandbox reason=approval-deny")
+                return "工具执行失败：沙箱执行被审批策略拒绝（deny）"
+            if _level == LEVEL_ASK:
+                _first = command.split()[0][:40] if command.split() else "sandbox"
+                if not _approval.consume_approval(
+                        CATEGORY_SANDBOX, subject=_first):
+                    _entry = _approval.request_approval(
+                        CATEGORY_SANDBOX,
+                        subject=_first,
+                        detail=f"tool=sandbox cmd={_first} chars={len(command)}",
+                    )
+                    safe_append(_audit_log(), category="im.tool", action="sandbox",
+                                decision="denied", actor="agent",
+                                detail=f"tool=sandbox reason=needs-approval:{_entry['id']}")
+                    return ("工具执行失败：沙箱执行需人工批准 "
+                            f"（needs-approval:{_entry['id']}），命令未执行")
+            result = _sandbox_exec(command)
+            # 只记执行结果元数据（输出长度 / 退出码），绝不记命令原文与输出正文。
+            # 失败判定只看 _sandbox_exec 追加的尾行标记，不扫描输出正文。
+            last_line = result.rsplit("\n", 1)[-1]
+            failed = (result.startswith("工具执行失败")
+                      or last_line.startswith("[exit=")
+                      or "已强杀" in last_line)
+            safe_append(_audit_log(), category="im.tool", action="sandbox",
+                        decision="failed" if failed else "allowed", actor="agent",
+                        detail=f"tool=sandbox output_chars={len(result)}")
+            return result
         if name == "current_time":
             from datetime import datetime, timezone
 
@@ -1270,7 +1343,7 @@ class Handler(BaseHTTPRequestHandler):
             user_id=msg.user_id, platform="qq_napcat", modality=modality,
             payload=payload, ts=time.time(),
         )
-        ok, reason = self.gateway.send_outbound(reply)
+        ok, reason = self.gateway.send_outbound(reply, from_reply=True)
         self._json({"ok": ok, "reason": reason, "reply_chars": len(answer)})
 
     def _webhook_wechat(self, body: dict) -> None:
@@ -1294,6 +1367,7 @@ class Handler(BaseHTTPRequestHandler):
         self.gateway.send_outbound(MultimodalMessage(
             user_id=msg.user_id, platform="wechat_official", modality="text",
             payload=answer, ts=time.time(),
+            from_reply=True,
         ))
         self._json({"ok": True})
 
@@ -1346,6 +1420,7 @@ class Handler(BaseHTTPRequestHandler):
                      "msg_id": str((event.get("content") or {}).get("id") or ""),
                      "scope": "groups" if etype == "GROUP_AT_MESSAGE_CREATE" else "users"},
             ts=time.time(),
+            from_reply=True,
         ))
         self._json({"ok": ok, "reason": reason})
 
@@ -1359,6 +1434,7 @@ class Handler(BaseHTTPRequestHandler):
         ok, reason = self.gateway.send_outbound(MultimodalMessage(
             user_id=msg.user_id, platform="whatsapp_baileys", modality="text",
             payload=answer, ts=time.time(),
+            from_reply=True,
         ))
         self._json({"ok": ok, "reason": reason})
 
@@ -1546,7 +1622,7 @@ tick();setInterval(tick,8000);
 # 装配
 # --------------------------------------------------------------------------
 def build_gateway(onebot_base: str, napcat_token: str) -> Gateway:
-    gw = Gateway()
+    gw = Gateway(approval_policy=_approval_policy())
     gw.register_default_adapters()
     from .adapters.qq_napcat import QQNapCatAdapter
     from .adapters.telegram_bot import TelegramBotAdapter
@@ -1572,6 +1648,7 @@ def build_gateway(onebot_base: str, napcat_token: str) -> Gateway:
                 ok, reason = gw.send_outbound(MultimodalMessage(
                     user_id=msg.user_id, platform="qq_napcat", modality="text",
                     payload=answer, ts=time.time(),
+                    from_reply=True,
                 ))
                 if not ok:
                     print(f"[qq-napcat-ws] 回复发送失败：{reason}", flush=True)
@@ -1593,6 +1670,7 @@ def build_gateway(onebot_base: str, napcat_token: str) -> Gateway:
             gw.send_outbound(MultimodalMessage(
                 user_id=msg.user_id, platform="telegram", modality="text",
                 payload=answer, ts=time.time(),
+                from_reply=True,
             ))
         except Exception as exc:
             print(f"[tg] 处理失败：{exc}", flush=True)
@@ -1611,8 +1689,14 @@ def build_gateway(onebot_base: str, napcat_token: str) -> Gateway:
             payload = {"text": text, "context_token": wx_ctx.get(uid, "")}
         elif plat == "qq_openapi":
             payload = {"text": text, "msg_id": "", "scope": "users"}
-        gw.send_outbound(MultimodalMessage(user_id=uid, platform=plat, modality="text",
-                                           payload=payload, ts=time.time()))
+        ok, reason = gw.send_outbound(MultimodalMessage(
+            user_id=uid, platform=plat, modality="text",
+            payload=payload, ts=time.time()))
+        # 主动推送是独立的审计事件（与网关出站事件分开记，便于追溯提醒来源）：
+        # 只记渠道/接收方/决策，不记提醒正文。
+        safe_append(_audit_log(), category="im.proactive", action="deliver",
+                    decision=outbound_decision(ok, reason), actor=plat,
+                    detail=f"chan={chan} user={uid} reason={str(reason)[:200]}")
 
     brain_default.deliver = _deliver
     brain_default._stop.clear()  # 启动提醒调度线程
@@ -1646,7 +1730,7 @@ def build_gateway(onebot_base: str, napcat_token: str) -> Gateway:
                 payload.setdefault("scope", "users")
                 ok, reason = gw.send_outbound(MultimodalMessage(
                     user_id=msg.user_id, platform="qq_official", modality="text",
-                    payload=payload, ts=time.time()))
+                    payload=payload, ts=time.time(), from_reply=True))
                 if not ok:
                     print(f"[qq-official] 回复发送失败：{reason}", flush=True)
             except Exception as exc:
@@ -1705,6 +1789,7 @@ def build_gateway(onebot_base: str, napcat_token: str) -> Gateway:
                 gw.send_outbound(MultimodalMessage(
                     user_id=msg.user_id, platform="wechat_ilink", modality="text",
                     payload=payload, ts=time.time(),
+                    from_reply=True,
                 ))
             except Exception as exc:
                 print(f"[wx] 处理失败：{exc}", flush=True)
