@@ -18,6 +18,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart' show IOClient;
 
 import 'html_snapshot.dart';
 
@@ -26,8 +27,22 @@ class BrowserSession {
     required this.profileDir,
     http.Client? client,
     this.timeout = const Duration(seconds: 25),
-  })  : _client = client ?? http.Client(),
+  })  : _client = client ?? _directClient(),
         _ownsClient = client == null;
+
+  /// 真实直连客户端。
+  ///
+  /// 不沿用系统/环境里的 HTTP 代理：部分 Android 设备的代理配置会把
+  /// `https://baidu.com` 解析成 `baidu.com:<代理端口>`，导致
+  /// `Connection refused`（真实用户反馈）。Team Computer 的浏览器只做
+  /// 普通出站访问，显式 DIRECT 才能稳定工作。
+  static http.Client _directClient() {
+    final HttpClient inner = HttpClient()
+      ..findProxy = ((Uri _) => 'DIRECT')
+      ..connectionTimeout = const Duration(seconds: 20)
+      ..idleTimeout = const Duration(seconds: 15);
+    return IOClient(inner);
+  }
 
   final Directory profileDir;
   final Duration timeout;

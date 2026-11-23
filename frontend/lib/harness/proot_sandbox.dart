@@ -479,18 +479,23 @@ class ProotSandbox {
   bool _shimsReady = false;
 
   /// Ubuntu 的 pkg 兼容层：只映射到 apt-get，绝不覆盖原生 apt/dpkg。
+  /// `install` 前先 `apt-get update`：ubuntu-base 镜像不带包索引，
+  /// 直接 install 会报 `Unable to locate package`（真实用户反馈）。
   static const String _ubuntuPkgBody = '''#!/bin/sh
 # TGA: Ubuntu 环境，pkg 兼容层映射到 apt-get；原生 apt/dpkg 未被覆盖。
+export DEBIAN_FRONTEND=noninteractive
 cmd="\$1"; [ \$# -gt 0 ] && shift
 args=""
 for a in "\$@"; do
   [ "\$a" = "-y" ] || [ "\$a" = "--yes" ] || args="\$args \$a"
 done
 case "\$cmd" in
-  install|add) exec apt-get install -y \$args ;;
+  install|add)
+    apt-get update || exit \$?
+    exec apt-get install -y \$args ;;
   uninstall|remove|purge) exec apt-get remove -y \$args ;;
   update) exec apt-get update ;;
-  upgrade) exec apt-get upgrade -y ;;
+  upgrade) apt-get update || exit \$?; exec apt-get upgrade -y ;;
   search) exec apt-cache search \$args ;;
   list-installed) exec dpkg -l ;;
   *) exec apt-get "\$cmd" \$args ;;
@@ -567,6 +572,21 @@ esac
         ? <String>['pkg', 'apt']
         : <String>['pkg'];
     if (needed.every((String n) => File('${bin.path}/$n').existsSync())) {
+      // 老版本的 Ubuntu pkg 兼容层不会先 apt-get update，导致包索引为空时
+      // 安装必然失败；发现旧脚本就原地升级为当前版本。
+      if (p == 'ubuntu') {
+        try {
+          final String body = await File('${bin.path}/pkg').readAsString();
+          if (!body.contains('apt-get update')) {
+            await _writeCompatShims(p);
+            return;
+          }
+        } on Object {
+          // 读取失败时按缺失处理，下面会重写。
+          await _writeCompatShims(p);
+          return;
+        }
+      }
       _shimsReady = true;
       return;
     }
@@ -645,6 +665,12 @@ esac
           '-l',
           '-r',
           rootfsDir.path,
+          // 显式指定 guest 内初始工作目录。否则 proot 会把宿主的
+          // workingDirectory（App 私有目录）当成 guest 路径去 chdir，
+          // 打印 "can't chdir(...)" 并退回 "/"，随后 apt 里的 getcwd()
+          // 直接失败（真实用户反馈）。
+          '-w',
+          '/root',
           '-b',
           '/dev',
           '-b',
@@ -659,7 +685,7 @@ esac
           '-c',
           script,
         ],
-        workingDirectory: extDir.path,
+        workingDirectory: rootfsDir.path,
         includeParentEnvironment: false,
         environment: <String, String>{
           'LD_LIBRARY_PATH': extDir.path,

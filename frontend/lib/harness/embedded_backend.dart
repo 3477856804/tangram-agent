@@ -5244,6 +5244,8 @@ class EmbeddedBackend implements QqShellRunner {
             '-l',
             '-r',
             proot.rootfsDir.path,
+            '-w',
+            '/root',
             '-b',
             '/dev',
             '-b',
@@ -5256,7 +5258,7 @@ class EmbeddedBackend implements QqShellRunner {
             '-c',
             script,
           ],
-          workingDirectory: proot.extDir.path,
+          workingDirectory: proot.rootfsDir.path,
           includeParentEnvironment: false,
           environment: <String, String>{
             'LD_LIBRARY_PATH': proot.extDir.path,
