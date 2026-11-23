@@ -33,6 +33,8 @@ class TgaPageRecord {
     required this.botId,
     required this.createdAt,
     required this.updatedAt,
+    this.pinnedVersion,
+    this.pinnedAt,
   });
 
   final String id;
@@ -44,6 +46,13 @@ class TgaPageRecord {
   final DateTime createdAt;
   final DateTime updatedAt;
 
+  /// 审批钉选的版本号：用户批准的版本才钉选；未批准时为 null。
+  /// 分享链接与默认读取都给钉选版本，而不是最新版。
+  final int? pinnedVersion;
+
+  /// 钉选时间（用户批准时记下）。
+  final DateTime? pinnedAt;
+
   Map<String, dynamic> toJson() => <String, dynamic>{
     'id': id,
     'title': title,
@@ -53,6 +62,8 @@ class TgaPageRecord {
     'bot_id': botId,
     'created_at': createdAt.toIso8601String(),
     'updated_at': updatedAt.toIso8601String(),
+    'pinned_version': pinnedVersion,
+    'pinned_at': pinnedAt?.toIso8601String(),
   };
 
   static TgaPageRecord? tryParse(Map<String, dynamic> raw) {
@@ -66,6 +77,13 @@ class TgaPageRecord {
     final DateTime? created = DateTime.tryParse('${raw['created_at']}');
     final DateTime? updated = DateTime.tryParse('${raw['updated_at']}');
     if (created == null || updated == null) return null;
+    // 旧记录没有钉选字段时按空处理，不影响读写。
+    final int? pinnedVersion = raw['pinned_version'] is int
+        ? raw['pinned_version'] as int
+        : int.tryParse('${raw['pinned_version'] ?? ''}');
+    final DateTime? pinnedAt = raw['pinned_at'] == null
+        ? null
+        : DateTime.tryParse('${raw['pinned_at']}');
     return TgaPageRecord(
       id: id,
       title: title,
@@ -77,6 +95,8 @@ class TgaPageRecord {
       botId: (raw['bot_id'] ?? '').toString(),
       createdAt: created,
       updatedAt: updated,
+      pinnedVersion: pinnedVersion,
+      pinnedAt: pinnedAt,
     );
   }
 }
@@ -267,7 +287,8 @@ class PagesRepository {
     final int index = pages.indexWhere((TgaPageRecord p) => p.id == id);
     if (index < 0) return <String, dynamic>{'ok': false, 'error': '页面不存在'};
     final TgaPageRecord page = pages[index];
-    final int v = version ?? page.currentVersion;
+    // 未指定版本时默认给钉选版本（用户批准过的），未钉选时给最新版。
+    final int v = version ?? page.pinnedVersion ?? page.currentVersion;
     if (v < 1 || v > page.currentVersion) {
       return <String, dynamic>{'ok': false, 'error': '版本不存在：$v'};
     }
@@ -315,6 +336,8 @@ class PagesRepository {
         botId: old.botId,
         createdAt: old.createdAt,
         updatedAt: DateTime.now(),
+        pinnedVersion: old.pinnedVersion,
+        pinnedAt: old.pinnedAt,
       );
       pages[index] = page;
       await _writeIndex(pages);
@@ -347,10 +370,211 @@ class PagesRepository {
         botId: old.botId,
         createdAt: old.createdAt,
         updatedAt: DateTime.now(),
+        pinnedVersion: old.pinnedVersion,
+        pinnedAt: old.pinnedAt,
       );
       pages[index] = page;
       await _writeIndex(pages);
       return <String, dynamic>{'ok': true, 'page': page.toJson()};
+    });
+  }
+
+  /// 审批钉选：把指定版本钉选为分享与默认读取的版本。
+  /// 只有用户明确批准的版本才能钉选；新保存不改动钉选版本。
+  Future<Map<String, dynamic>> approve(String id, int version) {
+    return _guard(() async {
+      final List<TgaPageRecord> pages = await _readIndex();
+      final int index = pages.indexWhere((TgaPageRecord p) => p.id == id);
+      if (index < 0) return <String, dynamic>{'ok': false, 'error': '页面不存在'};
+      final TgaPageRecord old = pages[index];
+      if (version < 1 || version > old.currentVersion) {
+        return <String, dynamic>{'ok': false, 'error': '版本不存在：$version'};
+      }
+      final File f = File('${_root.path}/$id/v$version.html');
+      if (!await f.exists()) {
+        return <String, dynamic>{'ok': false, 'error': '版本文件缺失：v$version'};
+      }
+      final TgaPageRecord page = TgaPageRecord(
+        id: old.id,
+        title: old.title,
+        currentVersion: old.currentVersion,
+        visibility: old.visibility,
+        pinned: old.pinned,
+        botId: old.botId,
+        createdAt: old.createdAt,
+        updatedAt: DateTime.now(),
+        pinnedVersion: version,
+        pinnedAt: DateTime.now(),
+      );
+      pages[index] = page;
+      await _writeIndex(pages);
+      return <String, dynamic>{'ok': true, 'page': page.toJson()};
+    });
+  }
+
+  /// 逐行 diff 两个版本：返回新增 / 删除行数与逐行结果。
+  /// 行数超过 5000 行的版本暂不支持 diff（避免 O(n·m) 内存爆炸）。
+  Future<Map<String, dynamic>> diff(String id, int fromVersion, int toVersion) async {
+    final List<TgaPageRecord> pages = await _readIndex();
+    final int index = pages.indexWhere((TgaPageRecord p) => p.id == id);
+    if (index < 0) return <String, dynamic>{'ok': false, 'error': '页面不存在'};
+    final TgaPageRecord page = pages[index];
+    if (fromVersion < 1 ||
+        fromVersion > page.currentVersion ||
+        toVersion < 1 ||
+        toVersion > page.currentVersion) {
+      return <String, dynamic>{'ok': false, 'error': '版本不存在'};
+    }
+    final String a = await readVersion(id, fromVersion);
+    final String b = await readVersion(id, toVersion);
+    final List<String> aLines = a.split('\n');
+    final List<String> bLines = b.split('\n');
+    if (aLines.length > 5000 || bLines.length > 5000) {
+      return <String, dynamic>{'ok': false, 'error': '版本行数超过 5000 行，暂不支持 diff'};
+    }
+    final List<Map<String, dynamic>> lines = _lineDiff(aLines, bLines);
+    int added = 0;
+    int removed = 0;
+    for (final Map<String, dynamic> l in lines) {
+      if (l['t'] == '+') added++;
+      if (l['t'] == '-') removed++;
+    }
+    // 输出上限 1000 行：超长 diff 只给前后各 500 行并注明截断。
+    final List<Map<String, dynamic>> shown = lines.length > 1000
+        ? <Map<String, dynamic>>[
+            ...lines.take(500),
+            <String, dynamic>{
+              't': '…',
+              'text': '… 省略 ${lines.length - 1000} 行 …',
+            },
+            ...lines.skip(lines.length - 500),
+          ]
+        : lines;
+    return <String, dynamic>{
+      'ok': true,
+      'from': fromVersion,
+      'to': toVersion,
+      'added': added,
+      'removed': removed,
+      'truncated': lines.length > 1000,
+      'lines': shown,
+    };
+  }
+
+  /// 逐行 diff：公共前缀 / 后缀先裁掉，中间段用 LCS（单元数上限 100 万，
+  /// 超了按整段替换处理，不谎称逐行精确）。
+  static List<Map<String, dynamic>> _lineDiff(
+    List<String> a,
+    List<String> b,
+  ) {
+    int prefix = 0;
+    while (prefix < a.length &&
+        prefix < b.length &&
+        a[prefix] == b[prefix]) {
+      prefix++;
+    }
+    int suffix = 0;
+    while (suffix < a.length - prefix &&
+        suffix < b.length - prefix &&
+        a[a.length - 1 - suffix] == b[b.length - 1 - suffix]) {
+      suffix++;
+    }
+    final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
+    for (int i = 0; i < prefix; i++) {
+      out.add(<String, dynamic>{'t': ' ', 'text': a[i]});
+    }
+    final List<String> aMid = a.sublist(prefix, a.length - suffix);
+    final List<String> bMid = b.sublist(prefix, b.length - suffix);
+    if (aMid.isEmpty && bMid.isEmpty) {
+      // 全相同。
+    } else if ((aMid.length + 1) * (bMid.length + 1) > 1000000) {
+      for (final String l in aMid) {
+        out.add(<String, dynamic>{'t': '-', 'text': l});
+      }
+      for (final String l in bMid) {
+        out.add(<String, dynamic>{'t': '+', 'text': l});
+      }
+    } else {
+      // LCS 动态规划（扁平表）。
+      final int n = aMid.length;
+      final int m = bMid.length;
+      final List<int> dp = List<int>.filled((n + 1) * (m + 1), 0);
+      for (int i = n - 1; i >= 0; i--) {
+        for (int j = m - 1; j >= 0; j--) {
+          dp[i * (m + 1) + j] = aMid[i] == bMid[j]
+              ? dp[(i + 1) * (m + 1) + j + 1] + 1
+              : (dp[(i + 1) * (m + 1) + j] > dp[i * (m + 1) + j + 1]
+                  ? dp[(i + 1) * (m + 1) + j]
+                  : dp[i * (m + 1) + j + 1]);
+        }
+      }
+      int i = 0;
+      int j = 0;
+      while (i < n && j < m) {
+        if (aMid[i] == bMid[j]) {
+          out.add(<String, dynamic>{'t': ' ', 'text': aMid[i]});
+          i++;
+          j++;
+        } else if (dp[(i + 1) * (m + 1) + j] >= dp[i * (m + 1) + j + 1]) {
+          out.add(<String, dynamic>{'t': '-', 'text': aMid[i]});
+          i++;
+        } else {
+          out.add(<String, dynamic>{'t': '+', 'text': bMid[j]});
+          j++;
+        }
+      }
+      while (i < n) {
+        out.add(<String, dynamic>{'t': '-', 'text': aMid[i]});
+        i++;
+      }
+      while (j < m) {
+        out.add(<String, dynamic>{'t': '+', 'text': bMid[j]});
+        j++;
+      }
+    }
+    for (int i = a.length - suffix; i < a.length; i++) {
+      out.add(<String, dynamic>{'t': ' ', 'text': a[i]});
+    }
+    return out;
+  }
+
+  /// 回滚：以旧版本内容追加一个新版本，历史不改写；钉选版本不动。
+  Future<Map<String, dynamic>> rollback(String id, int version) {
+    return _guard(() async {
+      final List<TgaPageRecord> pages = await _readIndex();
+      final int index = pages.indexWhere((TgaPageRecord p) => p.id == id);
+      if (index < 0) return <String, dynamic>{'ok': false, 'error': '页面不存在'};
+      final TgaPageRecord old = pages[index];
+      if (version < 1 || version > old.currentVersion) {
+        return <String, dynamic>{'ok': false, 'error': '版本不存在：$version'};
+      }
+      String html;
+      try {
+        html = await readVersion(id, version);
+      } on Object {
+        return <String, dynamic>{'ok': false, 'error': '版本文件缺失：v$version'};
+      }
+      final int next = old.currentVersion + 1;
+      await _writeVersion(id, next, html);
+      final TgaPageRecord page = TgaPageRecord(
+        id: old.id,
+        title: old.title,
+        currentVersion: next,
+        visibility: old.visibility,
+        pinned: old.pinned,
+        botId: old.botId,
+        createdAt: old.createdAt,
+        updatedAt: DateTime.now(),
+        pinnedVersion: old.pinnedVersion,
+        pinnedAt: old.pinnedAt,
+      );
+      pages[index] = page;
+      await _writeIndex(pages);
+      return <String, dynamic>{
+        'ok': true,
+        'page': page.toJson(),
+        'rolled_back_from': version,
+      };
     });
   }
 
