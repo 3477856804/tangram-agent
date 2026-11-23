@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
+from .memory import MemoryStore
+
 PERSONA = (
     "你是檀阁瑞木 Tangram——住在用户设备里的个人专属 AI Agent（不是七巧板玩具游戏）。"
     "你运行在用户本地，接入了微信/QQ 等聊天渠道，能记住对话、精确计算、报时、设定时提醒。"
@@ -608,16 +610,97 @@ def try_search(text: str) -> Optional[str]:
     return search_web(q) if q else None
 
 
+_RE_REMEMBER = re.compile(
+    r"^(?:请)?(?:记住|记下|帮我记住|帮我记下)[:：]?\s*(.+)$", re.S)
+_RE_FORGET = re.compile(
+    r"^(?:请)?(?:忘记|忘掉|删掉记忆|删除记忆)[:：]?\s*(.+)$", re.S)
+
+
+def try_remember(text: str, memory: MemoryStore) -> Optional[str]:
+    """显式保存指令：「记住：xxx」→ 长期事实库（只接受显式保存）。"""
+    m = _RE_REMEMBER.match((text or "").strip())
+    if not m:
+        return None
+    content = (m.group(1) or "").strip().rstrip("。！!.")
+    if not content or content.endswith(("吗", "么", "?", "？")):
+        return None
+    res = memory.save_fact(content, source="user-explicit")
+    if res["ok"]:
+        fact = res["fact"]
+        shown = content[:60]
+        return f"记住了：{shown}（id={fact.id}，已进长期记忆，可随时让我忘记）"
+    if res["reason"] == "secret-rejected":
+        return "这条内容里有密钥/令牌类信息，我不能记进记忆（已拒绝保存）。"
+    if res["reason"] == "remember-off":
+        return "长期记忆开关是关着的，这次没记。先打开 remember 开关再让我记。"
+    if res["reason"] == "too-long":
+        return "这条太长了（超过 2000 字），没记进去，拆短一点再让我记。"
+    return "这次没记进去，换个说法再试试。"
+
+
+def try_forget(text: str, memory: MemoryStore) -> Optional[str]:
+    """显式遗忘指令：「忘记：xxx」→ 按 id 或文本删长期事实（不可恢复）。"""
+    m = _RE_FORGET.match((text or "").strip())
+    if not m:
+        return None
+    query = (m.group(1) or "").strip().rstrip("。！!.")
+    if not query:
+        return None
+    res = memory.forget_fact(query)
+    if res["deleted"]:
+        return f"已忘记 {res['deleted']} 条相关记忆，删后不可恢复。"
+    return f"没找到和「{query[:40]}」相关的长期记忆，没删任何东西。"
+
+
 class Brain:
     def __init__(self, deliver: Optional[Callable[[str, str], None]] = None,
-                 llm: Optional[Callable[[str], str]] = None) -> None:
+                 llm: Optional[Callable[[str], str]] = None,
+                 memory: Optional[MemoryStore] = None,
+                 audit=None) -> None:
         self.deliver = deliver or (lambda key, text: None)
         self.llm = llm
+        # 三层记忆：显式保存/遗忘走 im/memory.py；未传入时惰性创建默认实例
+        # （只在首次 handle 时建，import 时不碰磁盘）。
+        self._memory = memory
+        self._audit = audit
         # 条目：(触发时刻, 展示事项, 渠道key, 周期秒(0=一次性), 到点执行的任务指令(可选))
         self._reminders: list[list] = []
         self._lock = threading.Lock()
         self._timer: Optional[threading.Thread] = None
         self._stop = threading.Event()
+
+    @property
+    def memory(self) -> MemoryStore:
+        """持有的三层记忆实例；未显式传入时惰性创建默认实例。"""
+        if self._memory is None:
+            self._memory = MemoryStore(audit=self._audit)
+        return self._memory
+
+    # ---- 三层记忆的显式入口（只加能力，不改变原有对外行为） ----
+    def remember_fact(self, text: str, **kwargs) -> dict:
+        """显式保存一条长期事实（走 MemoryStore）。"""
+        return self.memory.save_fact(text, **kwargs)
+
+    def forget_fact(self, query: str) -> dict:
+        """按 id 或文本遗忘长期事实（删后不可恢复）。"""
+        return self.memory.forget_fact(query)
+
+    def recall_facts(self, query: str = "", **kwargs) -> list:
+        """查长期事实：有 query 按文本/id 搜，否则按过滤列出。"""
+        if (query or "").strip():
+            return self.memory.search_facts(query)
+        return self.memory.list_facts(**kwargs)
+
+    def session_summary(self, key: str = "") -> list:
+        """取某会话的摘要要点。"""
+        return self.memory.session_summary(key or "default")
+
+    def _learn_turn(self, key: str, role: str, text: str) -> None:
+        """学进会话摘要：失败绝不影响应答（只警告、不抛错）。"""
+        try:
+            self.memory.learn_turn(key, role, text)
+        except Exception:  # noqa: BLE001 - 记忆失败不阻断应答
+            pass
 
     # ---- 提醒调度 ----
     def _register(self, delay: float, item: str, key: str,
@@ -665,37 +748,39 @@ class Brain:
         t = (text or "").strip()
         if not t:
             return None
+        # 三层记忆（短期）：用户每轮先学进会话摘要（只存要点，不存全文；
+        # learn 开关关闭时不记；失败不影响应答）。
+        self._learn_turn(key or "default", "user", t)
         out = try_identity(t)
-        if out:
-            return out
-        out = try_time(t)
-        if out:
-            return out
-        out = try_math(t)
-        if out:
-            return out
-        out = try_exec(t)
-        if out:
-            return out
-        out = try_recurring(t, key or "default", self._register)
-        if out:
-            return out
-        out = try_remind(t, key or "default", self._register)
-        if out:
-            return out
-        if "天气" in t:
+        if not out:
+            out = try_time(t)
+        if not out:
+            out = try_math(t)
+        if not out:
+            out = try_exec(t)
+        if not out:
+            out = try_recurring(t, key or "default", self._register)
+        if not out:
+            out = try_remind(t, key or "default", self._register)
+        if not out and "天气" in t:
             out = try_weather(t)
-            if out:
-                return out
-        out = try_search(t)
-        if out:
-            return out
-        if self.llm is not None:
+        if not out:
+            out = try_search(t)
+        if not out:
+            out = try_remember(t, self.memory)
+        if not out:
+            out = try_forget(t, self.memory)
+        if not out and self.llm is not None:
             try:
-                return self.llm(t)
+                out = self.llm(t)
             except Exception:
-                return "本地模型刚才没答上来（推理异常），换个问法试试。"
-        return None
+                out = "本地模型刚才没答上来（推理异常），换个问法试试。"
+            if out:
+                self._learn_turn(key or "default", "assistant", out)
+            return out
+        if out:
+            self._learn_turn(key or "default", "assistant", out)
+        return out or None
 
     def shutdown(self) -> None:
         self._stop.set()
