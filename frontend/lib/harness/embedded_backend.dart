@@ -1276,11 +1276,21 @@ class EmbeddedBackend implements QqShellRunner {
       'architecture':
           'mcp + openapi + graphql clients + per-record secrets + append-only log',
       'kinds': <String>['mcp', 'openapi', 'graphql'],
-      'auth': <String>['none', 'bearer', 'header', 'query'],
+      'auth': <String>['none', 'bearer', 'header', 'query', 'oauth'],
       'secret_storage': 'platform-secure-storage',
       'stdio_supported': false,
+      'stdio_default': 'disabled',
       'oauth_supported': false,
-      'note': '凭据只存系统安全存储，不进入模型上下文；OAuth 流程未实现。',
+      'oauth_refresh_supported': true,
+      'mcp_hardening': <String, dynamic>{
+        'request_timeout_s': 20,
+        'max_tools': 250,
+        'max_pages': 20,
+        'backoff_initial_s': 30,
+        'backoff_max_s': 300,
+      },
+      'note': '凭据只存系统安全存储，不进入模型上下文；OAuth 登录流程未实现，'
+          '仅提供已有 refresh_token 的自动刷新入口，失败标记需重绑定。',
     },
     'call': <String, dynamic>{
       'architecture':
