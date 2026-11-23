@@ -5,5 +5,25 @@
 """
 
 from .asr import AsrUnavailable, transcribe_audio, whisper_transcriber
+from .provider import (
+    BaseVoiceProvider,
+    ElevenLabsVoiceProvider,
+    LocalVoiceProvider,
+    OpenAiCompatibleVoiceProvider,
+    VoiceNotConfigured,
+    VoiceProviderKind,
+    VoiceProviderRegistry,
+)
 
-__all__ = ["AsrUnavailable", "transcribe_audio", "whisper_transcriber"]
+__all__ = [
+    "AsrUnavailable",
+    "transcribe_audio",
+    "whisper_transcriber",
+    "BaseVoiceProvider",
+    "ElevenLabsVoiceProvider",
+    "LocalVoiceProvider",
+    "OpenAiCompatibleVoiceProvider",
+    "VoiceNotConfigured",
+    "VoiceProviderKind",
+    "VoiceProviderRegistry",
+]
