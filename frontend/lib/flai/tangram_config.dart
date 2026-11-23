@@ -9,6 +9,7 @@ import 'flows/chat/chat_experience_config.dart';
 import 'flows/sidebar/sidebar_config.dart';
 import 'flows/workspace/workspace_sections.dart';
 import 'providers/ai_provider.dart';
+import 'providers/local_voice_provider.dart';
 import 'providers/speech_voice_provider.dart';
 import 'providers/storage_provider.dart';
 import 'providers/tangram_auth_provider.dart';
@@ -64,9 +65,12 @@ AppScaffoldConfig buildTangramConfig({
   authProvider: TangramLocalAuthProvider(),
   aiProvider: aiProvider,
   storageProvider: storageProvider,
-  // 语音输入：平台语音识别（speech_to_text）真实实现；注入后 app_router
+  // 语音输入：默认本地后端（LocalVoiceProvider）——STT 仍走平台语音识别
+  // （speech_to_text）真实实现，TTS 补上已实测的 Edge TTS；注入后 app_router
   // 自动启用 enableVoice，麦克风按钮、录音波形（真实声级）、转写全部生效。
-  voiceProvider: SpeechToTextVoiceProvider(),
+  // 云端后端（OpenAI 兼容 / ElevenLabs）由 VoiceProviderRegistry 切换，
+  // 未配置密钥时诚实报未配置、不伪造成功。
+  voiceProvider: LocalVoiceProvider(stt: SpeechToTextVoiceProvider()),
   theme: TangramTheme.flaiTheme(),
   // 应用显示名：产品名 tangram-agent 的简称，短到 Android 启动器不会截断。
   // 产品全称仍为 tangram-agent（见「关于」区），版本取单一真源 kAppVersion。
