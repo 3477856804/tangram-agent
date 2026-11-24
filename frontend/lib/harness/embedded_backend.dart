@@ -39,7 +39,9 @@ import 'package:http/http.dart' as http;
 
 import 'package:tangram/agent/sandbox/sandboxed_shell.dart';
 import 'package:tangram/app_version.dart';
+import 'package:tangram/harness/agent_manager.dart';
 import 'package:tangram/harness/app_package.dart';
+import 'package:tangram/harness/approval_gate.dart';
 import 'package:tangram/harness/artifacts.dart';
 import 'package:tangram/harness/audit_log.dart';
 import 'package:tangram/harness/builtin_plugins.dart';
@@ -256,6 +258,8 @@ class EmbeddedBackend implements QqShellRunner {
   // ---- 万物皆插件内核 + Super Agent（懒装配，绑定真实能力）----
   PluginKernel? _kernel;
   SuperAgent? _superAgent;
+  AgentManager? _agentManager;
+  late final ApprovalGate _agentApprovalGate = ApprovalGate(store.root);
   Future<void>? _kernelBoot;
 
   final ToolRegistry tools = ToolRegistry();
@@ -452,6 +456,25 @@ class EmbeddedBackend implements QqShellRunner {
       chat: (Map<String, dynamic> p) => _chat(p),
       kernel: kernel,
     );
+    _agentManager = AgentManager(
+      registry: AgentRegistry(superAgentId: 'super'),
+      gate: _agentApprovalGate,
+      audit: ({
+        required String action,
+        required String decision,
+        required String actor,
+        required String detail,
+      }) =>
+          _audit.append(
+        category: 'agent_manager',
+        action: action,
+        decision: decision,
+        actor: actor,
+        detail: detail,
+      ),
+      scheduler: _RoutineSchedulerAdapter(routines),
+      superAgentId: 'super',
+    );
     StartupTimeline.global.mark('kernel.ready', background: true);
   }
 
@@ -471,6 +494,54 @@ class EmbeddedBackend implements QqShellRunner {
       return _err('Super Agent 装配失败，请稍后重试');
     }
     return await sa.handle(_action(p, 'describe'), p);
+  }
+
+  /// Agent 管理控制域：管理工具只对 super agent 开放（caller 固定为 'super'）。
+  Future<Map<String, dynamic>> _onAgentManager(Map<String, dynamic> p) async {
+    await _ensureKernel();
+    final AgentManager? m = _agentManager;
+    if (m == null) {
+      return _err('Agent 管理器装配失败，请稍后重试');
+    }
+    const String caller = 'super';
+    switch (_action(p, 'list')) {
+      case 'list':
+        return m.listAgents(caller);
+      case 'groups':
+        return m.groupAgents(caller);
+      case 'update_instruction':
+        return await m.updateInstruction(
+          callerId: caller,
+          targetId: (p['target'] ?? '').toString(),
+          newInstruction: (p['instruction'] ?? '').toString(),
+          expectedVersion: (p['expected_version'] is num)
+              ? (p['expected_version'] as num).toInt()
+              : -1,
+        );
+      case 'update_model':
+        return await m.updateModel(
+          callerId: caller,
+          targetId: (p['target'] ?? '').toString(),
+          model: (p['model'] ?? '').toString(),
+        );
+      case 'schedule_routine':
+        return await m.scheduleRoutine(
+          callerId: caller,
+          targetId: (p['target'] ?? '').toString(),
+          name: (p['name'] ?? '').toString(),
+          prompt: (p['prompt'] ?? '').toString(),
+          crons: p['crons'] is List
+              ? (p['crons'] as List).map((dynamic e) => e.toString()).toList()
+              : <String>[],
+        );
+      case 'pending':
+        return <String, dynamic>{
+          'ok': true,
+          'pending': await m.listPendingApprovals(),
+        };
+      default:
+        return <String, dynamic>{'ok': false, 'error': '未知 agent 管理动作'};
+    }
   }
 
   void _emit(String topic, Map<String, dynamic> data) {
@@ -1101,6 +1172,7 @@ class EmbeddedBackend implements QqShellRunner {
         'plugin_community' => await _pluginCommunity(payload),
         'plugin_kernel' => await _onPluginKernel(payload),
         'super_agent' => await _onSuperAgent(payload),
+        'agent_manager' => await _onAgentManager(payload),
         'knowledge_base' => await knowledge.handle(
           _action(payload, 'list'),
           payload,
@@ -8313,4 +8385,26 @@ class _ManagedProc implements QqShellProc {
   Future<void> kill() async {
     killFn?.call();
   }
+}
+
+/// 把真实 RoutineService 接到 AgentManager 的 RoutineScheduler 接口。
+class _RoutineSchedulerAdapter implements RoutineScheduler {
+  _RoutineSchedulerAdapter(this._routines);
+  final RoutineService _routines;
+
+  @override
+  Future<Map<String, dynamic>> createRoutine({
+    required String name,
+    required String prompt,
+    required List<String> crons,
+    String? modelId,
+    String timezone = 'local',
+  }) =>
+      _routines.create(
+        name: name,
+        prompt: prompt,
+        crons: crons,
+        modelId: modelId,
+        timezone: timezone,
+      );
 }
