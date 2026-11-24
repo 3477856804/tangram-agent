@@ -6,5 +6,5 @@
 
 const String kAppVersion = String.fromEnvironment(
   'TANGRAM_VERSION',
-  defaultValue: '0.0.11',
+  defaultValue: '0.0.41',
 );
