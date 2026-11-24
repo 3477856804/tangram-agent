@@ -27,6 +27,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:tangram/harness/core.dart';
+import 'package:tangram/harness/kernel_guard.dart';
 import 'package:tangram/harness/plugin_tier.dart';
 
 // ---------------------------------------------------------------------------
@@ -669,6 +670,20 @@ class PluginKernel {
   /// 默认 null＝不改变既有行为；钩子抛异常即拒绝挂载，不静默继续。
   Future<void> Function(String pluginId, Map<String, dynamic> info)? onBeforeMount;
 
+  /// 调用守卫（G2 仲裁）：null＝不拦截；返回 false 即拒绝本次调用。
+  InvokeGuard? invokeGuard;
+
+  /// 接缝 → 需要的 capability 令牌（G2）。默认见 [defaultSeamCaps]；
+  /// 一旦配置即强制，root 调用方（UI）除外。
+  final Map<String, List<String>> seamCaps = defaultSeamCaps();
+
+  /// 内核态快照（G5）：装配结果可回退，最多保留 [snapshotLimit] 份。
+  final List<KernelSnapshot> _kernelSnapshots = <KernelSnapshot>[];
+  int snapshotLimit = 20;
+
+  /// 回退过程中不再触发挂载前钩子，避免快照递归。
+  bool _restoring = false;
+
   final Map<String, _ServiceEntry> _services = <String, _ServiceEntry>{};
   final Map<String, CapabilitySeam> _seams = <String, CapabilitySeam>{};
   final Map<String, _ControlEntry> _controlActions = <String, _ControlEntry>{};
@@ -853,8 +868,27 @@ class PluginKernel {
         };
       }
     }
+    // G1：T3 第三方插件未声明能力即拒绝（fail-closed）。
+    if (plugin.tier == PluginTier.thirdParty && plugin.caps.isEmpty) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '插件 $pluginId 为 T3 第三方且未声明 caps，拒绝挂载（fail-closed）',
+      };
+    }
+    // G4：声明了地址就必须可解析，非法即拒绝挂载。
+    final String? declaredAddress = plugin.address;
+    if (declaredAddress != null) {
+      try {
+        parsePluginAddress(declaredAddress);
+      } on FormatException catch (e) {
+        return <String, dynamic>{
+          'ok': false,
+          'error': '插件 $pluginId 地址非法：$declaredAddress（$e）',
+        };
+      }
+    }
     final Future<void> Function(String, Map<String, dynamic>)? before = onBeforeMount;
-    if (before != null) {
+    if (before != null && !_restoring) {
       try {
         await before(pluginId, <String, dynamic>{
           'tier': plugin.tier.wire,
@@ -977,10 +1011,49 @@ class PluginKernel {
 
   /// 通过当前激活 provider 真实调用一个接缝能力。
   Future<Map<String, dynamic>> invoke(String seamName, String method,
-      Map<String, dynamic> args) async {
+      Map<String, dynamic> args,
+      {String caller = kRootCaller, List<String> caps = const <String>[]}) async {
     final CapabilitySeam? s = _seams[seamName];
     if (s == null) {
       return <String, dynamic>{'ok': false, 'error': '接缝 $seamName 不存在'};
+    }
+    // G2 仲裁：root（UI）直通；其他调用方必须满足 seamCaps 与自带 caps。
+    if (caller != kRootCaller) {
+      final List<String> need = seamCaps[seamName] ?? const <String>[];
+      final List<String> missing =
+          need.where((String c) => !caps.contains(c)).toList();
+      if (missing.isNotEmpty) {
+        emit('seam.denied', 'kernel', <String, dynamic>{
+          'seam': seamName,
+          'caller': caller,
+          'missing_caps': missing,
+        });
+        return <String, dynamic>{
+          'ok': false,
+          'error': '调用方 $caller 缺少能力令牌：$missing（接缝 $seamName）',
+          'missing_caps': missing,
+        };
+      }
+    }
+    final InvokeGuard? guard = invokeGuard;
+    if (guard != null) {
+      bool allowed = false;
+      try {
+        allowed = await guard(seamName, method, args, caller);
+      } on Object catch (e) {
+        return <String, dynamic>{'ok': false, 'error': '调用守卫异常，拒绝执行：$e'};
+      }
+      if (!allowed) {
+        emit('seam.denied', 'kernel', <String, dynamic>{
+          'seam': seamName,
+          'caller': caller,
+          'reason': 'guard_rejected',
+        });
+        return <String, dynamic>{
+          'ok': false,
+          'error': '调用被守卫拒绝：$seamName.$method',
+        };
+      }
     }
     final SeamProviderEntry? p = s.providers[s.activeProviderId];
     if (p == null) {
@@ -1248,7 +1321,11 @@ class PluginKernel {
             ? Map<String, dynamic>.from(p['args'] as Map)
             : <String, dynamic>{};
         return await invoke((p['seam'] ?? '').toString(),
-            (p['method'] ?? '').toString(), args);
+            (p['method'] ?? '').toString(), args,
+            caller: (p['caller'] ?? kRootCaller).toString(),
+            caps: (p['caps'] is List)
+                ? (p['caps'] as List).map((dynamic e) => e.toString()).toList()
+                : const <String>[]);
       case 'set_mode':
         return await _setMode((p['mode'] ?? '').toString());
       case 'set_patch':
@@ -1296,6 +1373,20 @@ class PluginKernel {
         return await mount((p['plugin'] ?? '').toString());
       case 'unmount':
         return await unmount((p['plugin'] ?? '').toString());
+      case 'snapshot':
+        return <String, dynamic>{
+          'ok': true,
+          'snapshot': captureSnapshot((p['label'] ?? '').toString()),
+        };
+      case 'snapshots':
+        return <String, dynamic>{
+          'ok': true,
+          'snapshots': _kernelSnapshots
+              .map((KernelSnapshot s) => s.toJson())
+              .toList(),
+        };
+      case 'rollback':
+        return await restoreSnapshot((p['id'] ?? '').toString());
       default:
         // 插件贡献的控制动作优先匹配。
         final _ControlEntry? entry = _controlActions[action];
@@ -1310,6 +1401,101 @@ class PluginKernel {
           'ok': false,
           'error': '未知内核动作：$action',
         };
+    }
+  }
+
+  /// G5：捕获内核态快照（节点树 / seam 激活项 / 服务 / 模式 / 事件序号）。
+  Map<String, dynamic> captureSnapshot(String label) {
+    final KernelSnapshot snap = KernelSnapshot(
+      id: 'ksnap-${_kernelSnapshots.length + 1}-${DateTime.now().millisecondsSinceEpoch}',
+      label: label.isEmpty ? '内核快照' : label,
+      at: DateTime.now().toIso8601String(),
+      nodes: _nodes.values
+          .map((PluginNode n) => <String, dynamic>{
+                'id': n.plugin.id,
+                'parent': n.parentId,
+                'source': n.source,
+                'config_layer': n.configLayer,
+                'tier': n.plugin.tier.wire,
+              })
+          .toList(),
+      seams: _seams.values
+          .map((CapabilitySeam sm) => <String, dynamic>{
+                'name': sm.name,
+                'active': sm.activeProviderId,
+                'providers': sm.providers.keys.toList(),
+              })
+          .toList(),
+      services: _services.keys.toList(),
+      mode: _booted ? _profile.mode.label : '',
+      seq: _seq,
+    );
+    _kernelSnapshots.add(snap);
+    while (_kernelSnapshots.length > snapshotLimit) {
+      _kernelSnapshots.removeAt(0);
+    }
+    emit('kernel.snapshot', 'kernel', <String, dynamic>{
+      'id': snap.id,
+      'label': snap.label,
+      'nodes': snap.nodes.length,
+    });
+    return snap.toJson();
+  }
+
+  /// G5：回退到某份内核态快照：先卸载多余插件，再按原顺序补挂，最后恢复激活项与模式。
+  Future<Map<String, dynamic>> restoreSnapshot(String id) async {
+    KernelSnapshot? snap;
+    for (final KernelSnapshot s in _kernelSnapshots) {
+      if (s.id == id) snap = s;
+    }
+    if (snap == null) {
+      return <String, dynamic>{'ok': false, 'error': '内核快照不存在：$id'};
+    }
+    _restoring = true;
+    try {
+      final Set<String> keep = snap.nodeIds;
+      for (final String pid in List<String>.of(_nodes.keys)) {
+        if (!keep.contains(pid)) {
+          await unmount(pid, reason: 'rollback');
+        }
+      }
+      for (final Map<String, dynamic> n in snap.nodes) {
+        final String pid = (n['id'] ?? '').toString();
+        if (pid.isEmpty || _nodes.containsKey(pid)) continue;
+        final Map<String, dynamic> r = await mount(
+          pid,
+          parentId: n['parent']?.toString(),
+          source: (n['source'] ?? 'runtime').toString(),
+          configLayer: (n['config_layer'] ?? 'runtime').toString(),
+        );
+        if (r['ok'] != true) {
+          return <String, dynamic>{
+            'ok': false,
+            'error': '回退失败：插件 $pid 无法重新挂载（${r['error']}）',
+            'snapshot': id,
+          };
+        }
+      }
+      for (final Map<String, dynamic> sm in snap.seams) {
+        final CapabilitySeam? seam = _seams[(sm['name'] ?? '').toString()];
+        final String active = (sm['active'] ?? '').toString();
+        if (seam == null || active.isEmpty) continue;
+        if (seam.providers.containsKey(active)) seam.activeProviderId = active;
+      }
+      if (_booted && snap.mode.isNotEmpty && snap.mode != _profile.mode.label) {
+        await _setMode(snap.mode);
+      }
+      emit('kernel.rollback', 'kernel', <String, dynamic>{
+        'snapshot': id,
+        'mounted': mountedCount,
+      });
+      return <String, dynamic>{
+        'ok': true,
+        'snapshot': id,
+        'mounted': mountedCount,
+      };
+    } finally {
+      _restoring = false;
     }
   }
 
