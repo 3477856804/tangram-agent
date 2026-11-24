@@ -4,7 +4,7 @@
 可接云端 API 模型或本地 GGUF 模型，支持在微信 / QQ / 飞书里对话，
 带工作轨迹、蒸馏模型管理、知识图谱、日记与定时任务等能力。
 
-版本：**0.0.11**（唯一真源为仓库根 `VERSION`，由 `harness/version.py`
+版本：**0.0.41**（唯一真源为仓库根 `VERSION`，由 `harness/version.py`
 的 `assert_version_frozen()` 校验 pubspec / 后端包 / App 常量全部一致）
 
 > 本仓库为开源软件，许可证为 **GNU AGPL-3.0**（见根目录 `LICENSE`）。
