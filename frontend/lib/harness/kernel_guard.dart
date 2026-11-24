@@ -13,6 +13,11 @@ library;
 /// 根调用方：用户自己的 UI（老板本人操作），默认拥有全部能力。
 const String kRootCaller = 'ui';
 
+/// 未表明身份的调用方：控制消息里没传 caller 时的默认值。
+/// 绝不默认给 root——任何省略身份的发送方都只能拿到这个身份，
+/// 再由能力令牌与调用守卫决定能不能调（高危接缝一律拒绝）。
+const String kUntrustedCaller = 'untrusted';
+
 /// 调用守卫：返回 false 即拒绝本次接缝调用（可审计、可否决）。
 typedef InvokeGuard = Future<bool> Function(
   String seam,
@@ -79,8 +84,19 @@ class KernelSnapshot {
 
 /// 默认能力要求：高权限接缝必须显式声明令牌才能调用。
 /// UI（root）不受限；插件调用方必须带对应 cap。
+/// 覆盖全部已注册接缝（见 builtin_plugins.dart 的 provideSeamProvider 调用）：
+/// 只覆盖 3 条会让其余接缝对非 root 调用方零令牌可调。
 Map<String, List<String>> defaultSeamCaps() => <String, List<String>>{
       'core/sandbox': <String>['sandbox:exec'],
       'core/im': <String>['channel:send'],
       'core/mcp': <String>['net:fetch'],
+      'core/storage': <String>['storage:write'],
+      'core/model': <String>['model:invoke'],
+      'core/scheduler': <String>['scheduler:schedule'],
+      'core/skills': <String>['skill:invoke'],
+      'core/skills/recorded': <String>['skill:invoke'],
+      'core/agent-loop': <String>['agent:run'],
+      'core/trajectory': <String>['trajectory:write'],
+      'ext/hooks': <String>['hooks:invoke'],
+      'ui/pages': <String>['ui:open'],
     };
