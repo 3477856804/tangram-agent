@@ -4,4 +4,4 @@
 ``harness.version.assert_version_frozen`` 校验。
 """
 
-__version__ = "0.0.11"
+__version__ = "0.0.41"
