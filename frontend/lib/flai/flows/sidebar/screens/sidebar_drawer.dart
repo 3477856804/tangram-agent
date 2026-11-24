@@ -55,6 +55,7 @@ const Map<String, _NavGroup> _navGroupByLabelKey = <String, _NavGroup>{
   'sidebar.calls': _NavGroup.collaboration,
   'sidebar.globalSearch': _NavGroup.reports,
   'sidebar.artifacts': _NavGroup.creation,
+  'sidebar.memory': _NavGroup.reports,
   'sidebar.channels': _NavGroup.collaboration,
   'sidebar.accountOps': _NavGroup.collaboration,
   'sidebar.training': _NavGroup.system,

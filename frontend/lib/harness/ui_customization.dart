@@ -138,6 +138,7 @@ class UiCustomizationConfig {
     'sidebar.calls',
     'sidebar.globalSearch',
     'sidebar.artifacts',
+    'sidebar.memory',
     'sidebar.accountOps',
     'sidebar.graph',
     'sidebar.mapping',
@@ -180,6 +181,7 @@ class UiCustomizationConfig {
     'sidebar.calls': '语音通话',
     'sidebar.globalSearch': '全局搜索',
     'sidebar.artifacts': '本地产物',
+    'sidebar.memory': '分层记忆',
     'sidebar.accountOps': '账号运营',
     'sidebar.graph': '知识图谱',
   };

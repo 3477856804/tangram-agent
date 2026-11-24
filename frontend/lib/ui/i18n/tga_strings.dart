@@ -171,6 +171,7 @@ class TgaStrings {
     'sidebar.integration': {'cn': '集成', 'tw': '整合', 'en': 'Integrations'},
     'sidebar.calls': {'cn': '通话', 'tw': '通話', 'en': 'Calls'},
     'sidebar.artifacts': {'cn': '产物', 'tw': '產物', 'en': 'Artifacts'},
+    'sidebar.memory': {'cn': '记忆', 'tw': '記憶', 'en': 'Memory'},
     'sidebar.creator': {'cn': '创客', 'tw': '創客', 'en': 'Creator'},
     'sidebar.customize': {'cn': '界面', 'tw': '介面', 'en': 'Customize'},
     'sidebar.uiPlugins': {'cn': '插件槽', 'tw': '外掛槽', 'en': 'UI Plugins'},

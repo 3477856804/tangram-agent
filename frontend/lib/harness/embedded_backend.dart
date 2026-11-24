@@ -57,6 +57,7 @@ import 'package:tangram/harness/knowledge_base.dart';
 import 'package:tangram/harness/local_inference.dart';
 import 'package:tangram/harness/local_search.dart';
 import 'package:tangram/harness/mcp_client.dart';
+import 'package:tangram/harness/memory_store.dart';
 import 'package:tangram/harness/model3d.dart';
 import 'package:tangram/harness/plugin_kernel.dart';
 import 'package:tangram/harness/prompt_kit.dart';
@@ -160,6 +161,21 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// 本机全局搜索：只读真实落盘的对话 / 页面 / 知识库 / 通话等。
   late final LocalSearchService search = LocalSearchService(store.root);
+
+  /// 三层记忆：会话要点 + 显式事实库 + 跨 bot 共享事实。
+  late final MemoryStore memory = MemoryStore(
+    store.root,
+    botId: 'tangram',
+    onAudit: (String action, String decision, String detail) {
+      unawaited(_auditLog().append(
+        category: 'memory',
+        action: action,
+        decision: decision,
+        actor: 'memory',
+        detail: detail,
+      ));
+    },
+  );
 
   /// 本地产物：工作区、Pages 版本与 Team Computer 文件。
   late final ArtifactService artifacts = ArtifactService(store.root);
@@ -328,6 +344,7 @@ class EmbeddedBackend implements QqShellRunner {
     'call',
     'search',
     'artifact',
+    'memory',
     'compute',
     'workspace_mapping',
     'web_search',
@@ -504,6 +521,123 @@ class EmbeddedBackend implements QqShellRunner {
       }).toList();
     }
     return <String, dynamic>{...result, 'bind_supported': bindSupported};
+  }
+
+  // ---- memory：三层记忆（会话要点 / 事实库 / 共享事实）----
+
+  Future<Map<String, dynamic>> _memoryControl(Map<String, dynamic> p) async {
+    final String action = _action(p, 'status');
+    final String session =
+        (p['session'] ?? p['session_id'] ?? 'default').toString();
+    switch (action) {
+      case 'status':
+        return _ok(await memory.stats());
+      case 'summary':
+        final List<String> points = await memory.sessionSummary(session);
+        return _ok(<String, dynamic>{
+          'session': session,
+          'points': points,
+          'count': points.length,
+        });
+      case 'clear_summary':
+        return _ok(<String, dynamic>{
+          'session': session,
+          'cleared': await memory.clearSession(session),
+        });
+      case 'learn':
+        if (p['enabled'] is bool) await memory.setLearn(p['enabled'] as bool);
+        return _ok(await memory.stats());
+      case 'remember':
+        if (p['enabled'] is bool) {
+          await memory.setRemember(p['enabled'] as bool);
+        }
+        return _ok(await memory.stats());
+      case 'save':
+        final MemorySaveResult r = await memory.saveFact(
+          (p['text'] ?? '').toString(),
+          source: (p['source'] ?? '').toString(),
+          tags: (p['tags'] is List)
+              ? (p['tags'] as List).map((dynamic e) => '$e').toList()
+              : <String>[],
+          scope: (p['scope'] ?? MemoryScope.private).toString(),
+          shared: p['shared'] == true,
+        );
+        if (!r.ok) {
+          return _err('记忆保存失败：${_memoryReason(r.reason)}');
+        }
+        return _ok(<String, dynamic>{'fact': r.fact!.toJson()});
+      case 'facts':
+        final List<MemoryFact> facts = await memory.listFacts(
+          source: p['source'] == null ? null : '${p['source']}',
+          tags: (p['tags'] is List)
+              ? (p['tags'] as List).map((dynamic e) => '$e').toList()
+              : null,
+          scope: p['scope'] == null ? null : '${p['scope']}',
+          includeShared: p['include_shared'] != false,
+        );
+        return _ok(<String, dynamic>{
+          'facts': facts.map((MemoryFact f) => f.toJson()).toList(),
+          'total': facts.length,
+        });
+      case 'search':
+        final List<MemoryFact> facts = await memory
+            .searchFacts((p['query'] ?? p['text'] ?? '').toString());
+        return _ok(<String, dynamic>{
+          'facts': facts.map((MemoryFact f) => f.toJson()).toList(),
+          'total': facts.length,
+        });
+      case 'forget':
+        final MemoryForgetResult r =
+            await memory.forgetFact((p['query'] ?? p['id'] ?? '').toString());
+        if (!r.ok) return _err('没有匹配的记忆事实');
+        return _ok(<String, dynamic>{'deleted': r.deleted, 'ids': r.ids});
+      default:
+        return _err('未知记忆动作：$action');
+    }
+  }
+
+  static String _memoryReason(String reason) => switch (reason) {
+        'empty' => '内容为空',
+        'too-long' => '超过单条长度上限',
+        'secret-rejected' => '检测到凭据/密钥内容，已拒绝保存',
+        'remember-off' => '长期记忆已关闭',
+        'fact-store-full' => '事实库已满',
+        _ => reason,
+      };
+
+  /// 把本会话要点与相关长期事实注入 system。只注入真实存在的内容；
+  /// 没有就返回空串，不生成任何「记忆」。
+  Future<String> _layeredMemoryBlock(String query, String session) async {
+    try {
+      final bool learn = memory.learn;
+      final bool remember = memory.remember;
+      final List<String> points =
+          learn ? await memory.sessionSummary(session) : <String>[];
+      final List<MemoryFact> facts =
+          remember ? await memory.searchFacts(query) : <MemoryFact>[];
+      if (points.isEmpty && facts.isEmpty) return '';
+      final StringBuffer buf = StringBuffer('\n\n【分层记忆（本机真实保存）】');
+      if (facts.isNotEmpty) {
+        buf.writeln('\n长期事实：');
+        for (final MemoryFact f in facts.take(8)) {
+          buf.writeln(
+            '- ${f.text}${f.scope == MemoryScope.shared ? '（shared）' : ''}',
+          );
+        }
+      }
+      if (points.isNotEmpty) {
+        buf.writeln('\n本会话要点：');
+        final List<String> recent =
+            points.length > 8 ? points.sublist(points.length - 8) : points;
+        for (final String point in recent) {
+          buf.writeln('- $point');
+        }
+      }
+      buf.writeln('以上内容来自本机记忆，引用时无需编造额外细节。');
+      return buf.toString();
+    } on Object {
+      return '';
+    }
   }
 
   /// Pages 控制域：列表 / 创建 / 读取 / 保存 / 元数据 / 删除 / 导出 /
@@ -1129,6 +1263,7 @@ class EmbeddedBackend implements QqShellRunner {
           _action(payload, 'list'),
           payload,
         ),
+        'memory' => await _memoryControl(payload),
         'compute' => await _onCompute(payload),
         'workspace_mapping' => await _workspaceMapping(payload),
         'web_search' => await _webSearchControl(payload),
@@ -1320,6 +1455,15 @@ class EmbeddedBackend implements QqShellRunner {
       'sources': <String>['work', 'page', 'computer'],
       'read_limit_bytes': ArtifactService.maxReadBytes,
       'upload': false,
+    },
+    'memory': <String, dynamic>{
+      'architecture':
+          'session points + explicit fact store + shared scope, injected into chat system',
+      'storage': 'app-private-json',
+      'learn': true,
+      'remember': true,
+      'secret_rejected': true,
+      'note': '只有显式保存才进事实库；凭据类内容会被拒绝。',
     },
     'creator': <String, dynamic>{
       'architecture':
@@ -1988,6 +2132,8 @@ class EmbeddedBackend implements QqShellRunner {
     // 跨会话持久记忆：turns 表真实落盘，按最近性 + 词项相关度注入，
     // 新会话也能召回长期事实；按会话边界与当轮历史去重。
     effectiveSystem += await _persistentMemoryBlock(text, session, history);
+    // 三层记忆：显式事实库 + 本会话要点（真实落盘，没有就不注入）。
+    effectiveSystem += await _layeredMemoryBlock(text, session);
     // 私有知识库：仅注入真实命中的片段，并要求模型标注来源；无命中不注入。
     try {
       final String kbBlock = await knowledge.contextBlock(
@@ -2149,6 +2295,13 @@ class EmbeddedBackend implements QqShellRunner {
       'text': reply,
       'ts': _now(),
     });
+    // 会话要点：每轮真实学习进三层记忆（learn 关闭时内部直接跳过）。
+    try {
+      await memory.learnTurn(session, 'user', text);
+      await memory.learnTurn(session, 'assistant', reply);
+    } on Object {
+      // 记忆写盘失败不影响本轮回答。
+    }
     await _appendTrace(<String, dynamic>{
       'kind': 'chat',
       'text': text,
@@ -4053,6 +4206,117 @@ class EmbeddedBackend implements QqShellRunner {
             return ToolResult.error('${r['error'] ?? '读取失败'}');
           }
           return ToolResult.ok('${r['text']}', data: r);
+        },
+      ),
+      AgentTool(
+        name: 'memory_save',
+        description: '把一条事实显式写入长期记忆（凭据类内容会被拒绝）',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'text': <String, dynamic>{'type': 'string'},
+            'source': <String, dynamic>{'type': 'string'},
+            'tags': <String, dynamic>{
+              'type': 'array',
+              'items': <String, dynamic>{'type': 'string'},
+            },
+            'shared': <String, dynamic>{'type': 'boolean'},
+          },
+          'required': <String>['text'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await _memoryControl(<String, dynamic>{
+            'action': 'save',
+            'text': (args['text'] ?? '').toString(),
+            'source': (args['source'] ?? 'agent').toString(),
+            'tags': args['tags'] is List ? args['tags'] : <dynamic>[],
+            'shared': args['shared'] == true,
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '保存失败'}');
+          }
+          final Map<dynamic, dynamic> fact = r['fact'] as Map;
+          return ToolResult.ok('已记住：${fact['text']}', data: r);
+        },
+      ),
+      AgentTool(
+        name: 'memory_search',
+        description: '按关键字检索长期记忆事实',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'query': <String, dynamic>{'type': 'string'},
+          },
+          'required': <String>['query'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await _memoryControl(<String, dynamic>{
+            'action': 'search',
+            'query': (args['query'] ?? '').toString(),
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '检索失败'}');
+          }
+          final List<dynamic> facts =
+              (r['facts'] as List?) ?? const <dynamic>[];
+          if (facts.isEmpty) return ToolResult.ok('没有匹配的长期记忆。');
+          final StringBuffer buf = StringBuffer('**长期记忆**\n');
+          for (final dynamic raw in facts) {
+            if (raw is! Map) continue;
+            buf.writeln(
+              '- `${raw['id']}` ${raw['text']}'
+              '${raw['scope'] == 'shared' ? '（shared）' : ''}',
+            );
+          }
+          return ToolResult.ok(buf.toString(), data: r);
+        },
+      ),
+      AgentTool(
+        name: 'memory_summary',
+        description: '读取某个会话的短期要点摘要',
+        tier: ApprovalTier.read,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'session': <String, dynamic>{'type': 'string'},
+          },
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await _memoryControl(<String, dynamic>{
+            'action': 'summary',
+            'session': (args['session'] ?? 'default').toString(),
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '读取摘要失败'}');
+          }
+          final List<dynamic> points =
+              (r['points'] as List?) ?? const <dynamic>[];
+          if (points.isEmpty) return ToolResult.ok('这个会话还没有要点。');
+          return ToolResult.ok('**会话要点**\n- ${points.join('\n- ')}', data: r);
+        },
+      ),
+      AgentTool(
+        name: 'memory_forget',
+        description: '按 id 或文本删除长期记忆事实（不可恢复）',
+        tier: ApprovalTier.write,
+        parameters: <String, dynamic>{
+          'type': 'object',
+          'properties': <String, dynamic>{
+            'query': <String, dynamic>{'type': 'string'},
+          },
+          'required': <String>['query'],
+        },
+        execute: (args, _) async {
+          final Map<String, dynamic> r = await _memoryControl(<String, dynamic>{
+            'action': 'forget',
+            'query': (args['query'] ?? '').toString(),
+          });
+          if (r['ok'] != true) {
+            return ToolResult.error('${r['error'] ?? '删除失败'}');
+          }
+          return ToolResult.ok('已删除 ${r['deleted']} 条记忆', data: r);
         },
       ),
       AgentTool(

@@ -17,6 +17,7 @@ import 'package:tangram/ui/pages/tga_experience_page.dart';
 import 'package:tangram/ui/pages/tga_group_chat_page.dart';
 import 'package:tangram/ui/pages/tga_knowledge_page.dart';
 import 'package:tangram/ui/pages/tga_mapping_page.dart';
+import 'package:tangram/ui/pages/tga_memory_page.dart';
 import 'package:tangram/ui/pages/tga_image_page.dart';
 import 'package:tangram/ui/pages/tga_integrations_page.dart';
 import 'package:tangram/ui/pages/tga_models_page.dart';
@@ -287,6 +288,12 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
     icon: Icons.inventory_outlined,
     labelKey: 'sidebar.artifacts',
     page: const TgaArtifactsPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.psychology_outlined,
+    labelKey: 'sidebar.memory',
+    page: const TgaMemoryPage(),
     fullPage: true,
   ),
   NavItem(
