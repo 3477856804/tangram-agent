@@ -16,9 +16,11 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/plugin_kernel.dart';
+import 'package:tangram/harness/skill_recorder.dart';
 import 'package:tangram/harness/sun_run.dart';
 
 // ---------------------------------------------------------------------------
@@ -602,6 +604,99 @@ class BuiltinPlugins {
         },
       ),
 
+      // ---- core/recorded-skills（看一次就学会：录制 skill 当插件）----
+      _CapabilityPlugin(
+        id: 'core.recorded-skills',
+        name: '录制技能',
+        version: v,
+        description: '把用户演示一次的操作录成 skill，挂进内核当插件用；回放仅 dry-run，不执行真实操作',
+        seam: 'core/skills/recorded',
+        definition: '录制/列出/重命名/删除录制 skill；回放只做校验与 dry-run 描述',
+        requires: const <String>['core/storage'],
+        consumers: const <String>['system-prompt', 'agent-loop'],
+        build: (PluginContext ctx) {
+          final SkillRecorder recorder = SkillRecorder();
+          final SkillStore store =
+              SkillStore(Directory('${host.dataDir()}/skills'));
+          Future<Skill?> findSkill(String id) async => store.get(id);
+          ctx.provideSeamProvider('core/skills/recorded', 'skill-recorder',
+              '真实 SkillStore 落盘 + SkillRecorder 录制（dry-run 回放）',
+              (String method, Map<String, dynamic> args) async {
+            switch (method) {
+              case 'start':
+                return recorder.startRecording(
+                  (args['name'] ?? '').toString(),
+                  description: (args['description'] ?? '').toString(),
+                );
+              case 'record':
+                final Map<String, String> params = <String, String>{};
+                if (args['params'] is Map) {
+                  (args['params'] as Map).forEach(
+                      (dynamic k, dynamic v) => params[k.toString()] = v?.toString() ?? '');
+                }
+                return recorder.recordStep(
+                  (args['action'] ?? '').toString(),
+                  (args['target'] ?? '').toString(),
+                  params: params,
+                );
+              case 'stop':
+                final Map<String, dynamic> r = recorder.stopRecording();
+                if (r['ok'] == true) {
+                  final Map<String, dynamic> saved =
+                      await store.put(r['skill'] as Skill);
+                  if (saved['ok'] != true) return saved;
+                }
+                return r;
+              case 'cancel':
+                return recorder.cancelRecording();
+              case 'list':
+                final List<Skill> skills = await store.list();
+                return <String, dynamic>{
+                  'ok': true,
+                  'skills': skills.map((Skill s) => s.toPluginDescriptor()).toList(),
+                };
+              case 'get':
+                final Skill? s = await findSkill((args['id'] ?? '').toString());
+                if (s == null) {
+                  return <String, dynamic>{'ok': false, 'error': 'skill 不存在'};
+                }
+                return <String, dynamic>{'ok': true, 'skill': s.toJson()};
+              case 'rename':
+                return await store.rename(
+                    (args['id'] ?? '').toString(), (args['name'] ?? '').toString());
+              case 'delete':
+                return await store.delete((args['id'] ?? '').toString());
+              case 'replay':
+                final Skill? s = await findSkill((args['id'] ?? '').toString());
+                if (s == null) {
+                  return <String, dynamic>{'ok': false, 'error': 'skill 不存在'};
+                }
+                return SkillReplay.dryRun(s);
+              case 'status':
+                return <String, dynamic>{
+                  'ok': true,
+                  'recording': recorder.isRecording,
+                  'steps': recorder.currentStepCount,
+                  'rejected': recorder.rejectedAudits.length,
+                  'stored': (await store.list()).length,
+                  if (store.lastWarning.isNotEmpty) 'warning': store.lastWarning,
+                };
+              default:
+                return _unknown(method);
+            }
+          });
+          // 插件描述进内核控制动作，供 skill.replay 入口调用。
+          ctx.registerControlAction('skill.replay',
+              (Map<String, dynamic> p) async {
+            final Skill? s = await findSkill((p['id'] ?? '').toString());
+            if (s == null) {
+              return <String, dynamic>{'ok': false, 'error': 'skill 不存在'};
+            }
+            return SkillReplay.dryRun(s);
+          });
+        },
+      ),
+
       // ---- core/mcp ----
       _CapabilityPlugin(
         id: 'core.mcp',
@@ -914,6 +1009,7 @@ class BuiltinPlugins {
             'core.model',
             'core.sandbox',
             'core.skills',
+            'core.recorded-skills',
             'core.mcp',
             'core.agent-loop',
             'core.trajectory',
