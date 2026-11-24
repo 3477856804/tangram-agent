@@ -10,6 +10,11 @@
   OpenAI 兼容云端 API（真实 HTTP）。都没有时明确抛错，不伪造回复。
 * 记忆真实落盘（``MemoryStore``）：每轮对话、长期笔记、词项检索都能
   跨进程重启恢复，供 ``recall_memory`` / ``remember_note`` 工具调用。
+* 三层记忆（``im.memory.MemoryStore``，round11 接线）：会话摘要 +
+  显式事实库 + 共享记忆，与 ``im.brain.Brain`` 共用同一实例；
+  ``remember_fact`` / ``forget_fact`` / ``recall_facts`` /
+  ``session_summary`` 与 Brain 同语义（默认 private、显式 opt-in 才
+  共享、密钥内容拒绝保存并记审计、写盘失败只警告不阻断）。
 * 工具真实执行：``sandbox`` 跑真实进程，``current_time`` 读真实时钟。
 """
 
@@ -41,6 +46,9 @@ _SYSTEM = (
     "用简洁、诚实的简体中文回答；能算准的精确计算，查不到就直说查不到，绝不编造。"
     "你有真实工具：sandbox（工作区 shell）、current_time（真实时钟）、"
     "recall_memory（真实历史记忆）、remember_note（写入长期记忆）、"
+    "remember_fact（显式保存长期事实：默认仅自己可见）、"
+    "forget_fact（按 id 或文本删除长期事实）、"
+    "recall_facts（查长期事实）、session_summary（取某会话的摘要要点）、"
     "quant_research（量化研究助手：对历史收盘价做真实技术指标与风险度量计算，"
     "仅供研究学习，不推荐买卖、不承诺收益、不代客交易，回答末尾必须保留风险提示）。"
 )
@@ -57,6 +65,10 @@ class RuntimeService:
         self.workspace = self.data_dir / "agent_ws"
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.memory = MemoryStore(self.data_dir / "memory")
+        # 三层记忆（im/memory.py）：惰性创建，构造时不碰磁盘、不 import
+        # im 包（见 memory_layers 属性）；与 Brain 共用同一实例。
+        self._layers = None
+        self._layers_loaded = False
 
         self.local_model = local_model or os.environ.get("TANGRAM_MODEL", "")
         self.api_base = (api_base or os.environ.get("TANGRAM_API_BASE", "")).rstrip("/")
@@ -66,6 +78,71 @@ class RuntimeService:
         self._brain = None
         self._brain_loaded = False
 
+    # ---- 三层记忆（im/memory.py，round11 接线）----
+    @property
+    def memory_layers(self):
+        """持有的三层记忆实例；未创建时惰性创建，import 时不碰磁盘。
+
+        import 路径选择：沿用本文件已有的 ``im.brain`` 接线方式——
+        ``im`` 包只在仓库根在 sys.path 时可用（im/serve.py 与
+        tests/conftest.py 都保证这一点），因此这里同样在方法内惰性
+        ``from im.memory import ...``，失败则返回 None 而不是在模块
+        import 期就炸掉 backend 包。审计日志与网关共用同一文件
+        （``data_dir/im_audit.jsonl``，与 ``im.audit`` 默认路径一致），
+        只记元数据、绝不记事实正文。
+        """
+        if not self._layers_loaded:
+            self._layers_loaded = True
+            try:
+                from im.audit import AuditLog  # noqa: PLC0415 - 仓库根已在 sys.path
+                from im.memory import MemoryStore as LayeredMemoryStore  # noqa: PLC0415
+            except Exception:  # noqa: BLE001 - 无 im 包时三层记忆不可用
+                self._layers = None
+            else:
+                audit = AuditLog(self.data_dir / "im_audit.jsonl")
+                self._layers = LayeredMemoryStore(
+                    self.data_dir / "memory_layers.json", audit=audit)
+        return self._layers
+
+    def remember_fact(self, text: str, **kwargs) -> dict:
+        """显式保存一条长期事实（与 im/brain.Brain 同语义）。"""
+        layers = self.memory_layers
+        if layers is None:
+            return {"ok": False, "fact": None, "reason": "layers-unavailable"}
+        return layers.save_fact(text, **kwargs)
+
+    def forget_fact(self, query: str) -> dict:
+        """按 id 或文本遗忘长期事实（删后不可恢复，与 Brain 同语义）。"""
+        layers = self.memory_layers
+        if layers is None:
+            return {"ok": False, "deleted": 0, "ids": []}
+        return layers.forget_fact(query)
+
+    def recall_facts(self, query: str = "", **kwargs) -> list:
+        """查长期事实：有 query 按文本/id 搜，否则按过滤列出（与 Brain 同语义）。"""
+        layers = self.memory_layers
+        if layers is None:
+            return []
+        if (query or "").strip():
+            return layers.search_facts(query)
+        return layers.list_facts(**kwargs)
+
+    def session_summary(self, key: str = "") -> list:
+        """取某会话的摘要要点（与 Brain 同语义）。"""
+        layers = self.memory_layers
+        if layers is None:
+            return []
+        return layers.session_summary(key or "default")
+
+    def _learn_turn_layers(self, session_key: str, role: str, text: str) -> None:
+        """学进会话摘要：失败绝不影响应答（只警告、不抛错）。"""
+        try:
+            layers = self.memory_layers
+            if layers is not None:
+                layers.learn_turn(session_key, role, text)
+        except Exception:  # noqa: BLE001 - 记忆失败不阻断应答
+            pass
+
     # ---- 确定性能力（真实实现，非模板占位）----
     def _deterministic(self, text: str, session_key: str) -> Optional[str]:
         if not self._brain_loaded:
@@ -73,7 +150,12 @@ class RuntimeService:
             try:
                 from im.brain import Brain  # noqa: PLC0415 - 仓库根已在 sys.path
 
-                self._brain = Brain(deliver=self._deliver_reminder)
+                # 与 Brain 共用同一个三层记忆实例：确定性路径的「记住/忘记」
+                # 指令与 agent 工具看到的是同一份事实库，不会出现两份
+                # 实例各读各的文件快照。layers 不可用时传 None，Brain
+                # 回落到自己的默认实例（与接线前行为一致）。
+                self._brain = Brain(deliver=self._deliver_reminder,
+                                    memory=self.memory_layers)
             except Exception:  # noqa: BLE001 - 无该模块时跳过，不伪造能力
                 self._brain = None
         if self._brain is None:
@@ -182,11 +264,14 @@ class RuntimeService:
         if not text:
             raise ValueError("空消息")
         self.memory.add_turn("user", text, session_id=session_id)
+        # 三层记忆（短期）：用户每轮只学要点进会话摘要，不进事实库。
+        self._learn_turn_layers(session_id, "user", text)
 
         direct = self._deterministic(text, session_id)
         if direct:
             # 确定性能力：内容短，直接落记忆后一次性返回。
             self.memory.add_turn("assistant", direct.strip(), session_id=session_id)
+            self._learn_turn_layers(session_id, "assistant", direct.strip())
             yield from (direct[i:i + 12] for i in range(0, len(direct), 12))
             return
 
@@ -214,6 +299,7 @@ class RuntimeService:
         if not answer:
             raise RuntimeNotConfigured("本次没有拿到任何真实回复内容（不伪造）")
         self.memory.add_turn("assistant", answer, session_id=session_id)
+        self._learn_turn_layers(session_id, "assistant", answer)
 
     def chat(self, text: str, session_id: str = "default") -> str:
         return "".join(self.chat_stream(text, session_id=session_id)).strip()
@@ -239,6 +325,61 @@ class RuntimeService:
             if not note:
                 return "工具执行失败：text 为空"
             return f"已记入长期核心记忆（id={self.memory.core_commit(note)}）：{note}"
+        if name == "remember_fact":
+            # 三层记忆（长期事实库）：只接受显式保存；文案与
+            # im/brain.try_remember 的拒绝原因一一对应。
+            text = str(args.get("text") or "").strip()
+            if not text:
+                return "工具执行失败：text 为空"
+            kwargs: dict = {}
+            if args.get("source"):
+                kwargs["source"] = str(args["source"])
+            if isinstance(args.get("tags"), list):
+                kwargs["tags"] = [str(t) for t in args["tags"]]
+            if args.get("shared") is True or args.get("scope") == "shared":
+                kwargs["shared"] = True
+            res = self.remember_fact(text, **kwargs)
+            if res["ok"]:
+                fact = res["fact"]
+                return (f"记住了：{text[:60]}（id={fact.id}，已进长期记忆，"
+                        f"可随时让我忘记）")
+            if res["reason"] == "secret-rejected":
+                return "这条内容里有密钥/令牌类信息，我不能记进记忆（已拒绝保存）。"
+            if res["reason"] == "remember-off":
+                return "长期记忆开关是关着的，这次没记。先打开 remember 开关再让我记。"
+            if res["reason"] == "too-long":
+                return "这条太长了（超过 2000 字），没记进去，拆短一点再让我记。"
+            if res["reason"] == "layers-unavailable":
+                return "工具执行失败：三层记忆模块不可用（im 包未加载）"
+            return "这次没记进去，换个说法再试试。"
+        if name == "forget_fact":
+            query = str(args.get("query") or args.get("text") or "").strip()
+            if not query:
+                return "工具执行失败：query 为空"
+            res = self.forget_fact(query)
+            if res["deleted"]:
+                return f"已忘记 {res['deleted']} 条相关记忆，删后不可恢复。"
+            return f"没找到和「{query[:40]}」相关的长期记忆，没删任何东西。"
+        if name == "recall_facts":
+            query = str(args.get("query") or "")
+            kwargs = {}
+            if args.get("source"):
+                kwargs["source"] = str(args["source"])
+            if isinstance(args.get("tags"), list):
+                kwargs["tags"] = [str(t) for t in args["tags"]]
+            if args.get("scope") in ("private", "shared"):
+                kwargs["scope"] = str(args["scope"])
+            facts = self.recall_facts(query, **kwargs)
+            if not facts:
+                return "没有检索到相关长期事实。"
+            lines = [f"- [{f.scope}] {f.text}（id={f.id}）" for f in facts]
+            return "\n".join(lines)[:2000]
+        if name == "session_summary":
+            key = str(args.get("session_id") or args.get("key") or "default")
+            points = self.session_summary(key)
+            if not points:
+                return "该会话暂无摘要要点。"
+            return "\n".join(f"- {p}" for p in points)[:2000]
         if name == "sandbox":
             # 安全修复：命令来自不可信的聊天/桥接输入，绝不能交给 shell，
             # 也不能继承含 API Key / Token 的进程环境。这里强制走真实策略：
@@ -295,6 +436,9 @@ class RuntimeService:
             "cloud_configured": self._cloud_config() is not None,
             "model_backend": self._probe_backend(),
             "memory": self.memory.stats(),
+            "memory_layers": (self.memory_layers.stats()
+                             if self.memory_layers is not None
+                             else {"available": False}),
             "time": time.strftime("%F %T"),
         }
 
