@@ -62,6 +62,16 @@ __all__ = ["PluginRuntime", "ToolError", "main"]
 
 _ALLOWED_TOOL_TYPES = ("prompt", "http", "shell")
 _ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+# 插件分级（T0 内核 / T1 官方 / T2 用户自建 / T3 第三方）
+_TIERS = ("T0", "T1", "T2", "T3")
+_TIER_ALIASES = {
+    "system": "T0",
+    "official": "T1",
+    "user": "T2",
+    "third_party": "T3",
+    "thirdparty": "T3",
+}
 _MAX_OUTPUT = 4000
 _MAX_AUDIT_EVENTS = 5000
 _ACTIONS = (
@@ -120,6 +130,18 @@ def _positive_float(value: Any, default: float) -> float:
     return max(0.1, min(300.0, parsed))
 
 
+def def _normalize_tier(raw: Any) -> str:
+    """解析插件分级；未知值兜底 T1（官方），不静默升为 T0。"""
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s.upper() in _TIERS:
+            return s.upper()
+        low = s.lower()
+        if low in _TIER_ALIASES:
+            return _TIER_ALIASES[low]
+    return "T1"
+
+
 def _normalize_manifest(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ToolError("invalid_manifest", "plugin manifest 必须是 JSON 对象")
@@ -158,6 +180,21 @@ def _normalize_manifest(raw: Any) -> Dict[str, Any]:
         "http_hosts": http_hosts,
         "allow_dynamic_argv": permissions_raw.get("allow_dynamic_argv") is True,
     }
+
+    caps_raw = raw.get("caps")
+    if caps_raw is None:
+        caps_raw = []
+    if not isinstance(caps_raw, list) or not all(
+        isinstance(item, str) and item.strip() for item in caps_raw
+    ):
+        raise ToolError("invalid_manifest", "caps 必须是字符串数组")
+    caps = sorted({item.strip() for item in caps_raw})
+    tier = _normalize_tier(raw.get("tier"))
+    if tier == "T3" and not caps:
+        raise ToolError(
+            "invalid_manifest",
+            "T3 第三方插件必须显式声明 caps（fail-closed：未声明能力即拒绝加载）",
+        )
 
     tools_raw = raw.get("tools")
     if tools_raw is None:
@@ -244,6 +281,8 @@ def _normalize_manifest(raw: Any) -> Dict[str, Any]:
         "version": str(raw.get("version") or "0.0.0"),
         "permissions": permissions,
         "tools": tools,
+        "tier": tier,
+        "caps": caps,
         "registered_at": _now(),
     }
 
@@ -253,6 +292,8 @@ def _describe_plugin(plugin: Dict[str, Any]) -> Dict[str, Any]:
         "id": plugin["id"],
         "name": plugin["name"],
         "version": plugin["version"],
+        "tier": plugin.get("tier", "T1"),
+        "caps": list(plugin.get("caps", [])),
         "registered_at": plugin["registered_at"],
         "permissions": {
             "shell": plugin["permissions"]["shell"],
