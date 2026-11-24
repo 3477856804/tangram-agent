@@ -454,11 +454,28 @@ class EmbeddedBackend implements QqShellRunner {
   Future<void> _bootKernel() async {
     final Directory kernelDir = store.sub('kernel');
     await kernelDir.create(recursive: true);
+    PluginKernel? holder;
     final PluginKernel kernel = PluginKernel(
       persistence: FileKernelPersistence(kernelDir),
       toolRegistry: tools,
       // 内核事件只进自己的 append-only 日志，绝不改流式 token 的 hot-path。
+      // G5：装插件前自动打内核态快照；快照失败不阻断挂载，但如实发事件。
+      onBeforeMount: (String pluginId, Map<String, dynamic> info) async {
+        final PluginKernel? k = holder;
+        if (k == null) return;
+        try {
+          await snapshots.create(<String, dynamic>{
+            'label': '装插件前自动快照（${pluginId}）',
+          });
+        } on Object catch (e) {
+          k.emit('kernel.snapshot_failed', 'kernel', <String, dynamic>{
+            'plugin': pluginId,
+            'error': '$e',
+          });
+        }
+      },
     );
+    holder = kernel;
     for (final MapEntry<RunMode, Set<String>?> e
         in BuiltinPlugins.modePlugins().entries) {
       kernel.defineModePlugins(e.key, e.value);
