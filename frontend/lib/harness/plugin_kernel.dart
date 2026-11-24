@@ -27,6 +27,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:tangram/harness/core.dart';
+import 'package:tangram/harness/plugin_tier.dart';
 
 // ---------------------------------------------------------------------------
 // 持久化：append-only 事件流 + 原子配置写（可注入内存实现供测试）
@@ -343,6 +344,11 @@ class PluginContext {
 
   /// 声明自己是某接缝的使用方；切换 provider 时一并感知。
   void consumeSeam(String seamName, String consumerName) {
+    final Plugin? self = _kernel.pluginOf(pluginId);
+    if (self != null && !seamAllowed(self.tier, self.caps, seamName)) {
+      throw CapabilityDenied(
+          pluginId, seamName, 'caps 未声明该接缝（tier=${self.tier.wire}）');
+    }
     final CapabilitySeam s = _kernel._ensureSeam(seamName, '');
     if (!s.consumers.contains(consumerName)) s.consumers.add(consumerName);
     _track(() => s.consumers.remove(consumerName));
@@ -516,6 +522,12 @@ abstract class Plugin {
   List<String> get requires => const <String>[];
   /// 声明贡献的接缝名（仅声明，用于 inspect）。
   List<String> get providesSeams => const <String>[];
+  /// 分级（T0–T3）；默认 T1 official，保证仓库内置插件行为不变。
+  PluginTier get tier => PluginTier.official;
+  /// 声明可用的能力（接缝名）。为空＝不限制（兼容既有插件）。
+  List<String> get caps => const <String>[];
+  /// 地址函数（`pkg.mod:attr` 语义）；为空表示沿用 id。
+  String? get address => null;
   Future<void> apply(PluginContext ctx);
   Future<void> dispose(PluginContext ctx) async {}
 }
@@ -653,6 +665,9 @@ class PluginKernel {
   final ToolRegistry? toolRegistry;
   /// 可选的实时事件回调（只读桥接，绝不改动流式 token 的 hot-path）。
   final void Function(String topic, Map<String, dynamic> data)? onHotEvent;
+  /// 挂载前钩子（可选）：用于「装插件前自动快照」。
+  /// 默认 null＝不改变既有行为；钩子抛异常即拒绝挂载，不静默继续。
+  Future<void> Function(String pluginId, Map<String, dynamic> info)? onBeforeMount;
 
   final Map<String, _ServiceEntry> _services = <String, _ServiceEntry>{};
   final Map<String, CapabilitySeam> _seams = <String, CapabilitySeam>{};
@@ -692,6 +707,9 @@ class PluginKernel {
 
   /// 注册一个可挂载插件到内核目录（不立即挂载）。
   void registerPlugin(Plugin plugin) => _registry[plugin.id] = plugin;
+
+  /// 取已挂载节点对应的插件（只读视图，供能力判定使用）。
+  Plugin? pluginOf(String pluginId) => _nodes[pluginId]?.plugin;
 
   /// 设置某运行模式允许的插件集合（null 表示该模式不裁剪）。
   void defineModePlugins(RunMode mode, Set<String>? ids) =>
@@ -833,6 +851,19 @@ class PluginKernel {
           'error': '插件 $pluginId 依赖服务 $dep 尚未挂载，拒绝挂载（不假装就绪）',
           'missing_dependency': dep,
         };
+      }
+    }
+    final Future<void> Function(String, Map<String, dynamic>)? before = onBeforeMount;
+    if (before != null) {
+      try {
+        await before(pluginId, <String, dynamic>{
+          'tier': plugin.tier.wire,
+          'address': plugin.address ?? pluginId,
+          'provides_seams': plugin.providesSeams,
+          'source': source,
+        });
+      } on Object catch (e) {
+        return <String, dynamic>{'ok': false, 'error': '挂载前钩子拒绝：$e'};
       }
     }
     final List<Disposable> effects = <Disposable>[];
