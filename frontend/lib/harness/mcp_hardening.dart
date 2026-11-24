@@ -57,8 +57,18 @@ class McpHardening {
     'client_secret',
   ];
 
+  /// 形似凭据但只表示「是否存在 / 存在哪」的元数据键，不能被打码，
+  /// 否则界面无法判断「已保存凭据」。例如 has_secret 含有 secret 片段。
+  static const Set<String> metadataKeys = <String>{
+    'has_secret',
+    'has_token',
+    'secret_storage',
+    'token_type',
+  };
+
   static bool isSecretKey(String key) {
     final String k = key.toLowerCase();
+    if (metadataKeys.contains(k)) return false;
     for (final String sub in secretKeySubstrings) {
       if (k.contains(sub)) return true;
     }
