@@ -55,6 +55,7 @@ import 'package:tangram/harness/creator_runtime.dart';
 import 'package:tangram/harness/hardware_scheduler.dart';
 import 'package:tangram/harness/im_service.dart';
 import 'package:tangram/harness/integration_registry.dart';
+import 'package:tangram/harness/kernel_guard.dart';
 import 'package:tangram/harness/knowledge_base.dart';
 import 'package:tangram/harness/local_inference.dart';
 import 'package:tangram/harness/local_search.dart';
@@ -454,28 +455,60 @@ class EmbeddedBackend implements QqShellRunner {
   Future<void> _bootKernel() async {
     final Directory kernelDir = store.sub('kernel');
     await kernelDir.create(recursive: true);
-    PluginKernel? holder;
     final PluginKernel kernel = PluginKernel(
       persistence: FileKernelPersistence(kernelDir),
       toolRegistry: tools,
       // 内核事件只进自己的 append-only 日志，绝不改流式 token 的 hot-path。
-      // G5：装插件前自动打内核态快照；快照失败不阻断挂载，但如实发事件。
-      onBeforeMount: (String pluginId, Map<String, dynamic> info) async {
-        final PluginKernel? k = holder;
-        if (k == null) return;
-        try {
-          await snapshots.create(<String, dynamic>{
-            'label': '装插件前自动快照（${pluginId}）',
-          });
-        } on Object catch (e) {
-          k.emit('kernel.snapshot_failed', 'kernel', <String, dynamic>{
-            'plugin': pluginId,
-            'error': '$e',
-          });
-        }
-      },
     );
-    holder = kernel;
+    // G5：装插件前自动打内核态快照；快照失败不阻断挂载，但如实发事件。
+    // onBeforeMount 是 PluginKernel 的可变字段（非构造参数），挂载时由
+    // mount() 调用，抛异常即拒绝挂载；此处钩子内部已捕获异常，只发事件。
+    kernel.onBeforeMount =
+        (String pluginId, Map<String, dynamic> info) async {
+      try {
+        kernel.captureSnapshot('装插件前自动快照（$pluginId）');
+      } on Object catch (e) {
+        kernel.emit('kernel.snapshot_failed', 'kernel', <String, dynamic>{
+          'plugin': pluginId,
+          'error': '$e',
+        });
+      }
+    };
+    // G2：安装真实的调用守卫（此前生产侧从未安装，否决点是死代码）。
+    // 纵深防御：未表明身份的调用方（省略 caller）一律拒绝，哪怕某条
+    // 路径漏走了能力令牌检查；非 root 调用只记审计元数据（不记 args
+    // 内容，避免把密钥/消息内容写进审计日志），审计写失败绝不阻断调用。
+    kernel.invokeGuard = (String seam, String method,
+        Map<String, dynamic> args, String caller) async {
+      if (caller == kUntrustedCaller) {
+        try {
+          await _audit.append(
+            category: 'invoke_guard',
+            action: 'deny',
+            decision: 'denied',
+            actor: caller,
+            detail: '未表明身份的调用方：$seam.$method',
+          );
+        } on Object {
+          // 审计写失败不阻断仲裁。
+        }
+        return false;
+      }
+      if (caller != kRootCaller) {
+        try {
+          await _audit.append(
+            category: 'invoke_guard',
+            action: 'invoke',
+            decision: 'allowed',
+            actor: caller,
+            detail: '$seam.$method',
+          );
+        } on Object {
+          // 审计写失败不阻断调用。
+        }
+      }
+      return true;
+    };
     for (final MapEntry<RunMode, Set<String>?> e
         in BuiltinPlugins.modePlugins().entries) {
       kernel.defineModePlugins(e.key, e.value);
