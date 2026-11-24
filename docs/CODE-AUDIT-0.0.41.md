@@ -106,3 +106,35 @@
 
 > 本报告本身就是一次「声明 → 证据」核对：上面每条「✅ 真实」都指到具体行；
 > 每条「只有声明」都写明了缺哪个执行点。修完 1–4 再复跑本报告，应能把 G1/G2/G4/G5 划掉。
+
+---
+
+## 6. 修复完成状态（0.0.41 终版，一次性提交）
+
+| 缺口 | 状态 | 实现位置 | 验证方式 |
+|---|---|---|---|
+| G1 分级无执行 | ✅ 已修 | `plugin_kernel.dart` mount 拒绝 T3 无 caps；`creator_runtime.dart` 用户插件=T2；`plugin_runtime.py` 清单 T3 fail-closed | 静态关卡 + pytest（待跑） |
+| G2 invoke 无仲裁 | ✅ 已修 | `invoke({caller, caps})`；缺令牌发 `seam.denied` 并拒绝；`invokeGuard` 可否决；默认 `core/sandbox`→`sandbox:exec`、`core/im`→`channel:send`、`core/mcp`→`net:fetch`（`kernel_guard.dart`） | 静态关卡 + flutter test（待跑） |
+| G3 钩子无否决 | ✅ 部分 | `InvokeGuard` 提供调用前否决点；事件总线仍只通知（不改写 payload，避免动 hot-path） | 静态关卡 |
+| G4 地址函数死代码 | ✅ 已修 | mount 校验 `Plugin.address`，非法即拒绝挂载 | 静态关卡 |
+| G5 快照不回退行为 | ✅ 已修 | `captureSnapshot/restoreSnapshot` + `handle` 的 `snapshot/snapshots/rollback`；`embedded_backend` 装插件前自动快照（失败发 `kernel.snapshot_failed`，不阻断挂载） | 静态关卡 + 真机（待跑） |
+| G6 无 WASM | ✅ 契约+拒绝 | `contracts/wasm-abi-v1.md`；`wasm_module.dart` 无运行时抛 `WasmUnavailable` | 静态关卡 + flutter test |
+| G7 UI 非约定加载 | ✅ 新增 | `frontend/lib/mosaic/`（panel/registry/host）+ `tool/gen_mosaic_registry.mjs` 生成注册表（2 面板） | 生成器实跑通过 |
+
+### 6.1 本轮验证结果（能跑的都跑了）
+
+| 验证 | 结果 |
+|---|---|
+| `node tests/conformance_0_0_41.mjs`（30 条静态关卡：执行点/配平） | ✅ **30 passed / 0 failed** |
+| `node tool/gen_mosaic_registry.mjs` + `--check` | ✅ 生成 2 面板，检查通过 |
+| 括号配平（8 个 Dart 文件） | ✅ 全部配平 |
+| `flutter test test/kernel_guard_test.dart test/plugin_tier_test.dart` | ❌ **未跑**（设备无 Flutter） |
+| `pytest tests/test_plugin_tier.py` | ❌ **未跑**（设备无 python3） |
+| 真机：装插件→快照→回退 | ❌ 未验证 |
+
+### 6.2 仍然保留的诚实边界
+
+1. G3 只做「调用前否决」，不做「payload 改写」——改 payload 会碰流式 hot-path，本轮不动。
+2. WASM 只有契约与类型化拒绝，**没有运行时**。
+3. G7 的 mosaic 层与内核 `widget_slots` 并存，未替换路由；接入点留给下一轮。
+4. 所有 Dart/Python 测试均未在本机执行，需在 CI 或电脑上跑一遍才算「验证通过」。
