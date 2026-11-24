@@ -194,6 +194,7 @@ class TgaStrings {
     'sidebar.model3d': {'cn': '建模', 'tw': '建模', 'en': '3D Studio'},
     'sidebar.channels': {'cn': '通信', 'tw': '通訊', 'en': 'Channels'},
     'sidebar.models': {'cn': '管理', 'tw': '管理', 'en': 'Models'},
+    'sidebar.mosaic': {'cn': '拼装', 'tw': '拼裝', 'en': 'Mosaic'},
     'sidebar.graph': {'cn': '图谱', 'tw': '圖譜', 'en': 'Knowledge Graph'},
     'sidebar.kernel': {'cn': '插件内核', 'tw': '外掛核心', 'en': 'Plugin Kernel'},
     'sidebar.superAgent': {'cn': '智能体', 'tw': '智能體', 'en': 'Super Agent'},
