@@ -6,6 +6,8 @@
 /// 只有显式标成 T3 的第三方插件才要求声明能力。
 library;
 
+import 'kernel_guard.dart';
+
 /// 插件分级。
 enum PluginTier {
   /// T0：内核自带（聊天、设置、关于）。
@@ -26,11 +28,17 @@ enum PluginTier {
   final String wire;
 
   /// 解析清单里的 tier；未知值兜底为 [official]，不静默升为 [system]。
+  /// 接受线上写法（T0–T3）、枚举名（system/official/user/thirdParty），
+  /// 以及下划线别名 third_party / thirdparty（与 Python 侧
+  /// _TIER_ALIASES 对齐，清单里最常见的第三方写法）。
   static PluginTier parse(Object? raw) {
     if (raw is PluginTier) return raw;
     final String s = (raw ?? '').toString().trim();
     for (final PluginTier t in PluginTier.values) {
       if (t.wire == s || t.name == s) return t;
+    }
+    if (s == 'third_party' || s == 'thirdparty') {
+      return PluginTier.thirdParty;
     }
     return PluginTier.official;
   }
@@ -50,9 +58,17 @@ class CapabilityDenied implements Exception {
 
 /// 能力判定：`caps` 为空＝不限制（兼容既有插件）；
 /// T3 第三方插件的 `caps` 为空＝未声明，一律拒绝（fail-closed）。
+///
+/// `caps` 有两种既有写法，都认：接缝名（插件清单的声明口径，如 'core/im'）
+/// 与能力令牌（调用仲裁的口径，如 'channel:send'，见 [defaultSeamCaps]）。
+/// 只认其中一种会让另一处的测试与调用静默失败——此前 kernel_guard_test
+/// 用令牌写法期望放行、plugin_tier_test 用接缝名写法期望放行，
+/// 实现只认接缝名，两处期望不可能同时成立。
 bool seamAllowed(PluginTier tier, List<String> caps, String seam) {
   if (caps.isEmpty) return tier != PluginTier.thirdParty;
-  return caps.contains(seam);
+  if (caps.contains(seam)) return true;
+  final List<String> need = defaultSeamCaps()[seam] ?? const <String>[];
+  return need.any(caps.contains);
 }
 
 /// 地址函数（借 NORP-Agent 的 `pkg.mod:attr` 语义）：非法即抛，不猜。
