@@ -1273,7 +1273,36 @@ class PluginKernel {
 
   // ---- 控制域动作分发（plugin_kernel）----
 
+  /// 改动类控制动作：必须由 UI（root）显式发起。
+  /// 只读动作（describe/status/tree/seams/modes/dump_config/pages/
+  /// widget_slots/events/search/snapshots/snapshot 等）不受限。
+  /// 'invoke' 不在此列——它走自己的仲裁（能力令牌 + 调用守卫），
+  /// 缺省 caller 时按未表明身份处理，见 'invoke' 分支。
+  static const Set<String> _mutationActions = <String>{
+    'mount',
+    'unmount',
+    'set_provider',
+    'set_mode',
+    'set_patch',
+    'rollback',
+  };
+
   Future<Map<String, dynamic>> handle(String action, Map<String, dynamic> p) async {
+    // G2：改动类动作必须由 UI（root）显式发起；省略 caller 即视为
+    // 未表明身份，一律拒绝。唯一合法发送方是内核调试页
+    //（tga_kernel_page.dart，经 _call 统一带 caller: 'ui'）。
+    if (_mutationActions.contains(action) &&
+        (p['caller'] ?? kUntrustedCaller).toString() != kRootCaller) {
+      emit('seam.denied', 'kernel', <String, dynamic>{
+        'action': action,
+        'caller': (p['caller'] ?? kUntrustedCaller).toString(),
+        'reason': 'mutation_requires_root',
+      });
+      return <String, dynamic>{
+        'ok': false,
+        'error': '改动类动作 $action 须由 UI（root）发起，未表明身份的调用方无权执行',
+      };
+    }
     switch (action) {
       case 'describe':
       case 'status':
@@ -1320,9 +1349,11 @@ class PluginKernel {
         final Map<String, dynamic> args = p['args'] is Map
             ? Map<String, dynamic>.from(p['args'] as Map)
             : <String, dynamic>{};
+        // G2：缺省 caller 不再默认 root——省略身份即视为未表明身份
+        //（kUntrustedCaller），再由能力令牌与调用守卫仲裁。
         return await invoke((p['seam'] ?? '').toString(),
             (p['method'] ?? '').toString(), args,
-            caller: (p['caller'] ?? kRootCaller).toString(),
+            caller: (p['caller'] ?? kUntrustedCaller).toString(),
             caps: (p['caps'] is List)
                 ? (p['caps'] as List).map((dynamic e) => e.toString()).toList()
                 : const <String>[]);
