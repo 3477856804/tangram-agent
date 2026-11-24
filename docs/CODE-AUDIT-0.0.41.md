@@ -138,3 +138,45 @@
 2. WASM 只有契约与类型化拒绝，**没有运行时**。
 3. G7 的 mosaic 层与内核 `widget_slots` 并存，未替换路由；接入点留给下一轮。
 4. 所有 Dart/Python 测试均未在本机执行，需在 CI 或电脑上跑一遍才算「验证通过」。
+
+---
+
+## 7. round12 修复（2026-11-25 05:00 轮次，基线 29a9da33）
+
+本轮先真实跑了一遍 0.0.41 的验证：基线并不成立——`plugin_runtime.py:133`
+`def def` 语法错误导致整个 Python 插件运行时无法导入、
+`flutter analyze` 5 errors + 2 warnings、两个新 Dart 测试从未跑通过。
+以下修复均已实测（数字见运行记录），不是只改声明。
+
+| 缺口 | 修复 | 证据 |
+|---|---|---|
+| Python 运行时语法错误 | `def def _normalize_tier` 去掉一个 `def`；`test_plugin_tier.py` 里与 T3 fail-closed 自相矛盾的用例补 caps | pytest 258 passed / 8 skipped（原 242 + 9 failed + 7 errors） |
+| `embedded_backend` 调不存在的 API | `onBeforeMount` 由构造参数改为字段赋值；`snapshots.create()` 改为内核态 `kernel.captureSnapshot()` | flutter analyze 0 issues |
+| mosaic 生成器模板写错路径 | `'../panel.dart'` → `'panel.dart'`，删未使用的 widgets import，重新生成并 `--check` 通过；`registry.dart` 未使用 import 删除 | analyze 0 issues；生成器实跑通过 |
+| G2 默认 root | `handle` 的 `invoke` 缺省 caller 由 `kRootCaller` 改为 `kUntrustedCaller`；改动类动作（mount/unmount/set_provider/set_mode/set_patch/rollback）须 UI（root）显式发起，内核调试页统一带 `caller: 'ui'` | Dart VM 端到端断言 46 项全过（缺省 caller 被拒、UI 直通、带令牌放行） |
+| G2 守卫是死代码 | `_bootKernel` 真实安装 `invokeGuard`：未表明身份一律拒绝，非 root 调用只记审计元数据（不记 args 内容），审计失败不阻断调用 | 同上 46 项断言（含守卫否决与纵深防御） |
+| 默认 seamCaps 只覆盖 3 条接缝 | 补齐全部 12 条（含 `core/skills/recorded`）：storage/model/scheduler/skills/agent-loop/trajectory/hooks/ui/pages | 同上断言 + `kernel_guard_test` 的既有期望仍成立 |
+| `seamAllowed` 两种 caps 口径打架 | 两种写法都认：接缝名（`core/im`）与能力令牌（`channel:send`）；此前实现只认接缝名，`kernel_guard_test` 的令牌期望不可能通过 | Dart VM 断言覆盖两种口径 |
+| `PluginTier.parse('third_party')` 兜底成 T1 | 接受下划线别名 `third_party` / `thirdparty`（与 Python 侧 `_TIER_ALIASES` 对齐） | Dart VM 断言 + `plugin_tier_test` 期望一致 |
+| G7 mosaic 导航是摆设 | `MosaicHost` 改为 StatefulWidget，`onDestinationSelected` 真正切换面板；侧栏新增一个 additive 的 mosaic 入口（现有 channels/models 入口原样保留），面板由约定注册表生成 | analyze 0 issues；`gen_mosaic_registry.mjs --check` 通过 |
+
+### 7.1 本轮验证结果
+
+| 验证 | 结果 |
+|---|---|
+| pytest 全量 | ✅ **258 passed / 8 skipped**（8 skip 全是缺可选依赖） |
+| `node tests/conformance_0_0_41.mjs` | ✅ **30 passed / 0 failed**（两条旧关卡断言的是修复前的错误代码，已随源码一起更新；该脚本是测试文件，不随本轮源码补丁推送，见下） |
+| `flutter analyze` 全量 | ✅ **No issues found** |
+| Dart VM 断言脚本 | ✅ round12 新增 46 项全过；round2–11 回归 17 个脚本全过（agent_manager 64、skill_recorder 285、mcp_hardening 39、sandbox_provider 75、memory_layers 61 等） |
+| `dart test/agent_manager_round11_test.dart` | ✅ +7 All tests passed |
+| `python3 -m im.serve --help`（树根） | ✅ exit 0 |
+| `flutter test test/kernel_guard_test.dart test/plugin_tier_test.dart` | ❌ 仍未跑通（llamadart 的 `.so` 是 arm64、宿主是 x64，原生资产构建失败，环境限制；以 Dart VM 端到端断言为准，两处测试的期望已在断言脚本里逐条覆盖） |
+| 真机装插件 / 快照回退 / mosaic 导航点击 | ❌ 未验证（无真机） |
+
+### 7.2 仍然保留的诚实边界
+
+1. `PluginTier.parse` 未知值仍兜底 T1（`plugin_tier_test` 与 Python 测试都如此断言）；改成抛错是行为变更，留给下一轮与调用方一起定。
+2. `PluginContext.kernel` 仍公开裸内核：已挂载插件可直调 `invoke`/`setProvider` 绕过仲裁；要关掉须重构插件上下文的暴露面，本轮未动（只关了控制消息层的默认 root）。
+3. `restoreSnapshot` 中途失败仍留半回退状态（无补偿）；快照 id 仍可能在同一毫秒内碰撞。
+4. provider id 仍是自由字符串（`provideSeamProvider` 不校验）；`Plugin.address` 全仓库无插件声明，mount 的地址校验仍是空分支。
+5. `tests/conformance_0_0_41.mjs` 的两条旧关卡已在本地更新为新行为断言，但该脚本是测试文件，按规则不随源码补丁推送——合并后 main 上的旧脚本仍会报 2 项失败，需另行更新脚本（或下轮放宽规则后随补丁带上）。
