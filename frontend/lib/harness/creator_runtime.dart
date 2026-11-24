@@ -22,6 +22,7 @@ import 'dart:io';
 
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/plugin_kernel.dart';
+import 'package:tangram/harness/plugin_tier.dart';
 import 'package:tangram/harness/store.dart';
 
 /// prompt 动作的注入回调：拿到渲染后的提示词与原始参数，返回结构化结果。
@@ -1081,6 +1082,11 @@ class _CreatorPlugin extends Plugin {
 
   @override
   String get description => manifest.description;
+
+  /// 用户自建插件＝T2（不是内核自带的 T1）。
+  /// 分级目前只在 consumeSeam 判定，等能力门接线后此处即生效。
+  @override
+  PluginTier get tier => PluginTier.user;
 
   @override
   List<String> get providesSeams => const <String>[];
