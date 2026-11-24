@@ -49,3 +49,25 @@ backend/pyproject.toml / backend/app/__init__.py），README 版本行同步。
 
 本仓库为 AGPL-3.0（见根 `LICENSE`）。参考项目 NORP-Agent 与 NewAgentUniverseByDeepSeek
 均为 MIT，本轮**只借鉴设计结论，未复制其代码**，因此不产生额外署名义务。
+
+---
+
+## 6. 已落地（0.0.41 第二笔推送，2026-11-24）
+
+按 §4 的缺口，先落**不破坏既有行为**的三项（opt-in，默认值保持原语义）：
+
+| 缺口 | 实现 | 兼容策略 |
+|---|---|---|
+| 能力分级缺 | 新增 `frontend/lib/harness/plugin_tier.dart`：`PluginTier{T0..T3}` + `wire` + `parse()`；Python 侧 `_normalize_manifest` 接受 `tier` 并写入清单 | 未声明 tier → **T1 official**（与内置插件原行为一致）；未知值兜底 T1，不静默升 T0 |
+| 未声明能力放行 | `Plugin.caps`（默认空＝不限制）；`PluginContext.consumeSeam()` 在 caps 非空时校验，缺声明抛 `CapabilityDenied` | 既有插件 caps 为空 → 判定通过，行为不变 |
+| T3 第三方未声明即放行 | Python 侧 fail-closed：`tier=T3` 且 `caps` 为空 → `invalid_manifest` 拒绝加载 | 仓库当前无 T3 插件，不影响现有清单 |
+| 地址函数缺 | `parsePluginAddress()`（`scheme:path`，非法即抛 `FormatException`）+ `Plugin.address` 可选声明 | 默认 null＝沿用 id，不强制改现有 provider id |
+| 装插件前无快照 | `PluginKernel.onBeforeMount` 钩子（默认 null）；钩子抛异常即拒绝挂载 | 默认不挂钩子 → 行为不变；快照服务可按需接入 |
+
+新增测试（未在本机执行，需 CI 或电脑跑）：
+- `frontend/test/plugin_tier_test.dart`（分级解析 / caps 判定 / 地址解析 / 异常消息）
+- `tests/test_plugin_tier.py`（默认 T1、别名、未知兜底、caps 去重排序、T3 fail-closed、caps 类型校验）
+
+未做（原因如实写）：`onBeforeMount` 与 `SnapshotService` 的接线需运行时验证；
+UI 侧的「约定接口加载」（mosaic 式静态注册）当前由 `tga_ui_plugins_page.dart`
+的 `widget_slots/pages` 白名单宿主承担，改成编译期约定加载会动到路由，留待下一轮。
