@@ -37,7 +37,7 @@ import 'dart:io'
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
-import 'package:tangram/agent/sandbox/sandboxed_shell.dart';
+import 'package:tangram/agent/sandbox/sandboxed_shell.dart' as cube_shell;
 import 'package:tangram/app_version.dart';
 import 'package:tangram/harness/agent_manager.dart';
 import 'package:tangram/harness/app_package.dart';
@@ -56,6 +56,7 @@ import 'package:tangram/harness/creator_runtime.dart';
 import 'package:tangram/harness/hardware_scheduler.dart';
 import 'package:tangram/harness/im_service.dart';
 import 'package:tangram/harness/integration_registry.dart';
+import 'package:tangram/harness/kernel_guard.dart';
 import 'package:tangram/harness/knowledge_base.dart';
 import 'package:tangram/harness/local_inference.dart';
 import 'package:tangram/harness/local_search.dart';
@@ -66,6 +67,7 @@ import 'package:tangram/harness/plugin_kernel.dart';
 import 'package:tangram/harness/prompt_kit.dart';
 import 'package:tangram/harness/proot_sandbox.dart';
 import 'package:tangram/harness/qq_sandbox.dart';
+import 'package:tangram/harness/sandbox_provider.dart';
 import 'package:tangram/harness/security_policy.dart';
 import 'package:tangram/harness/pages_http_server.dart';
 import 'package:tangram/harness/pages_service.dart';
@@ -98,6 +100,26 @@ class BackendReply {
 class EmbeddedBackend implements QqShellRunner {
   EmbeddedBackend._(this.store, this.downloads) {
     _registerTools();
+    // round13：ToolRegistry 的 exec/write 级工具过策略——策略引擎与
+    // 审批单入口由此接线（未接线时 run() 不拦截，见 core.dart）。
+    tools.policyProvider = _ensurePolicy;
+    tools.onApprovalRequired = _requestToolApproval;
+    // round14 第一阶段：cube 执行的 deny 预检 + 审计回调挂在
+    // SandboxedShell 单例本身（静态单例，hotSwap 只换插件节点、不重建
+    // 内核也不重跑 _bootKernel，故回调不会被热替换丢掉；后端本身也是
+    // 进程级单例，构造时接线一次即覆盖全部 cube 调用点）。
+    // 只查 deny：ask/auto 不建单、不消费一次性凭据（第二阶段再补 ask）。
+    cube_shell.SandboxedShell.instance.denyCheck = (String cube, String expression) async {
+      final PermissionPolicy policy = await _ensurePolicy();
+      if (policy.evaluate(tool: 'cube', args: expression) !=
+          PolicyDecision.deny) {
+        return null;
+      }
+      return policy.matchedRuleId(tool: 'cube', args: expression);
+    };
+    cube_shell.SandboxedShell.instance.onAudit = (cube_shell.SandboxAuditEvent event) {
+      unawaited(_auditCubeEvent(event));
+    };
     // 真实 IM 网关：微信/QQ/飞书消息进来后走 _chat 的真实模型推理，
     // 回复经 AGP WebSocket 原样发回，绝不编造。QQ 沙箱直连扫码需要真实
     // shell 执行能力，把本后端作为 QqShellRunner 注入。
@@ -419,7 +441,7 @@ class EmbeddedBackend implements QqShellRunner {
     shell: (String command, String cwd) =>
         _shellExec(<String, dynamic>{'command': command, 'cwd': cwd}),
     cube: (String cube, Map<String, dynamic> args) async {
-      final r = await SandboxedShell.instance.exec(cube, args);
+      final r = await cube_shell.SandboxedShell.instance.exec(cube, args);
       return r.toJson();
     },
     skills: () async =>
@@ -477,6 +499,58 @@ class EmbeddedBackend implements QqShellRunner {
       },
     );
     holder = kernel;
+    // G2：安装真实的调用守卫（此前生产侧从未安装，否决点是死代码）。
+    // 纵深防御：未表明身份的调用方（省略 caller）一律拒绝，哪怕某条
+    // 路径漏走了能力令牌检查；非 root 调用只记审计元数据（不记 args
+    // 内容，避免把密钥/消息内容写进审计日志），审计写失败绝不阻断调用。
+    kernel.invokeGuard = (String seam, String method,
+        Map<String, dynamic> args, String caller) async {
+      if (caller == kUntrustedCaller) {
+        try {
+          await _audit.append(
+            category: 'invoke_guard',
+            action: 'deny',
+            decision: 'denied',
+            actor: caller,
+            detail: '未表明身份的调用方：$seam.$method',
+          );
+        } on Object {
+          // 审计写失败不阻断仲裁。
+        }
+        return false;
+      }
+      // round13：未知 caller 名直接拒绝——只认已登记的插件 id 与 root，
+      // 不再放行任何拼出来的名字（纵深防御：invoke 登记身份查漏过的
+      // 无令牌接缝，在这里兜底）。
+      if (caller != kRootCaller && kernel.pluginOf(caller) == null) {
+        try {
+          await _audit.append(
+            category: 'invoke_guard',
+            action: 'deny',
+            decision: 'denied',
+            actor: caller,
+            detail: '未知调用方：$seam.$method',
+          );
+        } on Object {
+          // 审计写失败不阻断仲裁。
+        }
+        return false;
+      }
+      if (caller != kRootCaller) {
+        try {
+          await _audit.append(
+            category: 'invoke_guard',
+            action: 'invoke',
+            decision: 'allowed',
+            actor: caller,
+            detail: '$seam.$method',
+          );
+        } on Object {
+          // 审计写失败不阻断调用。
+        }
+      }
+      return true;
+    };
     for (final MapEntry<RunMode, Set<String>?> e
         in BuiltinPlugins.modePlugins().entries) {
       kernel.defineModePlugins(e.key, e.value);
@@ -519,7 +593,11 @@ class EmbeddedBackend implements QqShellRunner {
     if (k == null) {
       return _err('插件内核装配失败，请稍后重试');
     }
-    return await k.handle(_action(p, 'describe'), p);
+    // round13：dispatch 是进程内 UI 直连的唯一入口（TCP/stdio 桥接走
+    // 外部 Python 后端，不进这里），因此这里传 trustedRoot:true；
+    // payload 里的 caller 仍须是 'ui' 才能算 root——不可信路径上自称
+    // 'ui' 的调用在 handle/invoke 里会被降级为未表明身份。
+    return await k.handle(_action(p, 'describe'), p, trustedRoot: true);
   }
 
   Future<Map<String, dynamic>> _onSuperAgent(Map<String, dynamic> p) async {
@@ -1958,7 +2036,7 @@ class EmbeddedBackend implements QqShellRunner {
   Future<Map<String, dynamic>> _selfTestAsync() async {
     // 先确保沙箱能力契约真实加载，再跑同步自检——否则 cubeNames 为空
     // 会把「还没加载」误报成「沙箱坏了」。
-    await SandboxedShell.instance.ensureLoaded();
+    await cube_shell.SandboxedShell.instance.ensureLoaded();
     return _selfTest();
   }
 
@@ -1967,7 +2045,7 @@ class EmbeddedBackend implements QqShellRunner {
     // 再据此算 status=ok，属于假自检。现在 dart_sandbox 查沙箱 cube
     // 注册表是否真实加载；streaming 不在此覆盖，如实列入 not_covered。
     final checks = <String, dynamic>{
-      'dart_sandbox': SandboxedShell.instance.cubeNames.isNotEmpty,
+      'dart_sandbox': cube_shell.SandboxedShell.instance.cubeNames.isNotEmpty,
       'store_writable': store.writable,
       'safe_expression': SafeExpression.eval('2 + 3 * 4') == 14,
       'tool_registry': tools.length > 0,
@@ -4459,7 +4537,7 @@ class EmbeddedBackend implements QqShellRunner {
             (k, v) => buf.writeln('- $k: ${v == true ? "通过" : "失败"}'),
           );
           buf.writeln(
-            '\n沙箱 cube：${SandboxedShell.instance.cubeNames.join('、')}',
+            '\n沙箱 cube：${cube_shell.SandboxedShell.instance.cubeNames.join('、')}',
           );
           return ToolResult.ok(buf.toString());
         },
@@ -4696,8 +4774,8 @@ class EmbeddedBackend implements QqShellRunner {
           'required': <String>['expression'],
         },
         execute: (args, _) async {
-          await SandboxedShell.instance.ensureLoaded();
-          final r = await SandboxedShell.instance.exec(
+          await cube_shell.SandboxedShell.instance.ensureLoaded();
+          final r = await cube_shell.SandboxedShell.instance.exec(
             'eval_expression',
             <String, dynamic>{'expression': args['expression'].toString()},
           );
@@ -4713,8 +4791,8 @@ class EmbeddedBackend implements QqShellRunner {
         description: '运行内置沙箱真实测试套件',
         tier: ApprovalTier.exec,
         execute: (args, _) async {
-          await SandboxedShell.instance.ensureLoaded();
-          final r = await SandboxedShell.instance.exec('run_test');
+          await cube_shell.SandboxedShell.instance.ensureLoaded();
+          final r = await cube_shell.SandboxedShell.instance.exec('run_test');
           return r.ok
               ? ToolResult.ok(
                   r.stdout.trim().isEmpty ? '测试通过' : r.stdout.trim(),
@@ -4791,13 +4869,13 @@ class EmbeddedBackend implements QqShellRunner {
 
   Future<Map<String, dynamic>> _codeTask(Map<String, dynamic> p) async {
     final action = _action(p, 'query');
-    await SandboxedShell.instance.ensureLoaded();
+    await cube_shell.SandboxedShell.instance.ensureLoaded();
     if (action == 'query' || action == 'describe') {
       return <String, dynamic>{
         'ok': true,
         'backend': 'dart',
         'isolate': true,
-        'cubes': SandboxedShell.instance.cubeNames,
+        'cubes': cube_shell.SandboxedShell.instance.cubeNames,
         'allowDegrade': false,
         'note':
             '代码执行由内置纯 Dart SandboxedShell 在受限 Isolate 中完成，'
@@ -4836,7 +4914,7 @@ class EmbeddedBackend implements QqShellRunner {
     if (action == 'model3d_export') return _model3dExport(p);
     if (action == 'model3d_primitive') return _model3dPrimitive(p);
     if (cube == null) return _err('未知 code_task 动作：$action');
-    final r = await SandboxedShell.instance.exec(cube, <String, dynamic>{
+    final r = await cube_shell.SandboxedShell.instance.exec(cube, <String, dynamic>{
       if (p['expression'] != null) 'expression': p['expression'].toString(),
       if (p['code'] != null) 'expression': p['code'].toString(),
     });
@@ -4877,7 +4955,15 @@ class EmbeddedBackend implements QqShellRunner {
     final String auditDetail = raw.length > 120 ? raw.substring(0, 120) : raw;
     final String preview = raw.length > 80 ? raw.substring(0, 80) : raw;
     final String grantKey = 'shell|$raw';
-    PolicyDecision decision = (await _ensurePolicy()).evaluate(
+    // round14：deny 审计带规则 id（第一阶段只补 rule，不改门禁语义；
+    // 命中规则与 evaluate 同顺序求值，同一策略实例上结果一致）。
+    final PermissionPolicy policy = await _ensurePolicy();
+    PolicyDecision decision = policy.evaluate(
+      tool: 'shell',
+      path: cwd,
+      args: raw,
+    );
+    final String ruleId = policy.matchedRuleId(
       tool: 'shell',
       path: cwd,
       args: raw,
@@ -4893,7 +4979,7 @@ class EmbeddedBackend implements QqShellRunner {
         action: 'shell',
         decision: decision.name,
         actor: 'shell',
-        detail: auditDetail,
+        detail: ruleId.isEmpty ? auditDetail : '$auditDetail rule=$ruleId',
       );
       if (decision == PolicyDecision.deny) {
         return _err('命令被安全策略拒绝：$preview');
@@ -4907,6 +4993,9 @@ class EmbeddedBackend implements QqShellRunner {
       });
       return _err('命令需要审批：$preview（审批 ID：$id，请在安全中心批准后重试）');
     }
+
+    // round14：执行耗时只从门禁通过后开始计（不含审批等待）。
+    final Stopwatch auditSw = Stopwatch()..start();
 
     // 沙箱根目录必须先存在：store.sub 只拼路径不建目录，全新安装时
     // 该目录不存在会导致 _realShellExec 的 cwd 校验失败而回退内置解释器，
@@ -4937,14 +5026,23 @@ class EmbeddedBackend implements QqShellRunner {
     if (firstWord != 'clear' && firstWord != 'help' && !isExpression) {
       // ① 远端沙箱（SSH）：真实远端 Linux 执行。
       if (remoteSsh) {
-        return SshSandbox.instance.run(raw, cwd);
+        final Map<String, dynamic> r = await SshSandbox.instance.run(raw, cwd);
+        _auditShellExec(
+          raw: raw,
+          cwd: cwd,
+          result: r,
+          provider: 'ssh',
+          ms: auditSw.elapsedMilliseconds,
+          rule: ruleId,
+        );
+        return r;
       }
       // ② 安卓：唯一那套 Linux 环境（proot 用户态）。未安装时真实触发下载，
       //    本次命令如实返回「初始化中」，绝不回落到宿主 shell 冒充 Linux。
       if (linuxMode) {
         if (!proot.installed) {
           final Map<String, dynamic> st = await _startLinuxInstall();
-          return <String, dynamic>{
+          final Map<String, dynamic> r = <String, dynamic>{
             'ok': false,
             'stdout': '',
             'error': st['installing'] == true
@@ -4959,10 +5057,31 @@ class EmbeddedBackend implements QqShellRunner {
             'linux': true,
             'installing': st['installing'] == true,
           };
+          // 未执行（环境初始化中）：记 failed、exit -1。
+          _auditShellExec(
+            raw: raw,
+            cwd: cwd,
+            result: r,
+            provider: 'proot',
+            ms: auditSw.elapsedMilliseconds,
+            rule: ruleId,
+            exitOverride: -1,
+          );
+          return r;
         }
         final Map<String, dynamic>? viaLinux = await proot.run(raw, cwd);
-        if (viaLinux != null) return viaLinux;
-        return <String, dynamic>{
+        if (viaLinux != null) {
+          _auditShellExec(
+            raw: raw,
+            cwd: cwd,
+            result: viaLinux,
+            provider: 'proot',
+            ms: auditSw.elapsedMilliseconds,
+            rule: ruleId,
+          );
+          return viaLinux;
+        }
+        final Map<String, dynamic> r = <String, dynamic>{
           'ok': false,
           'stdout': '',
           'error':
@@ -4972,9 +5091,30 @@ class EmbeddedBackend implements QqShellRunner {
           'cube': 'shell',
           'linux': true,
         };
+        // 未执行（环境启动失败）：记 failed、exit -1。
+        _auditShellExec(
+          raw: raw,
+          cwd: cwd,
+          result: r,
+          provider: 'proot',
+          ms: auditSw.elapsedMilliseconds,
+          rule: ruleId,
+          exitOverride: -1,
+        );
+        return r;
       }
       final real = await _realShellExec(raw, root, cwd);
-      if (real != null) return real;
+      if (real != null) {
+        _auditShellExec(
+          raw: raw,
+          cwd: cwd,
+          result: real,
+          provider: 'real-shell',
+          ms: auditSw.elapsedMilliseconds,
+          rule: ruleId,
+        );
+        return real;
+      }
     }
 
     String resolve(String rel) {
@@ -5247,7 +5387,7 @@ class EmbeddedBackend implements QqShellRunner {
       default:
         // 表达式兜底：2+3*4 之类直接走真实求值（受限 Isolate）。
         if (RegExp(r'^[\d\s\+\-\*\/\%\(\)\.\,]+$').hasMatch(raw)) {
-          final r = await SandboxedShell.instance.exec(
+          final r = await cube_shell.SandboxedShell.instance.exec(
             'eval_expression',
             <String, dynamic>{'expression': raw},
           );
@@ -5258,7 +5398,7 @@ class EmbeddedBackend implements QqShellRunner {
           fail('$cmd: command not found（输入 help 查看可用命令）');
         }
     }
-    return <String, dynamic>{
+    final Map<String, dynamic> r = <String, dynamic>{
       'ok': ok,
       'stdout': buf.toString(),
       'error': ok ? '' : buf.toString(),
@@ -5268,6 +5408,83 @@ class EmbeddedBackend implements QqShellRunner {
       // 不是系统 shell。终端据此提示用户，避免把模拟命令当成真 shell。
       'real': false,
     };
+    // 内置解释器收尾审计（cwd 记门禁评估时的请求 cwd，与其余 5 处一致）。
+    _auditShellExec(
+      raw: raw,
+      cwd: cwd,
+      result: r,
+      provider: 'builtin',
+      ms: auditSw.elapsedMilliseconds,
+      rule: ruleId,
+    );
+    return r;
+  }
+
+  /// 沙箱 shell 执行审计（round14 第一阶段）：只记元数据，绝不记命令原文
+  /// 与输出。`raw` 为 _shellExec 收到的原始命令——可能含 `shellEnvPrefix`
+  /// 拼进的 `export SECRET='…'; ` 前缀，首词与长度一律取剥离后的原始命令
+  /// （见 [SandboxAuditEvent.stripEnvPrefix]）；`rule` 为门禁命中的规则
+  /// id（allow/ask 批准后的成功执行也记该规则，便于追溯是哪条规则放行
+  /// 的；无规则命中走 fallback 时为空）。审计写盘失败绝不阻断执行，
+  /// 也不改变返回值。
+  void _auditShellExec({
+    required String raw,
+    required String cwd,
+    required Map<String, dynamic> result,
+    required String provider,
+    required int ms,
+    String rule = '',
+    int? exitOverride,
+  }) {
+    try {
+      final String root = store.sub('sandbox').path;
+      final SandboxAuditEvent event = SandboxAuditEvent.fromCommand(
+        tool: 'shell',
+        command: raw,
+        cwd: cwd,
+        exit: exitOverride ?? _shellExitOf(result),
+        ms: ms,
+        provider: provider,
+        rule: rule,
+        decision: result['ok'] == true ? 'allowed' : 'failed',
+        root: root,
+      );
+      unawaited(
+        _auditLog()
+            .append(
+              category: 'security',
+              action: 'shell',
+              decision: event.decision,
+              actor: 'shell',
+              detail: event.detail,
+            )
+            .catchError((Object _) {}),
+      );
+    } on Object catch (_) {
+      // 审计失败绝不阻断执行。
+    }
+  }
+
+  /// 结果 map 的退出码：有 `exit_code` 取之，否则 ok?0:1。
+  static int _shellExitOf(Map<String, dynamic> result) {
+    final Object? code = result['exit_code'];
+    if (code is int) return code;
+    if (code is num) return code.toInt();
+    return result['ok'] == true ? 0 : 1;
+  }
+
+  /// cube 执行审计落盘（round14）：只记事件里的元数据 detail；
+  /// 写盘失败绝不阻断执行（append 的失败由 catchError 吞掉）。
+  Future<void> _auditCubeEvent(cube_shell.SandboxAuditEvent event) {
+    return _auditLog()
+        .append(
+          category: 'sandbox',
+          action: 'cube',
+          decision: event.decision,
+          actor: 'cube',
+          detail: event.detail,
+        )
+        .catchError((Object _) {});
   }
 
   // ===========================================================================
@@ -7436,6 +7653,40 @@ class EmbeddedBackend implements QqShellRunner {
       );
       return true;
     }
+    return false;
+  }
+
+  /// ToolRegistry 审批入口（round13）：ask 命中时沿用 shell 同款一次性
+  /// 凭据——批准后重试同一工具+参数直接放行；未批准则建审批单并返回 false。
+  /// shell 与 workspace.* 工具不在 run() 层过策略（它们在 execute 内
+  /// 自己过策略并消费凭据），这里不会收到它们的回调。
+  Future<bool> _requestToolApproval(
+      String tool, Map<String, dynamic> args) async {
+    String argsText;
+    try {
+      argsText = jsonEncode(args);
+    } on Object {
+      argsText = args.toString();
+    }
+    if (argsText.length > 160) argsText = argsText.substring(0, 160);
+    final String grantKey = 'tool|$tool|$argsText';
+    if (await _consumeGrant(grantKey)) return true;
+    final String preview =
+        argsText.length > 80 ? '${argsText.substring(0, 80)}…' : argsText;
+    final int id = await store.insert('approvals', <String, dynamic>{
+      'action': '执行工具: $tool $preview',
+      'status': 'pending',
+      'grant_key': grantKey,
+      'consumed': 0,
+      'ts': _now(),
+    });
+    await _auditLog().append(
+      category: 'approval',
+      action: 'tool_approval_required',
+      decision: 'ask',
+      actor: tool,
+      detail: '审批单 $id：$tool',
+    );
     return false;
   }
 
