@@ -56,16 +56,22 @@ class CapabilityDenied implements Exception {
   String toString() => 'CapabilityDenied($pluginId, $capability): $reason';
 }
 
-/// 能力判定：`caps` 为空＝不限制（兼容既有插件）；
-/// T3 第三方插件的 `caps` 为空＝未声明，一律拒绝（fail-closed）。
+/// 能力判定：`caps` 有两种既有写法，都认：接缝名（插件清单的声明口径，
+/// 如 'core/im'）与能力令牌（调用仲裁的口径，如 'channel:send'，
+/// 见 [defaultSeamCaps]）。只认其中一种会让另一处的测试与调用静默失败——
+/// 此前 kernel_guard_test 用令牌写法期望放行、plugin_tier_test 用接缝名
+/// 写法期望放行，实现只认接缝名，两处期望不可能同时成立。
 ///
-/// `caps` 有两种既有写法，都认：接缝名（插件清单的声明口径，如 'core/im'）
-/// 与能力令牌（调用仲裁的口径，如 'channel:send'，见 [defaultSeamCaps]）。
-/// 只认其中一种会让另一处的测试与调用静默失败——此前 kernel_guard_test
-/// 用令牌写法期望放行、plugin_tier_test 用接缝名写法期望放行，
-/// 实现只认接缝名，两处期望不可能同时成立。
+/// round13 收紧：`caps` 为空时，T3 一律拒绝（不变）；T0–T2 也不再默认
+/// 放行高危接缝（[kHighRiskSeams]：core/sandbox、core/im、core/scheduler
+/// 必须显式声明）。非高危接缝仍沿用空 caps 不限制的兼容语义——
+/// 内建插件除已声明 caps 的 5 个外仍为空 caps，收紧面若扩到全部接缝，
+/// boot 时 15 个内建插件会挂载失败。
 bool seamAllowed(PluginTier tier, List<String> caps, String seam) {
-  if (caps.isEmpty) return tier != PluginTier.thirdParty;
+  if (caps.isEmpty) {
+    if (tier == PluginTier.thirdParty) return false;
+    return !kHighRiskSeams.contains(seam);
+  }
   if (caps.contains(seam)) return true;
   final List<String> need = defaultSeamCaps()[seam] ?? const <String>[];
   return need.any(caps.contains);
