@@ -126,6 +126,18 @@ class PermissionPolicy {
             note: '拒绝读取 .env、凭证与私钥文件',
           ),
           PermissionRule(
+            id: 'default-ask-computer-write',
+            tool: r'^computer_write$',
+            decision: PolicyDecision.ask,
+            note: 'Team Computer 写入需确认（round13 补齐写工具覆盖）',
+          ),
+          PermissionRule(
+            id: 'default-ask-integration-call',
+            tool: r'^integration_call$',
+            decision: PolicyDecision.ask,
+            note: '外部集成调用（MCP/OpenAPI/GraphQL）需确认（round13 补齐写工具覆盖）',
+          ),
+          PermissionRule(
             id: 'default-allow-workspace',
             tool: r'^workspace\.(mkdir|read|copy|write|search|list)$',
             decision: PolicyDecision.allow,
