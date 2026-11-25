@@ -453,8 +453,9 @@ class Gateway:
         一条审计事件，decision 分别为 allowed / denied / failed。
 
         from_reply=True 表示这是入站触发的回复（用户刚发来消息，等回复）：
-        不过分级审批这道门——审批只管主动外发（调研报告的范围；Dart 侧
-        也只对 _sendProactive 设门）。主动外发一律走审批门。
+        ask 级别豁免——审批只管主动外发（调研报告的范围；Dart 侧
+        也只对 _sendProactive 设门）。主动外发一律走审批门；deny 是
+        绝对禁令，入站回复也不例外（deny 除外）。
 
         Returns:
             (allow, reason)：allow 为 True 表示已下发，否则为拦截原因。
@@ -475,19 +476,20 @@ class Gateway:
                 self._blocked_count += 1
             self._audit_outbound(msg, "denied", reason)
             return False, reason
-        # 分级审批（默认 ask）只管主动外发：风控放行后、真正下发前再过
-        # 一道用户设的门。deny 直接拒绝；ask 时没有一次性批准就记一条
-        # 待审批并返回 needs-approval:<id>，不发送；auto 或已批准则放行。
-        # 入站回复（from_reply=True）直接按 auto 处理，不进这道门。
+        # 分级审批（默认 ask）：风控放行后、真正下发前再过一道用户设的
+        # 门。deny 是绝对禁令，主动外发与入站回复一律拒绝；ask 时没有
+        # 一次性批准就记一条待审批并返回 needs-approval:<id>，不发送；
+        # auto 或已批准则放行。入站回复（from_reply=True）豁免 ask，
+        # 按 auto 处理，但 deny 除外。
         key = _platform_key(msg.platform)
-        level = (LEVEL_AUTO if from_reply else self.approval_policy.decide(
-            CATEGORY_OUTBOUND, key=key
-        ))
+        level = self.approval_policy.decide(CATEGORY_OUTBOUND, key=key)
         if level == LEVEL_DENY:
             with self._lock:
                 self._blocked_count += 1
             self._audit_outbound(msg, "denied", f"approval-deny:{msg.platform}")
             return False, f"approval-deny:{msg.platform}"
+        if from_reply and level == LEVEL_ASK:
+            level = LEVEL_AUTO
         if level == LEVEL_ASK:
             if not self.approval_policy.consume_approval(
                 CATEGORY_OUTBOUND, key=key, subject=msg.user_id
@@ -543,8 +545,8 @@ class Gateway:
         return self.approval_policy.get_policy()
 
     def reply(self, platform: str, user_id: str, text: str) -> tuple[bool, str]:
-        """向指定平台用户回复一条文本消息（入站触发的回复，不过审批门；
-        风控与审计照常）。"""
+        """向指定平台用户回复一条文本消息（入站触发的回复，ask 豁免、
+        deny 仍拦截；风控与审计照常）。"""
         msg = MultimodalMessage(user_id=user_id, platform=platform, modality="text", payload=text)
         return self.send_outbound(msg, from_reply=True)
 
