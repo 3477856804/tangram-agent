@@ -2,6 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'package:tangram/harness/ui_customization.dart';
+import 'package:tangram/mosaic/generated_registry.dart';
+import 'package:tangram/mosaic/host.dart';
+import 'package:tangram/mosaic/panel.dart';
+import 'package:tangram/mosaic/registry.dart';
 import 'package:tangram/ui/pages/tga_3d_page.dart';
 import 'package:tangram/ui/pages/tga_account_ops_page.dart';
 import 'package:tangram/ui/pages/tga_app_market_page.dart';
@@ -228,6 +232,20 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
     icon: Icons.memory_outlined,
     labelKey: 'sidebar.models',
     page: const TgaModelsPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.dashboard_outlined,
+    labelKey: 'sidebar.mosaic',
+    // mosaic 拼装壳：左侧导航 + 右侧面板，面板由约定注册表生成
+    //（新增面板文件即自动出现，零改主入口）。
+    // 能力集合目前由侧栏全量授予——与今日两个面板无条件出现在导航里
+    // 的行为一致；能力授权落地后改为真实授权集合，visible() 会自动
+    // 过滤缺失能力的面板。现有 channels/models 入口原样保留。
+    page: MosaicHost(
+      registry: MosaicRegistry(panels: tgaPanels()),
+      available: MosaicCapability.values.toSet(),
+    ),
     fullPage: true,
   ),
   NavItem(
