@@ -279,13 +279,28 @@ class KernelPage {
 /// 插件上下文。所有注册动作既真实生效，又产生一个 [Disposable] 登记到
 /// 当前作用域的 effects；卸载插件时逆序执行，实现"摘下来就恢复"。
 class PluginContext {
-  PluginContext._(this._kernel, this._effects, this.pluginId);
+  PluginContext._(this._kernel, this._effects, this.pluginId,
+      {List<String>? caps, PluginTier tier = PluginTier.official})
+      : _declaredCaps = caps,
+        _declaredTier = tier;
   final PluginKernel _kernel;
   final List<Disposable>? _effects;
   final String pluginId;
+  /// 挂载时由 mount() 传入的已声明 caps：apply 期间插件尚未入 _nodes，
+  /// 不能靠 pluginOf 查；运行期优先查登记值，与之一致。
+  final List<String>? _declaredCaps;
+  /// 同上：挂载时传入的分级（apply 期间 pluginOf 同样查不到）。
+  final PluginTier _declaredTier;
 
-  /// 供插件在提示词片段/控制动作里读取内核实时状态（只读视图，不绕过注册）。
-  PluginKernel get kernel => _kernel;
+  List<String> _capsOf() =>
+      _declaredCaps ?? _kernel.pluginOf(pluginId)?.caps ?? const <String>[];
+
+  /// 插件看到的内核是受限 facade（round13）：只暴露 invoke/emit/describe/
+  /// replay/search/fork/composeSystemPrompt/只读计数与页面读写，绝不交出
+  /// 裸 PluginKernel——旧 getter 返回裸内核时，插件可直调 setProvider/
+  /// mount/restoreSnapshot 绕过全部仲裁。getter 名不变，调用点不用改名。
+  PluginKernelFacade get kernel =>
+      PluginKernelFacade._(_kernel, pluginId, _capsOf());
 
   void _track(Disposable d) => _effects?.add(d);
 
@@ -319,8 +334,10 @@ class PluginContext {
   bool hasService(String name) => _kernel._services.containsKey(name);
 
   /// 声明/取得一个能力接缝（定义不可变，已存在则复用）。
-  CapabilitySeam seam(String name, String definition) =>
-      _kernel._ensureSeam(name, definition);
+  /// round13：只返回只读快照 [SeamView]，不再交出可变的 CapabilitySeam
+  /// 对象——旧返回可被插件直改 providers/consumers/activeProviderId。
+  SeamView seam(String name, String definition) =>
+      SeamView.of(_kernel._ensureSeam(name, definition));
 
   /// 注册一个接缝 provider。
   void provideSeamProvider(String seamName, String id, String description,
@@ -345,10 +362,17 @@ class PluginContext {
 
   /// 声明自己是某接缝的使用方；切换 provider 时一并感知。
   void consumeSeam(String seamName, String consumerName) {
-    final Plugin? self = _kernel.pluginOf(pluginId);
-    if (self != null && !seamAllowed(self.tier, self.caps, seamName)) {
+    // round13：apply 期间插件尚未入 _nodes，pluginOf 查不到——用挂载时
+    // 传入的已声明 caps/tier 校验（与登记值一致）；运行期两者一致。
+    // 旧代码只在 pluginOf 非空时校验，apply 期间恒为 null，门禁是死的，
+    // D 的收紧也就落不了地。
+    final Plugin? registered = _kernel.pluginOf(pluginId);
+    final List<String> caps =
+        _declaredCaps ?? registered?.caps ?? const <String>[];
+    final PluginTier tier = registered?.tier ?? _declaredTier;
+    if (!seamAllowed(tier, caps, seamName)) {
       throw CapabilityDenied(
-          pluginId, seamName, 'caps 未声明该接缝（tier=${self.tier.wire}）');
+          pluginId, seamName, 'caps 未声明该接缝（tier=${tier.wire}）');
     }
     final CapabilitySeam s = _kernel._ensureSeam(seamName, '');
     if (!s.consumers.contains(consumerName)) s.consumers.add(consumerName);
@@ -403,8 +427,14 @@ class PluginContext {
   }
 
   /// 发布一个内核事件（记入 append-only 会话日志）。
-  void emit(String topic, Map<String, dynamic> data) =>
-      _kernel.emit(topic, pluginId, data);
+  /// round13：与 facade 共用同一份白名单（见 kernel_guard.dart），
+  /// 禁发 kernel.*/seam.*/plugin.* 前缀，违规即抛，不静默吞掉。
+  void emit(String topic, Map<String, dynamic> data) {
+    if (!pluginEmitAllowed(topic)) {
+      throw StateError('插件 $pluginId 不可发布事件 $topic（不在白名单内）');
+    }
+    _kernel.emit(topic, pluginId, data);
+  }
 
   // ---- 自定义能力接缝：页面 / 组件槽 / 文案覆盖 / 权限策略 ----
   // 每个注册都既真实写入内核容器，又登记一个幂等 Disposable：
@@ -490,6 +520,136 @@ class PluginContext {
 
     _track(undo);
     return undo;
+  }
+}
+
+/// 能力接缝的只读视图：仅只读字段，无任何改写入口。
+/// 由 [PluginContext.seam] 返回；想改 provider 或激活项必须走内核仲裁。
+class SeamView {
+  SeamView(this.name, this.definition, this.activeProviderId, this.providers,
+      this.consumers);
+
+  factory SeamView.of(CapabilitySeam s) => SeamView(
+        s.name,
+        s.definition,
+        s.activeProviderId,
+        s.providers.values
+            .map((SeamProviderEntry p) => <String, dynamic>{
+                  'id': p.id,
+                  'description': p.description,
+                  'owner': p.ownerPlugin,
+                })
+            .toList(),
+        List<String>.of(s.consumers),
+      );
+
+  final String name;
+  final String definition;
+  final String activeProviderId;
+  final List<Map<String, dynamic>> providers;
+  final List<String> consumers;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'name': name,
+        'definition': definition,
+        'active_provider': activeProviderId,
+        'providers': providers,
+        'consumers': consumers,
+      };
+}
+
+/// 插件眼中的内核（round13）：受限 facade，只由 [PluginContext] 创建。
+/// 暴露的每一次调用都在内部固定 caller=_pluginId、caps=_caps，调用方
+/// 传不进来——payload 里自称的 caller/caps 永不参与鉴权。
+/// 明确不暴露：mount/unmount/setProvider/handle（通用版）/restoreSnapshot/
+/// captureSnapshot/registerPlugin/defineModePlugins/boot/dispose/
+/// setTextOverride/setPermissionPolicy、profile 对象、seamCaps、invokeGuard、
+/// onBeforeMount、CapabilitySeam 对象。
+class PluginKernelFacade {
+  PluginKernelFacade._(this._kernel, this._pluginId, this._caps);
+
+  final PluginKernel _kernel;
+  final String _pluginId;
+  final List<String> _caps;
+
+  /// 经内核仲裁调用接缝：caller 固定为登记身份，不接受调用方传入。
+  Future<Map<String, dynamic>> invoke(
+          String seam, String method, Map<String, dynamic> args) =>
+      _kernel.invoke(seam, method, args, caller: _pluginId);
+
+  /// 只放行白名单 topic（见 kernel_guard.dart）；其余抛 StateError，
+  /// 且事件流里不留痕迹。
+  void emit(String topic, Map<String, dynamic> data) {
+    if (!pluginEmitAllowed(topic)) {
+      throw StateError('插件 $_pluginId 不可发布事件 $topic（不在白名单内）');
+    }
+    _kernel.emit(topic, _pluginId, data);
+  }
+
+  /// 内核实时状态（只读，与 handle('describe') 同口径）。
+  Map<String, dynamic> describe() => <String, dynamic>{
+        'ok': true,
+        'booted': _kernel._booted,
+        'profile': _kernel._profile.id,
+        'mode': _kernel._profile.mode.label,
+        'mounted': _kernel.mountedCount,
+        'seams': _kernel._seams.length,
+        'services': _kernel._services.length,
+        'control_actions': _kernel._controlActions.length,
+        'prompt_sections': _kernel._promptSections.length,
+        'event_seq': _kernel._seq,
+      };
+
+  Future<List<KernelEvent>> replay({int? fromSeq, String? topic}) =>
+      _kernel.replay(fromSeq: fromSeq, topic: topic);
+
+  Future<List<KernelEvent>> search(String query) => _kernel.search(query);
+
+  Future<int> fork(int fromSeq) => _kernel.fork(fromSeq);
+
+  String composeSystemPrompt() => _kernel.composeSystemPrompt();
+
+  int get mountedCount => _kernel.mountedCount;
+
+  int get eventSeq => _kernel.eventSeq;
+
+  /// 只给运行模式的 label 字符串，不给 RuntimeProfile 对象。
+  String get modeLabel => _kernel._profile.mode.label;
+
+  List<Map<String, dynamic>> listPages() => _kernel.listPages();
+
+  /// 页面写操作须声明 'ui:open' 能力；owner 记为本插件，便于追溯与回收。
+  Map<String, dynamic> addPage(String id, Map<String, dynamic> meta) {
+    if (!_caps.contains('ui:open')) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '插件 $_pluginId 未声明 ui:open，无权添加页面',
+        'missing_caps': <String>['ui:open'],
+      };
+    }
+    return _kernel.addPage(id, meta, owner: _pluginId);
+  }
+
+  Map<String, dynamic> removePage(String id) {
+    if (!_caps.contains('ui:open')) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '插件 $_pluginId 未声明 ui:open，无权删除页面',
+        'missing_caps': <String>['ui:open'],
+      };
+    }
+    return _kernel.removePage(id);
+  }
+
+  Map<String, dynamic> reorderPages(List<String> ids) {
+    if (!_caps.contains('ui:open')) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '插件 $_pluginId 未声明 ui:open，无权重排页面',
+        'missing_caps': <String>['ui:open'],
+      };
+    }
+    return _kernel.reorderPages(ids);
   }
 }
 
@@ -901,7 +1061,8 @@ class PluginKernel {
       }
     }
     final List<Disposable> effects = <Disposable>[];
-    final PluginContext scope = PluginContext._(this, effects, pluginId);
+    final PluginContext scope = PluginContext._(this, effects, pluginId,
+        caps: plugin.caps, tier: plugin.tier);
     final PluginNode node =
         PluginNode(plugin, parentId, source, configLayer);
     try {
@@ -952,7 +1113,8 @@ class PluginKernel {
     for (final String child in List<String>.of(node.children)) {
       await unmount(child, reason: 'parent:$pluginId');
     }
-    final PluginContext scope = PluginContext._(this, null, pluginId);
+    final PluginContext scope = PluginContext._(this, null, pluginId,
+        caps: node.plugin.caps, tier: node.plugin.tier);
     try {
       await node.plugin.dispose(scope);
     } on Object {
@@ -1010,27 +1172,64 @@ class PluginKernel {
   }
 
   /// 通过当前激活 provider 真实调用一个接缝能力。
+  ///
+  /// round13 可信身份：调用方传入的 `caps` 已废弃（保留签名兼容，永不
+  /// 参与鉴权）——能力一律查内核内登记的身份：`caller` 是已挂载插件 id
+  /// 时用该插件声明的 caps 与 tier；`caller == 'ui'` 仅当 [trustedRoot]
+  /// 为真（进程内 UI 直连）时才算 root，否则按未表明身份处理；未知
+  /// caller 名直接拒绝。缺省 caller 仍为 [kRootCaller]（测试与
+  /// embedded_backend 直调的约定），但缺省 trustedRoot=false 时它会被
+  /// 降级为未表明身份——直调方须显式传 trustedRoot:true 才能走 root。
   Future<Map<String, dynamic>> invoke(String seamName, String method,
       Map<String, dynamic> args,
-      {String caller = kRootCaller, List<String> caps = const <String>[]}) async {
+      {String caller = kRootCaller, List<String> caps = const <String>[],
+      bool trustedRoot = false}) async {
     final CapabilitySeam? s = _seams[seamName];
     if (s == null) {
       return <String, dynamic>{'ok': false, 'error': '接缝 $seamName 不存在'};
     }
-    // G2 仲裁：root（UI）直通；其他调用方必须满足 seamCaps 与自带 caps。
-    if (caller != kRootCaller) {
+    // round13：先定可信身份，再仲裁。'ui' 自称只有可信根路径才认。
+    final String effectiveCaller =
+        (caller == kRootCaller && !trustedRoot) ? kUntrustedCaller : caller;
+    // G2 仲裁：root（可信 UI）直通；其余调用方按登记身份查能力。
+    if (effectiveCaller != kRootCaller) {
+      final Plugin? registered = _nodes[effectiveCaller]?.plugin;
+      if (registered == null) {
+        emit('seam.denied', 'kernel', <String, dynamic>{
+          'seam': seamName,
+          'caller': effectiveCaller,
+          'reason': 'unknown_caller',
+        });
+        return <String, dynamic>{
+          'ok': false,
+          'error': '未知调用方 $effectiveCaller：未在内核登记的插件身份无权调用接缝 $seamName',
+        };
+      }
       final List<String> need = seamCaps[seamName] ?? const <String>[];
+      final List<String> effectiveCaps = registered.caps;
       final List<String> missing =
-          need.where((String c) => !caps.contains(c)).toList();
+          need.where((String c) => !effectiveCaps.contains(c)).toList();
+      if (registered.tier == PluginTier.thirdParty && effectiveCaps.isEmpty) {
+        emit('seam.denied', 'kernel', <String, dynamic>{
+          'seam': seamName,
+          'caller': effectiveCaller,
+          'missing_caps': need,
+        });
+        return <String, dynamic>{
+          'ok': false,
+          'error': 'T3 插件 $effectiveCaller 未声明 caps，无权调用接缝 $seamName',
+          'missing_caps': need,
+        };
+      }
       if (missing.isNotEmpty) {
         emit('seam.denied', 'kernel', <String, dynamic>{
           'seam': seamName,
-          'caller': caller,
+          'caller': effectiveCaller,
           'missing_caps': missing,
         });
         return <String, dynamic>{
           'ok': false,
-          'error': '调用方 $caller 缺少能力令牌：$missing（接缝 $seamName）',
+          'error': '调用方 $effectiveCaller 缺少能力令牌：$missing（接缝 $seamName）',
           'missing_caps': missing,
         };
       }
@@ -1039,14 +1238,14 @@ class PluginKernel {
     if (guard != null) {
       bool allowed = false;
       try {
-        allowed = await guard(seamName, method, args, caller);
+        allowed = await guard(seamName, method, args, effectiveCaller);
       } on Object catch (e) {
         return <String, dynamic>{'ok': false, 'error': '调用守卫异常，拒绝执行：$e'};
       }
       if (!allowed) {
         emit('seam.denied', 'kernel', <String, dynamic>{
           'seam': seamName,
-          'caller': caller,
+          'caller': effectiveCaller,
           'reason': 'guard_rejected',
         });
         return <String, dynamic>{
@@ -1274,10 +1473,11 @@ class PluginKernel {
   // ---- 控制域动作分发（plugin_kernel）----
 
   /// 改动类控制动作：必须由 UI（root）显式发起。
-  /// 只读动作（describe/status/tree/seams/modes/dump_config/pages/
-  /// widget_slots/events/search/snapshots/snapshot 等）不受限。
-  /// 'invoke' 不在此列——它走自己的仲裁（能力令牌 + 调用守卫），
+  /// 只读动作（describe/status/tree/seams/modes/dump_config/pages-list/
+  /// widget_slots/events/search/snapshots/compose_prompt 等）不受限。
+  /// 'invoke' 不在此列——它走自己的仲裁（登记身份 + 调用守卫），
   /// 缺省 caller 时按未表明身份处理，见 'invoke' 分支。
+  /// round13：snapshot/fork 也是改动（写快照/写分叉事件），一并入集。
   static const Set<String> _mutationActions = <String>{
     'mount',
     'unmount',
@@ -1285,14 +1485,112 @@ class PluginKernel {
     'set_mode',
     'set_patch',
     'rollback',
+    'snapshot',
+    'fork',
   };
 
-  Future<Map<String, dynamic>> handle(String action, Map<String, dynamic> p) async {
-    // G2：改动类动作必须由 UI（root）显式发起；省略 caller 即视为
-    // 未表明身份，一律拒绝。唯一合法发送方是内核调试页
-    //（tga_kernel_page.dart，经 _call 统一带 caller: 'ui'）。
-    if (_mutationActions.contains(action) &&
-        (p['caller'] ?? kUntrustedCaller).toString() != kRootCaller) {
+  /// 动作 owner 插件自身可执行的改动（须同时满足：pluginId 非空、动作
+  /// 在白名单内、目标资源确属该插件）。trustedRoot 为真时不走这条路。
+  static const Set<String> _ownerAllowedActions = <String>{
+    'pages',
+    'text_overrides',
+    'permission_policies',
+  };
+
+  /// 是否改动类动作：静态改动集 + pages/text_overrides/permission_policies
+  /// 的写分支 + default 控制动作分支（未知动作先按改动处理——读不到
+  /// 东西也改不了东西，fail-closed）。已知只读动作不在此列。
+  bool _isMutation(String action, Map<String, dynamic> p) {
+    if (_mutationActions.contains(action)) return true;
+    switch (action) {
+      case 'pages':
+        return <String>{'add', 'remove', 'reorder'}
+            .contains((p['op'] ?? 'list').toString());
+      case 'text_overrides':
+        return (p['op'] ?? 'list').toString() == 'set';
+      case 'permission_policies':
+        return (p['op'] ?? 'list').toString() == 'set';
+      case 'describe':
+      case 'status':
+      case 'tree':
+      case 'seams':
+      case 'modes':
+      case 'dump_config':
+      case 'widget_slots':
+      case 'compose_prompt':
+      case 'events':
+      case 'search':
+      case 'snapshots':
+      case 'invoke':
+        return false;
+      default:
+        // 插件贡献的控制动作与未知动作：一律按改动处理。
+        return true;
+    }
+  }
+
+  /// 改动门禁。`trustedRoot` 与 `pluginId` 是代码层参数（只由进程内
+  /// 可信调用方传入），绝不从 payload 里读——payload 里的 caller/caps
+  /// 只作展示，永不参与鉴权：'ui' 自称在不可信路径上等同于未表明身份。
+  /// 放行条件：trustedRoot（进程内 UI 直连），或动作 owner 插件自身、
+  /// 且动作在 allowlist 内、且目标资源归属该插件。
+  bool _mutationAllowed(String action, Map<String, dynamic> p,
+      bool trustedRoot, String? pluginId) {
+    if (trustedRoot) return true;
+    if (pluginId == null || pluginId.isEmpty) return false;
+    if (_ownerAllowedActions.contains(action)) {
+      return _ownsMutationTarget(action, p, pluginId);
+    }
+    // 插件贡献的控制动作：只有登记该动作的 owner 插件自身可调。
+    final _ControlEntry? entry = _controlActions[action];
+    if (entry != null) return entry.owner == pluginId;
+    return false;
+  }
+
+  /// owner 路径的目标归属判定：pages 的 add 以调用方为 owner 落账，
+  /// remove/reorder 只能动归属自己的已有页；text_overrides 与
+  /// permission_policies 没有逐条 owner 记录，归属即“调用方身份由
+  /// 代码层 pluginId 确立 + 动作在 allowlist 内”。
+  bool _ownsMutationTarget(
+      String action, Map<String, dynamic> p, String pluginId) {
+    switch (action) {
+      case 'pages':
+        final String op = (p['op'] ?? 'list').toString();
+        if (op == 'add') return true;
+        if (op == 'remove') {
+          final String id = (p['id'] ?? '').toString();
+          for (final KernelPage page in _pages) {
+            if (page.id == id) return page.owner == pluginId;
+          }
+          return false;
+        }
+        if (op == 'reorder') {
+          return _pages.every((KernelPage e) => e.owner == pluginId);
+        }
+        return false;
+      case 'text_overrides':
+        return (p['op'] ?? 'list').toString() == 'set';
+      case 'permission_policies':
+        return (p['op'] ?? 'list').toString() == 'set';
+      default:
+        return false;
+    }
+  }
+
+  /// 控制域动作分发。
+  ///
+  /// round13：`trustedRoot` 只由进程内 UI 直连路径（EmbeddedBackend
+  /// dispatch → _onPluginKernel）传 true；TCP/stdio 桥接与任何直接
+  /// handle 调用缺省为 false。`pluginId` 只由内核内可信调用方传——
+  /// 它是动作 owner 插件的已登记身份，不是 payload 字段。
+  Future<Map<String, dynamic>> handle(String action, Map<String, dynamic> p,
+      {bool trustedRoot = false, String? pluginId}) async {
+    // G2：改动类动作必须由 UI（root）显式发起，或由动作 owner 插件自身
+    // 在 allowlist 内发起；省略身份即视为未表明身份，一律拒绝。唯一
+    // 合法发送方是内核调试页（tga_kernel_page.dart，经 _call 统一带
+    // caller: 'ui'，再由进程内 dispatch 标 trustedRoot）。
+    if (_isMutation(action, p) &&
+        !_mutationAllowed(action, p, trustedRoot, pluginId)) {
       emit('seam.denied', 'kernel', <String, dynamic>{
         'action': action,
         'caller': (p['caller'] ?? kUntrustedCaller).toString(),
@@ -1300,7 +1598,7 @@ class PluginKernel {
       });
       return <String, dynamic>{
         'ok': false,
-        'error': '改动类动作 $action 须由 UI（root）发起，未表明身份的调用方无权执行',
+        'error': '改动类动作 $action 须由 UI（root）发起，或由动作 owner 插件自身在 allowlist 内发起；未表明身份的调用方无权执行',
       };
     }
     switch (action) {
@@ -1350,13 +1648,13 @@ class PluginKernel {
             ? Map<String, dynamic>.from(p['args'] as Map)
             : <String, dynamic>{};
         // G2：缺省 caller 不再默认 root——省略身份即视为未表明身份
-        //（kUntrustedCaller），再由能力令牌与调用守卫仲裁。
+        //（kUntrustedCaller），再由登记身份与调用守卫仲裁。
+        // round13：payload 里的 caps 永不转发给 invoke（调用方自称的
+        // 能力一律不认）；'ui' 自称只在 trustedRoot 为真时才算 root。
         return await invoke((p['seam'] ?? '').toString(),
             (p['method'] ?? '').toString(), args,
             caller: (p['caller'] ?? kUntrustedCaller).toString(),
-            caps: (p['caps'] is List)
-                ? (p['caps'] as List).map((dynamic e) => e.toString()).toList()
-                : const <String>[]);
+            trustedRoot: trustedRoot);
       case 'set_mode':
         return await _setMode((p['mode'] ?? '').toString());
       case 'set_patch':
@@ -1367,7 +1665,7 @@ class PluginKernel {
           bundleId: p['bundle']?.toString(),
         );
       case 'pages':
-        return _pagesAction(p);
+        return _pagesAction(p, owner: pluginId);
       case 'text_overrides':
         return _textOverridesAction(p);
       case 'permission_policies':
@@ -1542,7 +1840,8 @@ class PluginKernel {
     };
   }
 
-  Map<String, dynamic> _pagesAction(Map<String, dynamic> p) {
+  Map<String, dynamic> _pagesAction(Map<String, dynamic> p,
+      {String? owner}) {
     final String op = (p['op'] ?? 'list').toString();
     switch (op) {
       case 'list':
@@ -1553,6 +1852,7 @@ class PluginKernel {
           p['meta'] is Map
               ? Map<String, dynamic>.from(p['meta'] as Map)
               : <String, dynamic>{},
+          owner: owner ?? 'runtime',
         );
       case 'remove':
         return removePage((p['id'] ?? '').toString());
