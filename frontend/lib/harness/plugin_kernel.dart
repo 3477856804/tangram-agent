@@ -279,13 +279,28 @@ class KernelPage {
 /// 插件上下文。所有注册动作既真实生效，又产生一个 [Disposable] 登记到
 /// 当前作用域的 effects；卸载插件时逆序执行，实现"摘下来就恢复"。
 class PluginContext {
-  PluginContext._(this._kernel, this._effects, this.pluginId);
+  PluginContext._(this._kernel, this._effects, this.pluginId,
+      {List<String>? caps, PluginTier tier = PluginTier.official})
+      : _declaredCaps = caps,
+        _declaredTier = tier;
   final PluginKernel _kernel;
   final List<Disposable>? _effects;
   final String pluginId;
+  /// 挂载时由 mount() 传入的已声明 caps：apply 期间插件尚未入 _nodes，
+  /// 不能靠 pluginOf 查；运行期优先查登记值，与之一致。
+  final List<String>? _declaredCaps;
+  /// 同上：挂载时传入的分级（apply 期间 pluginOf 同样查不到）。
+  final PluginTier _declaredTier;
 
-  /// 供插件在提示词片段/控制动作里读取内核实时状态（只读视图，不绕过注册）。
-  PluginKernel get kernel => _kernel;
+  List<String> _capsOf() =>
+      _declaredCaps ?? _kernel.pluginOf(pluginId)?.caps ?? const <String>[];
+
+  /// 插件看到的内核是受限 facade（round13）：只暴露 invoke/emit/describe/
+  /// replay/search/fork/composeSystemPrompt/只读计数与页面读写，绝不交出
+  /// 裸 PluginKernel——旧 getter 返回裸内核时，插件可直调 setProvider/
+  /// mount/restoreSnapshot 绕过全部仲裁。getter 名不变，调用点不用改名。
+  PluginKernelFacade get kernel =>
+      PluginKernelFacade._(_kernel, pluginId, _capsOf());
 
   void _track(Disposable d) => _effects?.add(d);
 
@@ -319,8 +334,10 @@ class PluginContext {
   bool hasService(String name) => _kernel._services.containsKey(name);
 
   /// 声明/取得一个能力接缝（定义不可变，已存在则复用）。
-  CapabilitySeam seam(String name, String definition) =>
-      _kernel._ensureSeam(name, definition);
+  /// round13：只返回只读快照 [SeamView]，不再交出可变的 CapabilitySeam
+  /// 对象——旧返回可被插件直改 providers/consumers/activeProviderId。
+  SeamView seam(String name, String definition) =>
+      SeamView.of(_kernel._ensureSeam(name, definition));
 
   /// 注册一个接缝 provider。
   void provideSeamProvider(String seamName, String id, String description,
@@ -345,10 +362,17 @@ class PluginContext {
 
   /// 声明自己是某接缝的使用方；切换 provider 时一并感知。
   void consumeSeam(String seamName, String consumerName) {
-    final Plugin? self = _kernel.pluginOf(pluginId);
-    if (self != null && !seamAllowed(self.tier, self.caps, seamName)) {
+    // round13：apply 期间插件尚未入 _nodes，pluginOf 查不到——用挂载时
+    // 传入的已声明 caps/tier 校验（与登记值一致）；运行期两者一致。
+    // 旧代码只在 pluginOf 非空时校验，apply 期间恒为 null，门禁是死的，
+    // D 的收紧也就落不了地。
+    final Plugin? registered = _kernel.pluginOf(pluginId);
+    final List<String> caps =
+        _declaredCaps ?? registered?.caps ?? const <String>[];
+    final PluginTier tier = registered?.tier ?? _declaredTier;
+    if (!seamAllowed(tier, caps, seamName)) {
       throw CapabilityDenied(
-          pluginId, seamName, 'caps 未声明该接缝（tier=${self.tier.wire}）');
+          pluginId, seamName, 'caps 未声明该接缝（tier=${tier.wire}）');
     }
     final CapabilitySeam s = _kernel._ensureSeam(seamName, '');
     if (!s.consumers.contains(consumerName)) s.consumers.add(consumerName);
@@ -403,8 +427,14 @@ class PluginContext {
   }
 
   /// 发布一个内核事件（记入 append-only 会话日志）。
-  void emit(String topic, Map<String, dynamic> data) =>
-      _kernel.emit(topic, pluginId, data);
+  /// round13：与 facade 共用同一份白名单（见 kernel_guard.dart），
+  /// 禁发 kernel.*/seam.*/plugin.* 前缀，违规即抛，不静默吞掉。
+  void emit(String topic, Map<String, dynamic> data) {
+    if (!pluginEmitAllowed(topic)) {
+      throw StateError('插件 $pluginId 不可发布事件 $topic（不在白名单内）');
+    }
+    _kernel.emit(topic, pluginId, data);
+  }
 
   // ---- 自定义能力接缝：页面 / 组件槽 / 文案覆盖 / 权限策略 ----
   // 每个注册都既真实写入内核容器，又登记一个幂等 Disposable：
@@ -490,6 +520,140 @@ class PluginContext {
 
     _track(undo);
     return undo;
+  }
+}
+
+/// 能力接缝的只读视图：仅只读字段，无任何改写入口。
+/// 由 [PluginContext.seam] 返回；想改 provider 或激活项必须走内核仲裁。
+class SeamView {
+  SeamView(this.name, this.definition, this.activeProviderId, this.providers,
+      this.consumers);
+
+  factory SeamView.of(CapabilitySeam s) => SeamView(
+        s.name,
+        s.definition,
+        s.activeProviderId,
+        s.providers.values
+            .map((SeamProviderEntry p) => <String, dynamic>{
+                  'id': p.id,
+                  'description': p.description,
+                  'owner': p.ownerPlugin,
+                })
+            .toList(),
+        List<String>.of(s.consumers),
+      );
+
+  final String name;
+  final String definition;
+  final String activeProviderId;
+  final List<Map<String, dynamic>> providers;
+  final List<String> consumers;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'name': name,
+        'definition': definition,
+        'active_provider': activeProviderId,
+        'providers': providers,
+        'consumers': consumers,
+      };
+}
+
+/// 插件眼中的内核（round13）：受限 facade，只由 [PluginContext] 创建。
+/// 暴露的每一次调用都在内部固定 caller=_pluginId、caps=_caps，调用方
+/// 传不进来——payload 里自称的 caller/caps 永不参与鉴权。
+/// 明确不暴露：mount/unmount/setProvider/handle（通用版）/restoreSnapshot/
+/// captureSnapshot/registerPlugin/defineModePlugins/boot/dispose/
+/// setTextOverride/setPermissionPolicy、profile 对象、seamCaps、invokeGuard、
+/// onBeforeMount、CapabilitySeam 对象。
+class PluginKernelFacade {
+  PluginKernelFacade._(this._kernel, this._pluginId, this._caps);
+
+  final PluginKernel _kernel;
+  final String _pluginId;
+  final List<String> _caps;
+
+  /// 经内核仲裁调用接缝：caller 固定为登记身份，不接受调用方传入。
+  Future<Map<String, dynamic>> invoke(
+          String seam, String method, Map<String, dynamic> args) =>
+      _kernel.invoke(seam, method, args, caller: _pluginId);
+
+  /// 只放行白名单 topic（见 kernel_guard.dart）；其余抛 StateError，
+  /// 且事件流里不留痕迹。
+  void emit(String topic, Map<String, dynamic> data) {
+    if (!pluginEmitAllowed(topic)) {
+      throw StateError('插件 $_pluginId 不可发布事件 $topic（不在白名单内）');
+    }
+    _kernel.emit(topic, _pluginId, data);
+  }
+
+  /// 内核实时状态（只读，与 handle('describe') 同口径）。
+  /// round14：含回退脏态字段（只读，插件可见脏态但改不了它）。
+  Map<String, dynamic> describe() => <String, dynamic>{
+        'ok': true,
+        'booted': _kernel._booted,
+        'profile': _kernel._profile.id,
+        'mode': _kernel._profile.mode.label,
+        'mounted': _kernel.mountedCount,
+        'seams': _kernel._seams.length,
+        'services': _kernel._services.length,
+        'control_actions': _kernel._controlActions.length,
+        'prompt_sections': _kernel._promptSections.length,
+        'event_seq': _kernel._seq,
+        'restore_dirty': _kernel._restoreDirty,
+        'restore_dirty_reason': _kernel._restoreDirtyReason,
+        'restore_journal': _kernel._restoreJournalSummary(),
+      };
+
+  Future<List<KernelEvent>> replay({int? fromSeq, String? topic}) =>
+      _kernel.replay(fromSeq: fromSeq, topic: topic);
+
+  Future<List<KernelEvent>> search(String query) => _kernel.search(query);
+
+  Future<int> fork(int fromSeq) => _kernel.fork(fromSeq);
+
+  String composeSystemPrompt() => _kernel.composeSystemPrompt();
+
+  int get mountedCount => _kernel.mountedCount;
+
+  int get eventSeq => _kernel.eventSeq;
+
+  /// 只给运行模式的 label 字符串，不给 RuntimeProfile 对象。
+  String get modeLabel => _kernel._profile.mode.label;
+
+  List<Map<String, dynamic>> listPages() => _kernel.listPages();
+
+  /// 页面写操作须声明 'ui:open' 能力；owner 记为本插件，便于追溯与回收。
+  Map<String, dynamic> addPage(String id, Map<String, dynamic> meta) {
+    if (!_caps.contains('ui:open')) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '插件 $_pluginId 未声明 ui:open，无权添加页面',
+        'missing_caps': <String>['ui:open'],
+      };
+    }
+    return _kernel.addPage(id, meta, owner: _pluginId);
+  }
+
+  Map<String, dynamic> removePage(String id) {
+    if (!_caps.contains('ui:open')) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '插件 $_pluginId 未声明 ui:open，无权删除页面',
+        'missing_caps': <String>['ui:open'],
+      };
+    }
+    return _kernel.removePage(id);
+  }
+
+  Map<String, dynamic> reorderPages(List<String> ids) {
+    if (!_caps.contains('ui:open')) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '插件 $_pluginId 未声明 ui:open，无权重排页面',
+        'missing_caps': <String>['ui:open'],
+      };
+    }
+    return _kernel.reorderPages(ids);
   }
 }
 
@@ -685,6 +849,23 @@ class PluginKernel {
   /// 回退过程中不再触发挂载前钩子，避免快照递归。
   bool _restoring = false;
 
+  /// 快照 id 单调递增计数器（round14）：旧 id 用 `_kernelSnapshots.length + 1`
+  /// + 毫秒戳，上限淘汰（20 份删最旧）后长度回落，同一毫秒内两次 capture 会
+  /// 撞 id；计数器只增不减，彻底消除碰撞（进程内唯一；快照只在内存）。
+  int _snapshotSeq = 0;
+
+  /// 回退脏标志（round14）：restoreSnapshot 任一变异阶段失败即置真，直到
+  /// 三条出路之一清脏（重试同一快照成功 / 回滚到回退前备份成功 /
+  /// resolve_dirty 显式确认）。只在内存，进程重启即失——启动时脏态
+  /// 无法从磁盘恢复，见 docs/CODE-AUDIT-0.0.41.md §9 已知局限。
+  bool _restoreDirty = false;
+  String _restoreDirtyReason = '';
+
+  /// 回退 journal（Map，不新增类型）：目标快照、回退前备份、当前阶段、
+  /// 已完成卸载/挂载、失败插件与阶段、时间戳。失败时随结构化结果返回，
+  /// describe()/status 可读摘要。
+  Map<String, dynamic> _restoreJournal = <String, dynamic>{};
+
   final Map<String, _ServiceEntry> _services = <String, _ServiceEntry>{};
   final Map<String, CapabilitySeam> _seams = <String, CapabilitySeam>{};
   final Map<String, _ControlEntry> _controlActions = <String, _ControlEntry>{};
@@ -807,10 +988,22 @@ class PluginKernel {
   }
 
   /// 按当前 profile 的 bundles 顺序挂载，再按模式裁剪。
-  Future<void> _applyProfile({required bool reset}) async {
+  ///
+  /// round14：返回应用结果（此前 mount/unmount 的返回值被直接丢弃，
+  /// _setMode 无法知道模式切换是否真正落完）。失败项只收集、不抛——
+  /// 调用方（_setMode）决定是结构化返回还是继续；boot 忽略返回值，
+  /// 语义不变。
+  Future<Map<String, dynamic>> _applyProfile({required bool reset}) async {
+    final List<Map<String, dynamic>> failedMounts = <Map<String, dynamic>>[];
+    final List<Map<String, dynamic>> failedUnmounts =
+        <Map<String, dynamic>>[];
     if (reset) {
       for (final String id in List<String>.of(_nodes.keys)) {
-        await unmount(id, reason: 'reset');
+        final Map<String, dynamic> r = await unmount(id, reason: 'reset');
+        if (r['ok'] != true) {
+          failedUnmounts.add(
+              <String, dynamic>{'plugin': id, 'error': r['error']});
+        }
       }
     }
     final Set<String>? allowed = _modePlugins[_profile.mode];
@@ -818,18 +1011,36 @@ class PluginKernel {
       for (final String pid in bundle.pluginIds) {
         if (allowed != null && !allowed.contains(pid)) continue;
         if (_nodes.containsKey(pid)) continue;
-        await mount(pid, source: 'bundle:${bundle.id}', configLayer: 'bundle');
+        final Map<String, dynamic> r = await mount(
+          pid,
+          source: 'bundle:${bundle.id}',
+          configLayer: 'bundle',
+        );
+        if (r['ok'] != true) {
+          failedMounts.add(
+              <String, dynamic>{'plugin': pid, 'error': r['error']});
+        }
       }
     }
     // 模式裁剪：卸载不在允许集合里的插件（真实生效，不是标记）。
     if (allowed != null) {
       for (final String id in List<String>.of(_nodes.keys)) {
         if (!allowed.contains(id)) {
-          await unmount(id, reason: 'mode:${_profile.mode.label}');
+          final Map<String, dynamic> r =
+              await unmount(id, reason: 'mode:${_profile.mode.label}');
+          if (r['ok'] != true) {
+            failedUnmounts.add(
+                <String, dynamic>{'plugin': id, 'error': r['error']});
+          }
         }
       }
     }
     await _persistConfig();
+    return <String, dynamic>{
+      'ok': failedMounts.isEmpty && failedUnmounts.isEmpty,
+      'failed_mounts': failedMounts,
+      'failed_unmounts': failedUnmounts,
+    };
   }
 
   Future<void> _persistConfig() async {
@@ -902,7 +1113,8 @@ class PluginKernel {
       }
     }
     final List<Disposable> effects = <Disposable>[];
-    final PluginContext scope = PluginContext._(this, effects, pluginId);
+    final PluginContext scope = PluginContext._(this, effects, pluginId,
+        caps: plugin.caps, tier: plugin.tier);
     final PluginNode node =
         PluginNode(plugin, parentId, source, configLayer);
     try {
@@ -953,7 +1165,8 @@ class PluginKernel {
     for (final String child in List<String>.of(node.children)) {
       await unmount(child, reason: 'parent:$pluginId');
     }
-    final PluginContext scope = PluginContext._(this, null, pluginId);
+    final PluginContext scope = PluginContext._(this, null, pluginId,
+        caps: node.plugin.caps, tier: node.plugin.tier);
     try {
       await node.plugin.dispose(scope);
     } on Object {
@@ -1105,27 +1318,64 @@ class PluginKernel {
   }
 
   /// 通过当前激活 provider 真实调用一个接缝能力。
+  ///
+  /// round13 可信身份：调用方传入的 `caps` 已废弃（保留签名兼容，永不
+  /// 参与鉴权）——能力一律查内核内登记的身份：`caller` 是已挂载插件 id
+  /// 时用该插件声明的 caps 与 tier；`caller == 'ui'` 仅当 [trustedRoot]
+  /// 为真（进程内 UI 直连）时才算 root，否则按未表明身份处理；未知
+  /// caller 名直接拒绝。缺省 caller 仍为 [kRootCaller]（测试与
+  /// embedded_backend 直调的约定），但缺省 trustedRoot=false 时它会被
+  /// 降级为未表明身份——直调方须显式传 trustedRoot:true 才能走 root。
   Future<Map<String, dynamic>> invoke(String seamName, String method,
       Map<String, dynamic> args,
-      {String caller = kRootCaller, List<String> caps = const <String>[]}) async {
+      {String caller = kRootCaller, List<String> caps = const <String>[],
+      bool trustedRoot = false}) async {
     final CapabilitySeam? s = _seams[seamName];
     if (s == null) {
       return <String, dynamic>{'ok': false, 'error': '接缝 $seamName 不存在'};
     }
-    // G2 仲裁：root（UI）直通；其他调用方必须满足 seamCaps 与自带 caps。
-    if (caller != kRootCaller) {
+    // round13：先定可信身份，再仲裁。'ui' 自称只有可信根路径才认。
+    final String effectiveCaller =
+        (caller == kRootCaller && !trustedRoot) ? kUntrustedCaller : caller;
+    // G2 仲裁：root（可信 UI）直通；其余调用方按登记身份查能力。
+    if (effectiveCaller != kRootCaller) {
+      final Plugin? registered = _nodes[effectiveCaller]?.plugin;
+      if (registered == null) {
+        emit('seam.denied', 'kernel', <String, dynamic>{
+          'seam': seamName,
+          'caller': effectiveCaller,
+          'reason': 'unknown_caller',
+        });
+        return <String, dynamic>{
+          'ok': false,
+          'error': '未知调用方 $effectiveCaller：未在内核登记的插件身份无权调用接缝 $seamName',
+        };
+      }
       final List<String> need = seamCaps[seamName] ?? const <String>[];
+      final List<String> effectiveCaps = registered.caps;
       final List<String> missing =
-          need.where((String c) => !caps.contains(c)).toList();
+          need.where((String c) => !effectiveCaps.contains(c)).toList();
+      if (registered.tier == PluginTier.thirdParty && effectiveCaps.isEmpty) {
+        emit('seam.denied', 'kernel', <String, dynamic>{
+          'seam': seamName,
+          'caller': effectiveCaller,
+          'missing_caps': need,
+        });
+        return <String, dynamic>{
+          'ok': false,
+          'error': 'T3 插件 $effectiveCaller 未声明 caps，无权调用接缝 $seamName',
+          'missing_caps': need,
+        };
+      }
       if (missing.isNotEmpty) {
         emit('seam.denied', 'kernel', <String, dynamic>{
           'seam': seamName,
-          'caller': caller,
+          'caller': effectiveCaller,
           'missing_caps': missing,
         });
         return <String, dynamic>{
           'ok': false,
-          'error': '调用方 $caller 缺少能力令牌：$missing（接缝 $seamName）',
+          'error': '调用方 $effectiveCaller 缺少能力令牌：$missing（接缝 $seamName）',
           'missing_caps': missing,
         };
       }
@@ -1134,14 +1384,14 @@ class PluginKernel {
     if (guard != null) {
       bool allowed = false;
       try {
-        allowed = await guard(seamName, method, args, caller);
+        allowed = await guard(seamName, method, args, effectiveCaller);
       } on Object catch (e) {
         return <String, dynamic>{'ok': false, 'error': '调用守卫异常，拒绝执行：$e'};
       }
       if (!allowed) {
         emit('seam.denied', 'kernel', <String, dynamic>{
           'seam': seamName,
-          'caller': caller,
+          'caller': effectiveCaller,
           'reason': 'guard_rejected',
         });
         return <String, dynamic>{
@@ -1368,7 +1618,161 @@ class PluginKernel {
 
   // ---- 控制域动作分发（plugin_kernel）----
 
-  Future<Map<String, dynamic>> handle(String action, Map<String, dynamic> p) async {
+  /// 改动类控制动作：必须由 UI（root）显式发起。
+  /// 只读动作（describe/status/tree/seams/modes/dump_config/pages-list/
+  /// widget_slots/events/search/snapshots/compose_prompt 等）不受限。
+  /// 'invoke' 不在此列——它走自己的仲裁（登记身份 + 调用守卫），
+  /// 缺省 caller 时按未表明身份处理，见 'invoke' 分支。
+  /// round13：snapshot/fork 也是改动（写快照/写分叉事件），一并入集。
+  static const Set<String> _mutationActions = <String>{
+    'mount',
+    'unmount',
+    'set_provider',
+    'set_mode',
+    'set_patch',
+    'rollback',
+    'snapshot',
+    'fork',
+    // round14：脏态人工出路（仅 trustedRoot，须显式 accept）。它本身是改动，
+    // 但脏门禁对它豁免（否则脏了就永远清不掉）。
+    'resolve_dirty',
+  };
+
+  /// 动作 owner 插件自身可执行的改动（须同时满足：pluginId 非空、动作
+  /// 在白名单内、目标资源确属该插件）。trustedRoot 为真时不走这条路。
+  static const Set<String> _ownerAllowedActions = <String>{
+    'pages',
+    'text_overrides',
+    'permission_policies',
+  };
+
+  /// 是否改动类动作：静态改动集 + pages/text_overrides/permission_policies
+  /// 的写分支 + default 控制动作分支（未知动作先按改动处理——读不到
+  /// 东西也改不了东西，fail-closed）。已知只读动作不在此列。
+  bool _isMutation(String action, Map<String, dynamic> p) {
+    if (_mutationActions.contains(action)) return true;
+    switch (action) {
+      case 'pages':
+        return <String>{'add', 'remove', 'reorder'}
+            .contains((p['op'] ?? 'list').toString());
+      case 'text_overrides':
+        return (p['op'] ?? 'list').toString() == 'set';
+      case 'permission_policies':
+        return (p['op'] ?? 'list').toString() == 'set';
+      case 'describe':
+      case 'status':
+      case 'tree':
+      case 'seams':
+      case 'modes':
+      case 'dump_config':
+      case 'widget_slots':
+      case 'compose_prompt':
+      case 'events':
+      case 'search':
+      case 'snapshots':
+      case 'invoke':
+        return false;
+      default:
+        // 插件贡献的控制动作与未知动作：一律按改动处理。
+        return true;
+    }
+  }
+
+  /// 改动门禁。`trustedRoot` 与 `pluginId` 是代码层参数（只由进程内
+  /// 可信调用方传入），绝不从 payload 里读——payload 里的 caller/caps
+  /// 只作展示，永不参与鉴权：'ui' 自称在不可信路径上等同于未表明身份。
+  /// 放行条件：trustedRoot（进程内 UI 直连），或动作 owner 插件自身、
+  /// 且动作在 allowlist 内、且目标资源归属该插件。
+  bool _mutationAllowed(String action, Map<String, dynamic> p,
+      bool trustedRoot, String? pluginId) {
+    if (trustedRoot) return true;
+    if (pluginId == null || pluginId.isEmpty) return false;
+    if (_ownerAllowedActions.contains(action)) {
+      return _ownsMutationTarget(action, p, pluginId);
+    }
+    // 插件贡献的控制动作：只有登记该动作的 owner 插件自身可调。
+    final _ControlEntry? entry = _controlActions[action];
+    if (entry != null) return entry.owner == pluginId;
+    return false;
+  }
+
+  /// owner 路径的目标归属判定：pages 的 add 以调用方为 owner 落账，
+  /// remove/reorder 只能动归属自己的已有页；text_overrides 与
+  /// permission_policies 没有逐条 owner 记录，归属即“调用方身份由
+  /// 代码层 pluginId 确立 + 动作在 allowlist 内”。
+  bool _ownsMutationTarget(
+      String action, Map<String, dynamic> p, String pluginId) {
+    switch (action) {
+      case 'pages':
+        final String op = (p['op'] ?? 'list').toString();
+        if (op == 'add') return true;
+        if (op == 'remove') {
+          final String id = (p['id'] ?? '').toString();
+          for (final KernelPage page in _pages) {
+            if (page.id == id) return page.owner == pluginId;
+          }
+          return false;
+        }
+        if (op == 'reorder') {
+          return _pages.every((KernelPage e) => e.owner == pluginId);
+        }
+        return false;
+      case 'text_overrides':
+        return (p['op'] ?? 'list').toString() == 'set';
+      case 'permission_policies':
+        return (p['op'] ?? 'list').toString() == 'set';
+      default:
+        return false;
+    }
+  }
+
+  /// 控制域动作分发。
+  ///
+  /// round13：`trustedRoot` 只由进程内 UI 直连路径（EmbeddedBackend
+  /// dispatch → _onPluginKernel）传 true；TCP/stdio 桥接与任何直接
+  /// handle 调用缺省为 false。`pluginId` 只由内核内可信调用方传——
+  /// 它是动作 owner 插件的已登记身份，不是 payload 字段。
+  Future<Map<String, dynamic>> handle(String action, Map<String, dynamic> p,
+      {bool trustedRoot = false, String? pluginId}) async {
+    // G2：改动类动作必须由 UI（root）显式发起，或由动作 owner 插件自身
+    // 在 allowlist 内发起；省略身份即视为未表明身份，一律拒绝。唯一
+    // 合法发送方是内核调试页（tga_kernel_page.dart，经 _call 统一带
+    // caller: 'ui'，再由进程内 dispatch 标 trustedRoot）。
+    if (_isMutation(action, p) &&
+        !_mutationAllowed(action, p, trustedRoot, pluginId)) {
+      emit('seam.denied', 'kernel', <String, dynamic>{
+        'action': action,
+        'caller': (p['caller'] ?? kUntrustedCaller).toString(),
+        'reason': 'mutation_requires_root',
+      });
+      return <String, dynamic>{
+        'ok': false,
+        'error': '改动类动作 $action 须由 UI（root）发起，或由动作 owner 插件自身在 allowlist 内发起；未表明身份的调用方无权执行',
+      };
+    }
+    // round14 脏门禁：回退失败置脏后，改动类动作一律拒绝，只留两条出路——
+    // rollback（重试同一快照 / 回滚到回退前备份）与 resolve_dirty（仅
+    // trustedRoot，显式确认接受当前半回退态）。只读动作与 invoke 不拦截；
+    // 鉴权门禁在前，未表明身份的调用方仍先拿 mutation_requires_root。
+    if (_restoreDirty &&
+        _isMutation(action, p) &&
+        action != 'rollback' &&
+        action != 'resolve_dirty') {
+      emit('seam.denied', 'kernel', <String, dynamic>{
+        'action': action,
+        'reason': 'restore_dirty',
+        'journal': _restoreJournalSummary(),
+      });
+      return <String, dynamic>{
+        'ok': false,
+        'error': '内核处于回退脏态，改动类动作 $action 被拒绝：$_restoreDirtyReason。'
+            '请先 rollback（重试同一快照或回滚到备份）或 resolve_dirty 显式确认接受',
+        'dirty': true,
+        'restore_dirty': true,
+        'reason': _restoreDirtyReason,
+        'journal': _restoreJournalSummary(),
+      };
+    }
     switch (action) {
       case 'describe':
       case 'status':
@@ -1383,6 +1787,10 @@ class PluginKernel {
           'control_actions': _controlActions.length,
           'prompt_sections': _promptSections.length,
           'event_seq': _seq,
+          // round14：脏态可见（只读动作不受限）。
+          'restore_dirty': _restoreDirty,
+          'restore_dirty_reason': _restoreDirtyReason,
+          'restore_journal': _restoreJournalSummary(),
         };
       case 'tree':
         return <String, dynamic>{
@@ -1418,12 +1826,14 @@ class PluginKernel {
         final Map<String, dynamic> args = p['args'] is Map
             ? Map<String, dynamic>.from(p['args'] as Map)
             : <String, dynamic>{};
+        // G2：缺省 caller 不再默认 root——省略身份即视为未表明身份
+        //（kUntrustedCaller），再由登记身份与调用守卫仲裁。
+        // round13：payload 里的 caps 永不转发给 invoke（调用方自称的
+        // 能力一律不认）；'ui' 自称只在 trustedRoot 为真时才算 root。
         return await invoke((p['seam'] ?? '').toString(),
             (p['method'] ?? '').toString(), args,
-            caller: (p['caller'] ?? kRootCaller).toString(),
-            caps: (p['caps'] is List)
-                ? (p['caps'] as List).map((dynamic e) => e.toString()).toList()
-                : const <String>[]);
+            caller: (p['caller'] ?? kUntrustedCaller).toString(),
+            trustedRoot: trustedRoot);
       case 'set_mode':
         return await _setMode((p['mode'] ?? '').toString());
       case 'set_patch':
@@ -1434,7 +1844,7 @@ class PluginKernel {
           bundleId: p['bundle']?.toString(),
         );
       case 'pages':
-        return _pagesAction(p);
+        return _pagesAction(p, owner: pluginId);
       case 'text_overrides':
         return _textOverridesAction(p);
       case 'permission_policies':
@@ -1485,6 +1895,36 @@ class PluginKernel {
         };
       case 'rollback':
         return await restoreSnapshot((p['id'] ?? '').toString());
+      case 'resolve_dirty':
+        // round14：脏态唯一的人工出路——仅 trustedRoot（改动门禁已在入口
+        // 拦下不可信调用），须显式 accept，确认接受当前半回退状态；
+        // 清脏并写审计事件，journal 保留，供事后追溯。
+        if (!_restoreDirty) {
+          return <String, dynamic>{
+            'ok': false,
+            'error': '内核未处于回退脏态，无需 resolve_dirty',
+          };
+        }
+        if (p['accept'] != true) {
+          return <String, dynamic>{
+            'ok': false,
+            'error': 'resolve_dirty 须显式传 accept: true，确认接受当前半回退状态',
+          };
+        }
+        final Map<String, dynamic> resolvedJournal =
+            _restoreJournalSummary();
+        _restoreDirty = false;
+        _restoreDirtyReason = '';
+        _restoreJournal['phase'] = 'resolved';
+        emit('kernel.restore_dirty_resolved', 'kernel', <String, dynamic>{
+          'accepted': true,
+          'journal': resolvedJournal,
+        });
+        return <String, dynamic>{
+          'ok': true,
+          'cleared': true,
+          'journal': resolvedJournal,
+        };
       default:
         // 插件贡献的控制动作优先匹配。
         final _ControlEntry? entry = _controlActions[action];
@@ -1505,7 +1945,7 @@ class PluginKernel {
   /// G5：捕获内核态快照（节点树 / seam 激活项 / 服务 / 模式 / 事件序号）。
   Map<String, dynamic> captureSnapshot(String label) {
     final KernelSnapshot snap = KernelSnapshot(
-      id: 'ksnap-${_kernelSnapshots.length + 1}-${DateTime.now().millisecondsSinceEpoch}',
+      id: 'ksnap-${++_snapshotSeq}-${DateTime.now().millisecondsSinceEpoch}',
       label: label.isEmpty ? '内核快照' : label,
       at: DateTime.now().toIso8601String(),
       nodes: _nodes.values
@@ -1540,7 +1980,138 @@ class PluginKernel {
     return snap.toJson();
   }
 
-  /// G5：回退到某份内核态快照：先卸载多余插件，再按原顺序补挂，最后恢复激活项与模式。
+  /// round14：回退预检（零变异失败路径）。复用 verifyDependencies 的判定
+  /// 口径——不是直接调它（它只查当前已挂载态），而是对快照做同一类检查：
+  /// 快照节点均已注册、依赖闭包在快照自身服务集内可满足、接缝目标
+  /// provider 的 owner 在快照集内或已挂载、模式可解析。任一失败都
+  /// 在卸载任何插件前返回，不改动任何插件。
+  /// 静态核实不了的两类留给变异阶段兜底（阶段二/三会置脏失败）：
+  /// 快照内挂载顺序导致的依赖时序（消费者排在提供者之前）、当前不
+  /// 存在、需重挂后才重建的接缝 provider（自提供/时序依赖同理，预检
+  /// 只按快照服务集做闭包检查，挂载时序问题由阶段二捕获）。
+  Map<String, dynamic> _preflightSnapshot(KernelSnapshot snap) {
+    final List<String> errors = <String>[];
+    for (final Map<String, dynamic> n in snap.nodes) {
+      final String pid = (n['id'] ?? '').toString();
+      if (pid.isEmpty) {
+        errors.add('快照含空插件 id');
+        continue;
+      }
+      if (!_registry.containsKey(pid)) {
+        errors.add('插件 $pid 未注册到内核目录');
+      }
+    }
+    // 依赖闭包：快照服务集是快照时刻的服务全集，提供方当时必在快照
+    // 节点集内——要求不在该集内的服务，回退后一定无法满足。
+    final Set<String> snapServices = snap.services.toSet();
+    for (final Map<String, dynamic> n in snap.nodes) {
+      final String pid = (n['id'] ?? '').toString();
+      final Plugin? plugin = _registry[pid];
+      if (plugin == null) continue;
+      for (final String dep in plugin.requires) {
+        if (!snapServices.contains(dep)) {
+          errors.add('插件 $pid 依赖服务 $dep 在快照服务集内不存在，'
+              '回退后无法满足');
+        }
+      }
+    }
+    final Set<String> snapIds = snap.nodeIds;
+    for (final Map<String, dynamic> sm in snap.seams) {
+      final String name = (sm['name'] ?? '').toString();
+      final String active = (sm['active'] ?? '').toString();
+      if (active.isEmpty) continue;
+      final CapabilitySeam? seam = _seams[name];
+      if (seam == null) continue; // 需重挂后重建，阶段三兜底
+      final SeamProviderEntry? entry = seam.providers[active];
+      if (entry == null) continue; // 同上
+      final String owner = entry.ownerPlugin;
+      if (!snapIds.contains(owner) && !_nodes.containsKey(owner)) {
+        errors.add('接缝 $name 目标 provider $active 的 owner $owner '
+            '既不在快照集内也未挂载，回退后会被卸载');
+      }
+    }
+    if (snap.mode.isNotEmpty &&
+        !<String>{'standard', 'ptc', 'minimal', 'creator'}
+            .contains(snap.mode)) {
+      errors.add('快照模式 ${snap.mode} 无法解析');
+    }
+    return <String, dynamic>{'ok': errors.isEmpty, 'errors': errors};
+  }
+
+  /// 回退 journal 摘要（只读动作可查的口径）：复制一份，调用方改不动内核内账。
+  Map<String, dynamic> _restoreJournalSummary() => <String, dynamic>{
+        'target_snapshot': _restoreJournal['target_snapshot'],
+        'pre_restore_snapshot': _restoreJournal['pre_restore_snapshot'],
+        'phase': _restoreJournal['phase'],
+        'failed_phase': _restoreJournal['failed_phase'],
+        'failed_plugin': _restoreJournal['failed_plugin'],
+        'done_unmounts': List<String>.from(
+            (_restoreJournal['done_unmounts'] as List?) ?? const <String>[]),
+        'done_mounts': List<String>.from(
+            (_restoreJournal['done_mounts'] as List?) ?? const <String>[]),
+        'at': _restoreJournal['at'],
+      };
+
+  /// 变异阶段失败的统一收口：置脏、记 journal、发 kernel.rollback_failed、
+  /// 返回结构化失败（含 resume 两条出路）。只在 _restoring 保护内调用。
+  Map<String, dynamic> _failRestore({
+    required String phase,
+    String failedPlugin = '',
+    required String error,
+    required List<String> doneUnmounts,
+    required List<String> doneMounts,
+    Map<String, dynamic>? extra,
+  }) {
+    _restoreDirty = true;
+    _restoreJournal['phase'] = phase;
+    _restoreJournal['failed_phase'] = phase;
+    _restoreJournal['failed_plugin'] = failedPlugin;
+    _restoreJournal['done_unmounts'] = List<String>.from(doneUnmounts);
+    _restoreJournal['done_mounts'] = List<String>.from(doneMounts);
+    final String target =
+        (_restoreJournal['target_snapshot'] ?? '').toString();
+    final String pre =
+        (_restoreJournal['pre_restore_snapshot'] ?? '').toString();
+    _restoreDirtyReason = '回退到快照 $target 在 $phase 阶段失败：$error';
+    final Map<String, dynamic> result = <String, dynamic>{
+      'ok': false,
+      'dirty': true,
+      'failed_phase': phase,
+      'failed_plugin': failedPlugin,
+      'error': error,
+      'snapshot': target,
+      'pre_restore_snapshot': pre,
+      'completed': <String, dynamic>{
+        'unmounted': List<String>.from(doneUnmounts),
+        'mounted': List<String>.from(doneMounts),
+      },
+      'resume': <String, dynamic>{
+        'retry_same': target,
+        'restore_pre': pre,
+      },
+      'journal': _restoreJournalSummary(),
+    };
+    if (extra != null) result.addAll(extra);
+    emit('kernel.rollback_failed', 'kernel', <String, dynamic>{
+      'snapshot': target,
+      'phase': phase,
+      'failed_plugin': failedPlugin,
+      'error': error,
+      'pre_restore_snapshot': pre,
+    });
+    return result;
+  }
+
+  /// G5：回退到某份内核态快照（round14 六步最小闭环）。
+  ///
+  /// ① 预检（零变异）：见 [_preflightSnapshot]，失败直接返回，不动插件。
+  /// ② 预检通过后立即显式 captureSnapshot('回退前自动备份')——不依赖
+  ///    onBeforeMount（_restoring 期间它被抑制）。
+  /// ③ 变异阶段置 _restoreDirty=true，journal 随阶段推进更新；四阶段
+  ///    全成功才清脏。任一阶段失败返回结构化 {ok:false, dirty:true,
+  ///    failed_phase, failed_plugin, completed, resume} 并发
+  ///    kernel.rollback_failed；脏态下 handle() 的改动类动作被拒，
+  ///    只有 rollback（重试同一快照 / 回滚到备份）与 resolve_dirty 豁免。
   Future<Map<String, dynamic>> restoreSnapshot(String id) async {
     KernelSnapshot? snap;
     for (final KernelSnapshot s in _kernelSnapshots) {
@@ -1549,14 +2120,59 @@ class PluginKernel {
     if (snap == null) {
       return <String, dynamic>{'ok': false, 'error': '内核快照不存在：$id'};
     }
+    final Map<String, dynamic> preflight = _preflightSnapshot(snap);
+    if (preflight['ok'] != true) {
+      return <String, dynamic>{
+        'ok': false,
+        'phase': 'preflight',
+        'error': '回退预检失败：${(preflight['errors'] as List).join('；')}',
+        'errors': preflight['errors'],
+        'snapshot': id,
+      };
+    }
+    final Map<String, dynamic> preSnap =
+        captureSnapshot('回退前自动备份');
+    final String preSnapId = (preSnap['id'] ?? '').toString();
+    final List<String> doneUnmounts = <String>[];
+    final List<String> doneMounts = <String>[];
     _restoring = true;
+    _restoreDirty = true;
+    _restoreDirtyReason = '正在回退到快照 $id';
+    _restoreJournal = <String, dynamic>{
+      'target_snapshot': id,
+      'pre_restore_snapshot': preSnapId,
+      'phase': 'unmount',
+      'done_unmounts': <String>[],
+      'done_mounts': <String>[],
+      'failed_plugin': '',
+      'failed_phase': '',
+      'at': DateTime.now().toIso8601String(),
+    };
     try {
+      // 阶段一：卸载多余插件（返回值现查，不再丢弃；父节点卸载会连带
+      // 递归卸载子节点，遍历前先跳过已被连带卸载的节点）。
       final Set<String> keep = snap.nodeIds;
       for (final String pid in List<String>.of(_nodes.keys)) {
         if (!keep.contains(pid)) {
-          await unmount(pid, reason: 'rollback');
+          if (!_nodes.containsKey(pid)) continue;
+          final Set<String> before = _nodes.keys.toSet();
+          final Map<String, dynamic> r =
+              await unmount(pid, reason: 'rollback');
+          doneUnmounts.addAll(before.difference(_nodes.keys.toSet()));
+          _restoreJournal['done_unmounts'] = List<String>.from(doneUnmounts);
+          if (r['ok'] != true) {
+            return _failRestore(
+              phase: 'unmount',
+              failedPlugin: pid,
+              error: '回退失败：插件 $pid 无法卸载（${r['error']}）',
+              doneUnmounts: doneUnmounts,
+              doneMounts: doneMounts,
+            );
+          }
         }
       }
+      // 阶段二：按原顺序补挂。
+      _restoreJournal['phase'] = 'remount';
       for (final Map<String, dynamic> n in snap.nodes) {
         final String pid = (n['id'] ?? '').toString();
         if (pid.isEmpty || _nodes.containsKey(pid)) continue;
@@ -1567,30 +2183,66 @@ class PluginKernel {
           configLayer: (n['config_layer'] ?? 'runtime').toString(),
         );
         if (r['ok'] != true) {
-          return <String, dynamic>{
-            'ok': false,
-            'error': '回退失败：插件 $pid 无法重新挂载（${r['error']}）',
-            'snapshot': id,
-          };
+          return _failRestore(
+            phase: 'remount',
+            failedPlugin: pid,
+            error: '回退失败：插件 $pid 无法重新挂载（${r['error']}）',
+            doneUnmounts: doneUnmounts,
+            doneMounts: doneMounts,
+          );
+        }
+        doneMounts.add(pid);
+        _restoreJournal['done_mounts'] = List<String>.from(doneMounts);
+      }
+      // 阶段三：恢复接缝激活项。目标 provider 缺失不再静默 continue，
+      // 而是置脏失败（旧行为返回 ok:true，谎称已回退）。
+      _restoreJournal['phase'] = 'seams';
+      for (final Map<String, dynamic> sm in snap.seams) {
+        final String name = (sm['name'] ?? '').toString();
+        final String active = (sm['active'] ?? '').toString();
+        if (active.isEmpty) continue;
+        final CapabilitySeam? seam = _seams[name];
+        if (seam == null || !seam.providers.containsKey(active)) {
+          return _failRestore(
+            phase: 'seams',
+            error: '回退失败：接缝 $name 的目标 provider $active 不存在',
+            doneUnmounts: doneUnmounts,
+            doneMounts: doneMounts,
+            extra: <String, dynamic>{
+              'failed_seam': name,
+              'failed_provider': active,
+            },
+          );
+        }
+        seam.activeProviderId = active;
+      }
+      // 阶段四：恢复模式。_setMode 失败收集为结构化返回，不再异常逃逸。
+      _restoreJournal['phase'] = 'mode';
+      if (_booted && snap.mode.isNotEmpty && snap.mode != _profile.mode.label) {
+        final Map<String, dynamic> r = await _setMode(snap.mode);
+        if (r['ok'] != true) {
+          return _failRestore(
+            phase: 'mode',
+            error: '回退失败：模式恢复失败（${r['error']}）',
+            doneUnmounts: doneUnmounts,
+            doneMounts: doneMounts,
+            extra: <String, dynamic>{'mode_result': r},
+          );
         }
       }
-      for (final Map<String, dynamic> sm in snap.seams) {
-        final CapabilitySeam? seam = _seams[(sm['name'] ?? '').toString()];
-        final String active = (sm['active'] ?? '').toString();
-        if (seam == null || active.isEmpty) continue;
-        if (seam.providers.containsKey(active)) seam.activeProviderId = active;
-      }
-      if (_booted && snap.mode.isNotEmpty && snap.mode != _profile.mode.label) {
-        await _setMode(snap.mode);
-      }
+      _restoreJournal['phase'] = 'done';
+      _restoreDirty = false;
+      _restoreDirtyReason = '';
       emit('kernel.rollback', 'kernel', <String, dynamic>{
         'snapshot': id,
         'mounted': mountedCount,
+        'pre_restore_snapshot': preSnapId,
       });
       return <String, dynamic>{
         'ok': true,
         'snapshot': id,
         'mounted': mountedCount,
+        'pre_restore_snapshot': preSnapId,
       };
     } finally {
       _restoring = false;
@@ -1601,7 +2253,29 @@ class PluginKernel {
     final RunMode next = RunModeX.parse(mode);
     _profile.mode = next;
     emit('kernel.mode_changed', 'kernel', <String, dynamic>{'mode': next.label});
-    await _applyProfile(reset: false);
+    // round14：失败不再以异常穿出——_persistConfig 抛错与 _applyProfile
+    // 丢弃的挂载/卸载结果都收集为结构化 {ok:false} 返回；调用方
+    // （restoreSnapshot 阶段四）据此置脏。注意模式是先赋值、后应用：
+    // _applyProfile 失败时 mode 标签已改，脏标志与 journal 负责记录，
+    // 由三条出路恢复——本轮不改赋值顺序（boot 不走 _setMode，语义不变）。
+    try {
+      final Map<String, dynamic> applied = await _applyProfile(reset: false);
+      if (applied['ok'] != true) {
+        return <String, dynamic>{
+          'ok': false,
+          'error': '切换模式 ${next.label} 未完全应用',
+          'mode': next.label,
+          'failed_mounts': applied['failed_mounts'],
+          'failed_unmounts': applied['failed_unmounts'],
+        };
+      }
+    } on Object catch (e) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '切换模式失败：$e',
+        'mode': next.label,
+      };
+    }
     return <String, dynamic>{
       'ok': true,
       'mode': next.label,
@@ -1609,7 +2283,8 @@ class PluginKernel {
     };
   }
 
-  Map<String, dynamic> _pagesAction(Map<String, dynamic> p) {
+  Map<String, dynamic> _pagesAction(Map<String, dynamic> p,
+      {String? owner}) {
     final String op = (p['op'] ?? 'list').toString();
     switch (op) {
       case 'list':
@@ -1620,6 +2295,7 @@ class PluginKernel {
           p['meta'] is Map
               ? Map<String, dynamic>.from(p['meta'] as Map)
               : <String, dynamic>{},
+          owner: owner ?? 'runtime',
         );
       case 'remove':
         return removePage((p['id'] ?? '').toString());
