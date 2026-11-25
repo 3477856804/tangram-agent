@@ -180,3 +180,51 @@
 3. `restoreSnapshot` 中途失败仍留半回退状态（无补偿）；快照 id 仍可能在同一毫秒内碰撞。
 4. provider id 仍是自由字符串（`provideSeamProvider` 不校验）；`Plugin.address` 全仓库无插件声明，mount 的地址校验仍是空分支。
 5. `tests/conformance_0_0_41.mjs` 的两条旧关卡已在本地更新为新行为断言，但该脚本是测试文件，按规则不随源码补丁推送——合并后 main 上的旧脚本仍会报 2 项失败，需另行更新脚本（或下轮放宽规则后随补丁带上）。
+
+---
+
+## 8. round13 修复（2026-11-25 19:00 轮次，基线 29a9da33）
+
+本轮收口 P0：内核仲裁。round12 留下的第 2 条诚实边界（`PluginContext.kernel`
+公开裸内核，插件可直调 `setProvider`/`mount`/`restoreSnapshot` 绕过仲裁）
+是本轮主项；审计时另核实：`handle()` 的改动门禁只比对 payload 字符串 caller
+（可伪造 `'ui'`）、`invoke()` 接受调用方自带 caps、pages/text_overrides/
+permission_policies 写分支与 default 控制动作分支不在门禁内、
+`_CapabilityPlugin` 把 `CapabilitySeam` 对象本身 `provideService` 出去、
+`seamCaps`/`invokeGuard`/`profile.mode` 均可直改、`Plugin` 默认 tier=official、
+caps=[]，`seamAllowed()` 在 caps 为空时非 T3 一律放行。以下修复均已实测
+（数字见 8.1），不是只改声明。
+
+| 缺口 | 修复 | 证据 |
+|---|---|---|
+| `ctx.kernel` 返回裸 `PluginKernel` | 新增 `PluginKernelFacade`（`plugin_kernel.dart`，只由 `PluginContext` 创建；私有构造，固定 caller=_pluginId、caps=_caps）。只暴露 invoke/emit/describe/replay/search/fork/composeSystemPrompt/mountedCount/eventSeq/modeLabel（仅 label 字符串）/listPages/addPage/removePage/reorderPages（须 `ui:open`）；不暴露 mount/unmount/setProvider/handle/restoreSnapshot/captureSnapshot/registerPlugin/defineModePlugins/boot/dispose/setTextOverride/setPermissionPolicy、profile 对象、seamCaps、invokeGuard、onBeforeMount、CapabilitySeam 对象。`PluginContext.kernel` getter 改返回 facade，getter 名不变；`_capsOf` 取挂载时传入的声明 caps。调用点迁移：`builtin_plugins.dart` L317 `handle('describe')` → `describe()`、L406 `profile.mode.label` → `modeLabel`、5 处三参 `emit(topic, source, data)` → 两参 `emit(topic, data)`（中间实参 5 处全等于插件自身 id，facade 固定 source=_pluginId，语义不变）；其余 invoke/emit/只读调用不变 | flutter analyze 0 issues；Dart VM 断言 110 项全过（§1：16 个裸内核方法运行期 `NoSuchMethodError`） |
+| `emit` 可伪造内核事件 | facade 与 `PluginContext.emit` 共用白名单（`kernel_guard.dart` 的 `kPluginEmitTopics`：session.cell、model.chat、sandbox.exec、agent-loop.observe；拒绝 kernel.*/seam.*/plugin.* 前缀），违规抛 `StateError`，事件流不留痕 | 同上断言 §8：伪造 `seam.provider_changed` 被拒，replay 无此条；白名单 emit 正常落盘 |
+| `handle`/`invoke` 只认 payload 自称的身份 | `invoke()` 改按登记身份仲裁：caps 不再接受调用方传入（保留签名兼容，永不参与鉴权），改查 `_nodes[callerPluginId]?.plugin.caps` 与 tier；`caller=='ui'` 仅当 `trustedRoot==true` 时有效，否则按 untrusted 处理；未知 caller 名直接拒绝。`handle()` 新增 `{bool trustedRoot=false, String? pluginId}`（代码层参数，绝不从 payload 读）；`dispatch` → `_onPluginKernel`（进程内 UI 直连唯一入口，TCP/stdio 走外部 Python 后端不进这里）传 `trustedRoot:true`。`invokeGuard` 同步收紧：未知 caller 名直接拒绝（原先只拦字面 untrusted） | 同上断言 §2（不可信路径自称 ui + 自带令牌被拒，可信路径放行）、round12 脚本 46 项全过 |
+| 改动门只覆盖 6 个动作 | `_mutationActions` 扩为 mount/unmount/set_provider/set_mode/set_patch/rollback/snapshot/fork；pages/text_overrides/permission_policies 的写分支（add/remove/reorder/set）与 default 控制动作分支一并入禁；读动作（describe/status/tree/seams/modes/dump_config/pages-list/widget_slots/compose_prompt/events/search/snapshots）保持开放。放行条件：trustedRoot，或“动作 owner 插件自身 + 动作在 allowlist 内 + 目标资源归属该插件”（pages add 以调用方为 owner 落账，remove/reorder 只动归属自己的页；控制动作只认登记 owner） | 同上断言 §3（无 caller 的 pages add、permission_policies set、tools.ptc、text_overrides set 全被拒；owner 路径正反用例全过） |
+| `seam()` 交出可变接缝对象 | 改返回只读 `SeamView`（仅只读字段 + `toJson()`）；`_CapabilityPlugin` 的 `provideService(seam, seam对象)` 改为登记不透明 `_SeamDependencyMarker`——直接删会断 `requires`（mount 靠服务名校验依赖），标记只保留依赖信号、不带可写状态。`service<CapabilitySeam>` 全树无消费方 | 同上断言 §9（改视图 consumers 不影响内核；`service<CapabilitySeam>` 为 null，依赖信号仍在） |
+| `seamAllowed()` 空 caps 默认放行 | 高危接缝 `kHighRiskSeams`={core/sandbox, core/im, core/scheduler}：T0–T2 空 caps 也不放行，须显式声明；非高危接缝仍沿用兼容语义。顺序是先声明、后收紧：core.agent-loop 声明 `['model:invoke', 'agent:run']`（只声明 model:invoke 会导致自身接缝 core/agent-loop 的 consumeSeam 失败，须同时含 agent:run 或接缝名）、ui.pages 声明 `['ui:open']`；另为收紧所必需，core.sandbox/core.im/core.scheduler 的提供方也同时声明了对应令牌 | 同上断言 §0（16 个内建插件声明表逐项放行）与 §4（无 caps 消费 core/im 挂载失败；声明后三者挂载成功） |
+| `consumeSeam` 的校验是死的 | 核实发现：旧实现用 `pluginOf(pluginId)` 查自身，但 apply 期间插件尚未入 `_nodes`，恒为 null，门禁从未生效。改为 mount/unmount 时把已声明 caps 与 tier 传入 `PluginContext`，`consumeSeam` 用这份声明值校验（与登记值一致），D 的收紧才真正落地 | 同上断言 §4 |
+| `ToolRegistry.run()` 对 exec/write 级工具无策略检查 | `run()` 在 execute 前对 tier=exec/write 的工具接一次 `PermissionPolicy.evaluate`（deny 直接拒绝；ask 无审批入口或未获批时拒绝并提示已建审批单）。`shell` 与 `workspace.*` 除外——它们在 execute 内自己过策略并消费一次性批准凭据，run() 层再查会在重试时重复消费、凭空多建审批单。`EmbeddedBackend` 构造时接线 `policyProvider=_ensurePolicy` 与审批入口 `_requestToolApproval`（沿用 shell 同款一次性凭据 + approvals 建单）；默认策略补齐 `computer_write`、`integration_call` 两条 ask 规则，其余未列名写工具走 fallback ask | 同上断言 §10（无批准拦截、获批放行、显式 deny 拒绝、read 不受影响、未接线不拦截） |
+| 旧测试与新守卫冲突 | `plugin_kernel_test.dart`：`_EchoPlugin` 改用 `consumeSeam` 登记使用方；set_mode/set_patch/fork 的改动调用补 `trustedRoot:true`；sandbox 直调补 `trustedRoot:true`；PTC 改传显式插件身份 `caller:'core.tools'`；集成测试 payload 补 `caller:'ui'`。`plugin_kernel_customization_test.dart`：写操作与 `ui/pages`/`core/sandbox` 直调一律走可信路径。`plugin_tier_test.dart`：新增高危收紧断言。round12 断言脚本同步更新（登记身份替代自称 caps、`'ui'` 用例补 `trustedRoot:true`、缺省 caller 拒绝原因改为“未知调用方”、T1 空 caps 调 core/im 改为拒绝），总数仍 46 项。`conformance_0_0_41.mjs` 的 `handle 透传 caller` 关卡更新为新语义断言（payload caps 不再转发、trustedRoot 被透传），总数仍 30 | flutter analyze 0 issues；三处测试文件只在本地改，不进推送补丁 |
+
+### 8.1 本轮验证结果
+
+| 验证 | 结果 |
+|---|---|
+| pytest 全量（venv） | ✅ **262 passed / 8 skipped**（270 项收集，0 失败；round12 记录 258/8，本轮未动任何 Python 文件，+4 是收集到的用例数变化——`tests/test_im_approval.py` 的 mtime 在 round12 运行之后，需以本次 270 项为准） |
+| `node tests/conformance_0_0_41.mjs` | ✅ **30 passed / 0 failed**（1 条关卡随语义更新，见上表） |
+| `flutter analyze` 全量 | ✅ **No issues found** |
+| Dart VM 断言脚本 | ✅ round13 新增 **110 项全过**（`check_kernel_guard_round13.dart`：facade 缺失方法、伪造 ui、改动门、owner 路径、高危收紧、agent-loop 经 facade 调 model、无 caps 调 model、ui/pages 增删改排序与可逆、伪造事件、SeamView、ToolRegistry 策略检查）；round12 **46 项全过**（已按新语义同步期望）；round2–11 回归 17 个 `_r12` 脚本全过（agent_manager 64、skill_recorder 285、mcp_hardening 39、sandbox_provider 75、memory_layers 61、voice 56 等） |
+| `flutter test test/plugin_kernel_test.dart test/plugin_kernel_customization_test.dart test/plugin_tier_test.dart test/kernel_guard_test.dart` | ❌ **未跑**（llamadart 的 `.so` 是 arm64、宿主是 x64，原生资产构建失败，环境限制；同 round12 的诚实边界。上述测试的期望已在 Dart VM 断言脚本里逐条覆盖，但 flutter test 本身仍需在 CI 或电脑上跑一遍） |
+| 真机：插件挂载 / 内核调试页点击 / 审批单批准后重试 | ❌ 未验证（无真机） |
+
+### 8.2 仍然保留的诚实边界
+
+1. round12 第 2 条已关闭（facade 落地）；但 `super_agent.dart` / `creator_runtime.dart` 持有的是裸 `PluginKernel` 字段（不是经 `PluginContext`），本轮按任务要求未动——内核直调面只对插件收口，宿主侧仍直连。
+2. `PluginTier.parse` 未知值仍兜底 T1（与 round12 同）；改成抛错是行为变更，留给下一轮与调用方一起定。
+3. `restoreSnapshot` 中途失败仍留半回退状态（无补偿）；快照 id 仍可能在同一毫秒内碰撞。
+4. provider id 仍是自由字符串（`provideSeamProvider` 不校验）；`Plugin.address` 全仓库无插件声明，mount 的地址校验仍是空分支。
+5. `tests/conformance_0_0_41.mjs` 的关卡已在本地更新为新行为断言，但该脚本是测试文件，按规则不随源码补丁推送——合并后 main 上的旧脚本仍会报失败，需另行更新脚本（或下轮放宽规则后随补丁带上）。`frontend/test/` 下三处测试文件与 `check_kernel_guard_round12.dart` 的同步修改同样只在本地，不进推送补丁。
+6. `invoke()` 的 `caps` 形参已废弃（保留签名兼容，永不参与鉴权）；`handle()` 的 `trustedRoot`/`pluginId` 只由进程内可信调用方传，任何经 payload 传入的同名字段都会被忽略——调用方不要误以为在 payload 里写 `trustedRoot:true` 就能提权。
+7. `ToolRegistry` 的策略检查只在接线了 `policyProvider` 时生效（生产侧 `EmbeddedBackend` 已接线；测试与纯 Dart 用默认不拦截）。`shell`/`workspace.*` 仍走各自 execute 内的守卫。
+8. 内建插件计数疑点：`BuiltinPlugins.build` 列出 16 个插件 id，但 `plugin_kernel_test.dart` 期望挂载 15 个节点；按 requires/consumeSeam/caps 表逐项核对，16 个都应挂载成功（apply 期无磁盘 I/O、无可抛点），`15` 可能是 sunrun 加入 bundle 后未同步的旧数——`flutter test` 在本机跑不起来，未能实证，本轮未改该期望，需 CI 或电脑上跑一遍确认。
