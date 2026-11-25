@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../../bridge/backend_client.dart';
 import '../../bridge/bridge_protocol.dart';
+import '../../harness/cloud_error.dart';
 import '../../services/agents_store.dart';
 import '../../services/model_registry.dart';
 import '../../services/persona_store.dart';
@@ -72,31 +73,9 @@ class TangramAiProvider implements AiProvider {
   }
 
   /// 把云端推理的底层错误转成用户可懂的中文，绝不伪造成功。
-  /// 仍如实携带原始信息片段，便于排查，但不把裸错误丢给用户。
-  String _friendlyCloudError(String raw) {
-    final String s = raw.toLowerCase();
-    if (s.contains('401') ||
-        s.contains('403') ||
-        s.contains('unauthorized') ||
-        s.contains('invalid api key') ||
-        s.contains('incorrect api key')) {
-      return 'API Key 无效或已过期，请到「训练设置」核对后重新保存';
-    }
-    if (s.contains('404') || s.contains('not found') || s.contains('does not exist')) {
-      return '该模型在此 Base URL 下不存在，请核对模型名（如 deepseek-chat）';
-    }
-    if (s.contains('connection') ||
-        s.contains('socket') ||
-        s.contains('timed out') ||
-        s.contains('timeout') ||
-        s.contains('enotfound') ||
-        s.contains('econnrefused') ||
-        s.contains('network')) {
-      return '无法连接该 API 地址，请检查网络或 Base URL 是否正确';
-    }
-    final String trimmed = raw.length > 80 ? '${raw.substring(0, 80)}…' : raw;
-    return '云端调用失败：$trimmed';
-  }
+  /// 复用 [friendlyCloudError] 单一真源：覆盖 429 限流并去除裸 JSON，
+  /// 与内嵌后端保持一致，避免两处转译不一致。
+  String _friendlyCloudError(String raw) => friendlyCloudError(raw);
 
   Map<String, dynamic> _payload(ChatRequest request, String system) {
     // 真实模型参数由注册表按当前选中项产出：云端 → API 凭据 + 模型名，

@@ -289,7 +289,7 @@ void main() {
       );
     });
 
-    test('15 个内建插件全部挂载、无依赖失败', () async {
+    test('全部内建插件挂载成功、无依赖失败', () async {
       final Map<String, dynamic> tree =
           await kernel.handle('tree', <String, dynamic>{});
       final List<dynamic> nodes = tree['nodes'] as List;
@@ -297,7 +297,9 @@ void main() {
           .where((dynamic n) => (n as Map)['state'] == 'failed')
           .toList();
       expect(failed, isEmpty, reason: '有插件挂载失败：$failed');
-      expect(nodes.length, 15);
+      // 动态期望：以内建插件清单为准，避免新增插件后写死数量导致测试过期。
+      final int expected = BuiltinPlugins.build(_fakeHost(tools)).length;
+      expect(nodes.length, expected);
     });
 
     test('插件贡献的 kernel.inspect 工具真实注册且可运行', () async {

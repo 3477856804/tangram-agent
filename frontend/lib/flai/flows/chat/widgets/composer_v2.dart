@@ -47,6 +47,10 @@ class FlaiComposerV2 extends StatefulWidget {
 
   final String? voiceTranscript;
 
+  /// 转写序号：每次新转写递增。UI 用它判断「有无新转写」，比文本差异可靠
+  /// （连续两次相同内容文本不变，字符串比较会漏；且序号能避免覆盖用户已输入文字）。
+  final int voiceTranscriptSeq;
+
   /// 实时麦克风声级（0.0 ~ 1.0），由 FlaiVoiceController.amplitude 提供。
   /// 为空表示当前录音链路没有声级来源，波形区继续如实显示「振幅未接入」。
   final ValueListenable<double>? amplitude;
@@ -62,6 +66,7 @@ class FlaiComposerV2 extends StatefulWidget {
     this.isRecording = false,
     this.isTranscribing = false,
     this.voiceTranscript,
+    this.voiceTranscriptSeq = 0,
     this.amplitude,
   });
 
@@ -80,6 +85,9 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   /// 编辑器聚焦状态，用于给整张输入卡一个柔和的点亮反馈。
   final FocusNode _focusNode = FocusNode();
   bool _focused = false;
+
+  // 已应用到输入框的转写序号：避免同一段转写在多次重建中被重复追加。
+  int _appliedTranscriptSeq = 0;
 
   // 录音文件转文字：真实上传网关 ASR，状态与结果如实呈现。
   final AudioTranscribeService _asr = AudioTranscribeService();
@@ -147,10 +155,27 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
   @override
   void didUpdateWidget(FlaiComposerV2 oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.voiceTranscript != null &&
-        widget.voiceTranscript != oldWidget.voiceTranscript &&
+    // seq 变小说明换了新会话 / 新语音控制器：重置计数，避免新会话首条
+    // 转写被旧的更大序号挡住导致「语音输入又不能用了」。
+    if (widget.voiceTranscriptSeq < _appliedTranscriptSeq) {
+      _appliedTranscriptSeq = 0;
+    }
+    // 用序号而非文本差异判断新转写：连续两次相同内容也能正确填入，
+    // 且只在真正有新转写时追加一次，绝不覆盖用户已输入的文字。
+    if (widget.voiceTranscriptSeq > _appliedTranscriptSeq &&
+        widget.voiceTranscript != null &&
         widget.voiceTranscript!.isNotEmpty) {
-      _textController.text = widget.voiceTranscript!;
+      _appliedTranscriptSeq = widget.voiceTranscriptSeq;
+      final String incoming = widget.voiceTranscript!.trim();
+      final String existing = _textController.text.trim();
+      if (existing.isEmpty) {
+        _textController.text = incoming;
+      } else if (!existing.endsWith(incoming)) {
+        _textController.text = '$existing $incoming';
+      }
+      _textController.selection = TextSelection.collapsed(
+        offset: _textController.text.length,
+      );
       _hasText.value = true;
     }
   }
@@ -361,6 +386,17 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
     }
   }
 
+  /// 按住说话：按下开始录音、松开停止。
+  /// 参考主流输入法与 WorkBuddy/Qoder 的交互，同时保留单击切换作为兜底，
+  /// 让「点一下开始 / 再点一下停止」与「按住说话」都能用。
+  void _handleMicLongPressStart(LongPressStartDetails _) {
+    if (!widget.isRecording) widget.onVoiceStart?.call();
+  }
+
+  void _handleMicLongPressEnd(LongPressEndDetails _) {
+    if (widget.isRecording) widget.onVoiceStop?.call();
+  }
+
   @override
   Widget build(BuildContext context) {
     final DshPalette c = DshPalette.of(context);
@@ -532,10 +568,13 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
                       isDense: true,
                       hintText: widget.isRecording
                           ? context.t('home.listening', zh: '正在听…')
-                          : context.t(
-                              'home.inputHint',
-                              zh: widget.config.resolvedPlaceholder,
-                            ),
+                          : (widget.config.enableVoice
+                              ? context.t('home.voicePlaceholder',
+                                  zh: '发消息或按住说话')
+                              : context.t(
+                                  'home.inputHint',
+                                  zh: widget.config.resolvedPlaceholder,
+                                )),
                       hintStyle: DshType.s14.copyWith(color: c.labelCaption),
                       border: InputBorder.none,
                       enabledBorder: InputBorder.none,
@@ -546,20 +585,28 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
                 ),
               ),
             ),
-            if (widget.config.enableVoice && !hasText) ...<Widget>[
+            if (widget.config.enableVoice) ...<Widget>[
               const SizedBox(width: DshSpace.x6),
               Semantics(
                 button: true,
                 label: widget.isRecording
                     ? context.t('home.stopRecording', zh: '停止录音')
-                    : context.t('home.voiceInput', zh: '语音输入'),
-                child: DshIconButton(
-                  icon: Icons.mic_none_rounded,
-                  iconSize: 18,
-                  size: 28,
-                  tint: c.labelSecondary,
-                  onTap: _handleMicTap,
-                  tooltip: context.t('home.voiceInput', zh: '语音输入'),
+                    : context.t('home.voiceInput', zh: '按住说话'),
+                child: GestureDetector(
+                  // 长按 = 按住说话（按下开始、松开停止）；单击 = 切换，二者兼容。
+                  onLongPressStart: _handleMicLongPressStart,
+                  onLongPressEnd: _handleMicLongPressEnd,
+                  behavior: HitTestBehavior.opaque,
+                  child: DshIconButton(
+                    icon: widget.isRecording
+                        ? Icons.graphic_eq_rounded
+                        : Icons.mic_none_rounded,
+                    iconSize: 19,
+                    size: 30,
+                    tint: widget.isRecording ? c.link : c.labelSecondary,
+                    onTap: _handleMicTap,
+                    tooltip: context.t('home.voiceInput', zh: '按住说话'),
+                  ),
                 ),
               ),
             ],

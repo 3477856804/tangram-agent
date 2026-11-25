@@ -32,9 +32,7 @@ for (const f of files) {
 }
 
 const body = `// 自动生成，请勿手改。重新生成：node tool/gen_mosaic_registry.mjs
-import 'package:flutter/widgets.dart';
-
-import '../panel.dart';
+import 'panel.dart';
 ${entries.map((e) => `import '${e.rel}' as ${e.prefix};`).join('\n')}
 
 /// 约定加载：每个面板文件导出顶层常量 \`mosaicPanel\`，此处集中登记。

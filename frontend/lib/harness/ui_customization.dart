@@ -148,6 +148,21 @@ class UiCustomizationConfig {
     'sidebar.performance',
   ];
 
+  /// 默认隐藏的入口（点名：认知 / 界面创客 / 界面插件 / 自定义，
+  /// 以及算力调度、性能诊断等开发向元功能）。
+  ///
+  /// 完整 [knownNavKeys] 仍是「系统支持的全部入口」（导入校验 / 用户主动
+  /// 开启都用得到，绝不删），但这些元功能默认不进侧栏，避免把界面塞满。
+  /// 页面与能力代码全部保留，仅在 buildTangramConfig 处默认过滤。
+  static const Set<String> defaultHiddenNavKeys = <String>{
+    'sidebar.cognition',
+    'sidebar.creator',
+    'sidebar.customize',
+    'sidebar.uiPlugins',
+    'sidebar.compute',
+    'sidebar.performance',
+  };
+
   static const Map<String, String> navLabels = <String, String>{
     'sidebar.training': '训练设置',
     'sidebar.persona': '人格设置',

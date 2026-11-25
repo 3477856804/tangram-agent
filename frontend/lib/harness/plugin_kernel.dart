@@ -659,6 +659,7 @@ class PluginKernel {
     required this.persistence,
     this.toolRegistry,
     this.onHotEvent,
+    this.onBeforeMount,
   });
 
   final KernelPersistence persistence;
@@ -976,6 +977,100 @@ class PluginKernel {
       'effects': node.effects.length,
     });
     return <String, dynamic>{'ok': true, 'plugin': pluginId, 'reason': reason};
+  }
+
+  /// 原子热替换：用 [replacement] 替换一个已挂载插件（万物皆可换）。
+  ///
+  /// 事务语义：卸载旧插件（逆序撤销 effects）→ 注册新插件 → 在同一挂载点
+  /// 挂载新插件。任一步失败都尝试把旧插件挂回去，绝不留下「旧的没了、新的
+  /// 也没上」的半状态。替换插件须声明相同 id（换实现不换槽位）。
+  Future<Map<String, dynamic>> hotSwap(
+      String pluginId, Plugin replacement) async {
+    final PluginNode? old = _nodes[pluginId];
+    if (old == null) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '插件 $pluginId 未挂载，无法热替换',
+      };
+    }
+    if (replacement.id != pluginId) {
+      return <String, dynamic>{
+        'ok': false,
+        'error': '替换插件 id(${replacement.id}) 必须等于目标槽位($pluginId)',
+      };
+    }
+    final String? parentId = old.parentId;
+    final String source = old.source;
+    final String layer = old.configLayer;
+    final Plugin previous = old.plugin;
+
+    final Map<String, dynamic> off = await unmount(pluginId, reason: 'hot-swap');
+    if (off['ok'] != true) {
+      return <String, dynamic>{'ok': false, 'error': '卸载旧插件失败：${off['error']}'};
+    }
+    registerPlugin(replacement);
+    final Map<String, dynamic> on = await mount(
+      pluginId,
+      parentId: parentId,
+      source: source,
+      configLayer: layer,
+    );
+    if (on['ok'] == true) {
+      emit('plugin.hot_swapped', 'kernel', <String, dynamic>{
+        'plugin': pluginId,
+        'from_version': previous.version,
+        'to_version': replacement.version,
+      });
+      return <String, dynamic>{
+        'ok': true,
+        'plugin': pluginId,
+        'from_version': previous.version,
+        'to_version': replacement.version,
+      };
+    }
+
+    // 回滚：重新挂载旧插件，恢复原槽位。
+    registerPlugin(previous);
+    final Map<String, dynamic> rollback = await mount(
+      pluginId,
+      parentId: parentId,
+      source: source,
+      configLayer: layer,
+    );
+    emit('plugin.hot_swap_rolled_back', 'kernel', <String, dynamic>{
+      'plugin': pluginId,
+      'reason': on['error'],
+      'rollback_ok': rollback['ok'] == true,
+    });
+    return <String, dynamic>{
+      'ok': false,
+      'error': '热替换失败已回滚：${on['error']}',
+      'rollback_ok': rollback['ok'] == true,
+    };
+  }
+
+  /// 依赖健康检查：遍历已挂载插件，检查每个 requires 服务是否仍存在。
+  /// 某个插件被卸载后，依赖它的插件可能处于「仍挂载但依赖已缺失」的不一致态；
+  /// 本方法如实报告，供 UI / 控制域发现并修复，绝不静默假装健康。
+  Map<String, dynamic> verifyDependencies() {
+    final List<Map<String, dynamic>> broken = <Map<String, dynamic>>[];
+    for (final MapEntry<String, PluginNode> e in _nodes.entries) {
+      for (final String dep in e.value.plugin.requires) {
+        if (!_services.containsKey(dep)) {
+          broken.add(<String, dynamic>{
+            'plugin': e.key,
+            'missing_service': dep,
+          });
+        }
+      }
+    }
+    final Map<String, dynamic> result = <String, dynamic>{
+      'ok': broken.isEmpty,
+      'checked': _nodes.length,
+      'broken': broken,
+    };
+    emit('kernel.dependencies_verified', 'kernel', result);
+    return result;
   }
 
   /// 切换接缝当前 provider：所有 consumer 一起搬过去。
@@ -1316,6 +1411,9 @@ class PluginKernel {
       case 'set_provider':
         return await setProvider(
             (p['seam'] ?? '').toString(), (p['provider'] ?? '').toString());
+      case 'verify_deps':
+        // 依赖健康检查：卸载/热替换后如实报告「仍挂载但依赖缺失」的插件。
+        return verifyDependencies();
       case 'invoke':
         final Map<String, dynamic> args = p['args'] is Map
             ? Map<String, dynamic>.from(p['args'] as Map)

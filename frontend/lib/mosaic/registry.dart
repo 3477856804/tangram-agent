@@ -1,7 +1,5 @@
 // mosaic · 注册表：登记、查找、按能力过滤、热替换（不重建整个 App）。
 
-import 'package:flutter/widgets.dart';
-
 import 'panel.dart';
 
 class MosaicRegistry {

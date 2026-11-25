@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:tangram/app_version.dart';
 
 import '../design/dsh_tokens.dart';
+import '../harness/ui_customization.dart' show UiCustomizationConfig;
 import 'app_config.dart';
 import 'flows/sidebar/settings_config.dart';
 import 'core/theme/tangram_palette.dart';
@@ -112,7 +113,21 @@ AppScaffoldConfig buildTangramConfig({
   sidebarConfig: SidebarConfig(
     appName: 'TGA',
     appLogo: const BrandMark(size: 36),
-    navItems: buildWorkspaceNavItems(visibleKeys: visibleNavKeys),
+    // 精简入口：认知 / 界面创客 / 界面自定义 / UI 插件槽 / 算力调度 /
+    // 性能诊断等元功能默认不进侧栏（页面与能力代码保留）。仅当 visibleNavKeys
+    // 是「用户显式指定的子集」时才尊重；全量默认集则剔除这些元功能。
+    navItems: buildWorkspaceNavItems(visibleKeys: visibleNavKeys)
+        .where(
+          (NavItem item) =>
+              visibleNavKeys != null &&
+              visibleNavKeys.isNotEmpty &&
+              visibleNavKeys.length < UiCustomizationConfig.knownNavKeys.length
+              ? true
+              : !UiCustomizationConfig.defaultHiddenNavKeys.contains(
+                  item.labelKey,
+                ),
+        )
+        .toList(growable: false),
     enableSearch: true,
     // 设计稿 2026-11-12 主页顶栏：菜单 · 静音 · 新对话加号。
     // 菜单与新对话由 HomeScreen 自身渲染，这里补「静音」开关。

@@ -46,6 +46,7 @@ import 'package:tangram/harness/artifacts.dart';
 import 'package:tangram/harness/audit_log.dart';
 import 'package:tangram/harness/builtin_plugins.dart';
 import 'package:tangram/harness/call_service.dart';
+import 'package:tangram/harness/cloud_error.dart';
 import 'package:tangram/harness/core.dart';
 import 'package:tangram/harness/downloader.dart';
 import 'package:tangram/harness/explanation_level.dart';
@@ -464,7 +465,7 @@ class EmbeddedBackend implements QqShellRunner {
         final PluginKernel? k = holder;
         if (k == null) return;
         try {
-          await snapshots.create(<String, dynamic>{
+          await snapshots.handle('create', <String, dynamic>{
             'label': '装插件前自动快照（${pluginId}）',
           });
         } on Object catch (e) {
@@ -2329,8 +2330,9 @@ class EmbeddedBackend implements QqShellRunner {
         );
         engine = 'openai-compatible:$model$modeSuffix';
       } else {
-        reply =
-            '外部推理调用失败：${remote.error}\n\n'
+        // 裸网关 JSON（尤其 429 带模型名）直接丢给用户非常难看，统一转译成人话。
+        // 429 限流已被 _remoteChat 自动重试过一次仍失败，这里给出明确可操作提示。
+        reply = '外部推理调用失败：${friendlyCloudError(remote.error)}\n\n'
             '（已如实记录，未编造回答。可在模型选择器里切回内置引擎。）';
         engine = 'remote-failed';
       }
@@ -2881,6 +2883,7 @@ class EmbeddedBackend implements QqShellRunner {
     required double topP,
     List<Map<String, dynamic>> history = const <Map<String, dynamic>>[],
     void Function(String delta)? onDelta,
+    int rateLimitRetry = 0,
   }) async {
     final uri = Uri.parse(
       '${apiBase.replaceAll(RegExp(r'/+$'), '')}/chat/completions',
@@ -2917,6 +2920,24 @@ class EmbeddedBackend implements QqShellRunner {
             .timeout(const Duration(seconds: 90));
         if (resp.statusCode != 200) {
           final String raw = await utf8.decoder.bind(resp.stream).join();
+          // 免费端点 429 多为瞬时限流：短暂退避后自动重试一次（真模型），
+          // 仍失败才把错误交给上层转译展示。最多重试一次，避免放大限流。
+          if (resp.statusCode == 429 && rateLimitRetry < 1) {
+            await Future<void>.delayed(const Duration(milliseconds: 900));
+            return await _remoteChat(
+              apiBase: apiBase,
+              apiKey: apiKey,
+              model: model,
+              text: text,
+              system: system,
+              temperature: temperature,
+              maxTokens: maxTokens,
+              topP: topP,
+              history: history,
+              onDelta: onDelta,
+              rateLimitRetry: rateLimitRetry + 1,
+            );
+          }
           return (
             ok: false,
             content: '',
@@ -2966,6 +2987,22 @@ class EmbeddedBackend implements QqShellRunner {
           )
           .timeout(const Duration(seconds: 90));
       if (plain.statusCode != 200) {
+        if (plain.statusCode == 429 && rateLimitRetry < 1) {
+          await Future<void>.delayed(const Duration(milliseconds: 900));
+          return await _remoteChat(
+            apiBase: apiBase,
+            apiKey: apiKey,
+            model: model,
+            text: text,
+            system: system,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            topP: topP,
+            history: history,
+            onDelta: onDelta,
+            rateLimitRetry: rateLimitRetry + 1,
+          );
+        }
         return (ok: false, content: '', error: 'HTTP ${plain.statusCode}');
       }
       final dynamic decoded = jsonDecode(utf8.decode(plain.bodyBytes));

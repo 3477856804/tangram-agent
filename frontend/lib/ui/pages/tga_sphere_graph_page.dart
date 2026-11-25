@@ -278,7 +278,7 @@ class _TgaSphereGraphPageState extends State<TgaSphereGraphPage>
   /// 点击命中：取离触点最近的前半球节点。
   void _onTapUp(TapUpDetails d) {
     if (_names.isEmpty) return;
-    double best = 26 * 26;
+    double best = 16 * 16;
     int bi = -1;
     for (int i = 0; i < _screen.length && i < _names.length; i++) {
       if (_zs[i] < 0) continue; // 只点得到前半球
@@ -588,7 +588,8 @@ class _SpherePainter extends CustomPainter {
   final List<double> zs;
 
   /// 标签常显的度数 Top N（其余点击选中后才显示）。
-  static const int _labelTop = 8;
+  /// 从 8 收紧到 5：400 节点时标签过多是球体臃肿的主因之一。
+  static const int _labelTop = 5;
 
   /// 背面（z<0）节点/连线/标签统一降透明度系数。
   static const double _backDim = 0.32;
@@ -732,9 +733,11 @@ class _SpherePainter extends CustomPainter {
       final double depth = (zs[i] + 1) / 2;
       final bool back = zs[i] < 0;
       final bool isSel = i == selected;
+      // 节点改小：去掉臃肿感。度数影响减弱（/10 且上限 1.7），
+      // 基础半径与深度增量同步收紧，让 400 节点球体更精致、不糊成一团。
       final double degFactor =
-          1.0 + math.sqrt((degrees[i] > 0 ? degrees[i] : 1).toDouble()) / 6;
-      double nodeR = (2.0 + depth * 2.6) * math.min(degFactor, 2.4) * zoom;
+          1.0 + math.sqrt((degrees[i] > 0 ? degrees[i] : 1).toDouble()) / 10;
+      double nodeR = (1.3 + depth * 1.5) * math.min(degFactor, 1.7) * zoom;
       if (isSel) nodeR *= 1 + 0.45 * _easeOutBack(selT);
       nodeRs[i] = nodeR;
 
@@ -744,7 +747,7 @@ class _SpherePainter extends CustomPainter {
       final double glowA =
           (back ? 0.22 * 0.35 : 0.22 * (0.45 + depth * 0.55)) +
               (isSel ? 0.10 : 0.0);
-      final double haloR = nodeR * 3.2;
+      final double haloR = nodeR * 2.2;
       canvas.drawCircle(
         screen[i],
         haloR,
@@ -805,7 +808,7 @@ class _SpherePainter extends CustomPainter {
     final List<int> cands = <int>[];
     for (int i = 0; i < names.length && i < zs.length; i++) {
       if (i == selected) continue; // 最后画，压在最上层
-      if (zs[i] > 0.25 || rank[i] < _labelTop) cands.add(i);
+      if (zs[i] > 0.5 || rank[i] < _labelTop) cands.add(i);
     }
     cands.sort((int a, int b) {
       final int c = zs[b].compareTo(zs[a]);
@@ -828,7 +831,7 @@ class _SpherePainter extends CustomPainter {
         text: TextSpan(
           text: names[i],
           style: TextStyle(
-            fontSize: 11,
+            fontSize: 9,
             fontWeight: FontWeight.w600,
             color: Tga.text.withValues(alpha: alpha),
           ),

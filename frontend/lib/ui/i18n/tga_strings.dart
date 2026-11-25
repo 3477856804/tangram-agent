@@ -314,6 +314,11 @@ class TgaStrings {
     'home.transcribing': {'cn': '识别中…', 'tw': '辨識中…', 'en': 'Transcribing…'},
     'home.stopRecording': {'cn': '停止录音', 'tw': '停止錄音', 'en': 'Stop recording'},
     'home.voiceInput': {'cn': '语音输入', 'tw': '語音輸入', 'en': 'Voice input'},
+    'home.voicePlaceholder': {
+      'cn': '发消息或按住说话',
+      'tw': '發訊息或按住說話',
+      'en': 'Message or hold to speak',
+    },
     'home.attach': {'cn': '添加附件', 'tw': '新增附件', 'en': 'Attach files'},
     'home.switchModelTooltip': {
       'cn': '切换模型（Ctrl + M）',

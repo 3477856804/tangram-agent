@@ -26,6 +26,14 @@ class FlaiVoiceController extends ChangeNotifier {
   bool _isTranscribing = false;
   String? _lastTranscript;
 
+  /// 转写序号：每收到一次非空最终转写就 +1。
+  /// UI 用它判断「是否有新转写」，而不是比较文本字符串——
+  /// 连续两次说出相同内容时文本不变，字符串比较会漏掉第二次，
+  /// 导致「识别成功却没进输入框」。这是语音输入曾不可用的根因之一。
+  int _transcriptSeq = 0;
+
+  int get transcriptSeq => _transcriptSeq;
+
   /// 最新一次真实麦克风声级（0.0 ~ 1.0），由 VoiceAmplitude 事件驱动。
   /// 提供方不发声级事件时恒为 0；界面用「是否收到过声级样本」区分
   /// 「无声级来源」与「真实静音」，见 composer 的 _InlineWaveform。
@@ -89,6 +97,7 @@ class FlaiVoiceController extends ChangeNotifier {
       case VoiceTranscript(:final text):
         if (text.trim().isNotEmpty) {
           _lastTranscript = text.trim();
+          _transcriptSeq++;
           _isTranscribing = false;
           notifyListeners();
           onTranscribed?.call(text.trim());
