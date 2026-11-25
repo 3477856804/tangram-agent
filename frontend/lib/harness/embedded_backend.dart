@@ -98,6 +98,10 @@ class BackendReply {
 class EmbeddedBackend implements QqShellRunner {
   EmbeddedBackend._(this.store, this.downloads) {
     _registerTools();
+    // round13：ToolRegistry 的 exec/write 级工具过策略——策略引擎与
+    // 审批单入口由此接线（未接线时 run() 不拦截，见 core.dart）。
+    tools.policyProvider = _ensurePolicy;
+    tools.onApprovalRequired = _requestToolApproval;
     // 真实 IM 网关：微信/QQ/飞书消息进来后走 _chat 的真实模型推理，
     // 回复经 AGP WebSocket 原样发回，绝不编造。QQ 沙箱直连扫码需要真实
     // shell 执行能力，把本后端作为 QqShellRunner 注入。
@@ -494,6 +498,23 @@ class EmbeddedBackend implements QqShellRunner {
         }
         return false;
       }
+      // round13：未知 caller 名直接拒绝——只认已登记的插件 id 与 root，
+      // 不再放行任何拼出来的名字（纵深防御：invoke 登记身份查漏过的
+      // 无令牌接缝，在这里兜底）。
+      if (caller != kRootCaller && kernel.pluginOf(caller) == null) {
+        try {
+          await _audit.append(
+            category: 'invoke_guard',
+            action: 'deny',
+            decision: 'denied',
+            actor: caller,
+            detail: '未知调用方：$seam.$method',
+          );
+        } on Object {
+          // 审计写失败不阻断仲裁。
+        }
+        return false;
+      }
       if (caller != kRootCaller) {
         try {
           await _audit.append(
@@ -551,7 +572,11 @@ class EmbeddedBackend implements QqShellRunner {
     if (k == null) {
       return _err('插件内核装配失败，请稍后重试');
     }
-    return await k.handle(_action(p, 'describe'), p);
+    // round13：dispatch 是进程内 UI 直连的唯一入口（TCP/stdio 桥接走
+    // 外部 Python 后端，不进这里），因此这里传 trustedRoot:true；
+    // payload 里的 caller 仍须是 'ui' 才能算 root——不可信路径上自称
+    // 'ui' 的调用在 handle/invoke 里会被降级为未表明身份。
+    return await k.handle(_action(p, 'describe'), p, trustedRoot: true);
   }
 
   Future<Map<String, dynamic>> _onSuperAgent(Map<String, dynamic> p) async {
@@ -7432,6 +7457,40 @@ class EmbeddedBackend implements QqShellRunner {
       );
       return true;
     }
+    return false;
+  }
+
+  /// ToolRegistry 审批入口（round13）：ask 命中时沿用 shell 同款一次性
+  /// 凭据——批准后重试同一工具+参数直接放行；未批准则建审批单并返回 false。
+  /// shell 与 workspace.* 工具不在 run() 层过策略（它们在 execute 内
+  /// 自己过策略并消费凭据），这里不会收到它们的回调。
+  Future<bool> _requestToolApproval(
+      String tool, Map<String, dynamic> args) async {
+    String argsText;
+    try {
+      argsText = jsonEncode(args);
+    } on Object {
+      argsText = args.toString();
+    }
+    if (argsText.length > 160) argsText = argsText.substring(0, 160);
+    final String grantKey = 'tool|$tool|$argsText';
+    if (await _consumeGrant(grantKey)) return true;
+    final String preview =
+        argsText.length > 80 ? '${argsText.substring(0, 80)}…' : argsText;
+    final int id = await store.insert('approvals', <String, dynamic>{
+      'action': '执行工具: $tool $preview',
+      'status': 'pending',
+      'grant_key': grantKey,
+      'consumed': 0,
+      'ts': _now(),
+    });
+    await _auditLog().append(
+      category: 'approval',
+      action: 'tool_approval_required',
+      decision: 'ask',
+      actor: tool,
+      detail: '审批单 $id：$tool',
+    );
     return false;
   }
 
