@@ -100,3 +100,35 @@ Map<String, List<String>> defaultSeamCaps() => <String, List<String>>{
       'ext/hooks': <String>['hooks:invoke'],
       'ui/pages': <String>['ui:open'],
     };
+
+/// 高危接缝（round13）：即使 T0–T2 插件 `caps` 为空也不再默认放行，
+/// 必须显式声明对应能力。只含其提供方插件已声明 caps 的接缝——
+/// 否则内建插件挂载即失败（先声明 caps、后收紧，顺序不可颠倒）。
+/// 其它接缝仍沿用既有兼容语义（空 caps 不限制）。
+const Set<String> kHighRiskSeams = <String>{
+  'core/sandbox',
+  'core/im',
+  'core/scheduler',
+};
+
+/// 插件经 facade 可发布的事件 topic 白名单（round13）。
+/// 插件只能发自己业务的观测事件；内核/接缝/插件生命周期事件
+/// （kernel.*/seam.*/plugin.*）一律不得由插件伪造发出——
+/// 那些事件只由内核自己在真实状态变化时发出。
+/// 集中定义于此，便于扩展：新增合法 topic 只改这一处。
+const Set<String> kPluginEmitTopics = <String>{
+  'session.cell',
+  'model.chat',
+  'sandbox.exec',
+  'agent-loop.observe',
+};
+
+/// 插件 emit 是否放行：白名单内且不在禁发前缀内。
+bool pluginEmitAllowed(String topic) {
+  if (topic.startsWith('kernel.') ||
+      topic.startsWith('seam.') ||
+      topic.startsWith('plugin.')) {
+    return false;
+  }
+  return kPluginEmitTopics.contains(topic);
+}
