@@ -350,6 +350,97 @@ class _IsolateMsg {
   final Map<String, dynamic> args;
 }
 
+/// deny 预检回调（round14 第一阶段）：只查 deny，返回命中规则的 id，
+/// 未命中返回 null。不建审批单、不消费一次性凭据；回调本身抛错时调用方
+/// 按 fail-closed 处理（拒绝执行），绝不静默放行。
+typedef SandboxDenyCheck = Future<String?> Function(
+  String cube,
+  String expression,
+);
+
+/// 执行审计回调：只收元数据事件，绝不收表达式原文与输出。
+/// 回调抛错时调用方一律吞掉，绝不阻断执行。
+typedef SandboxAuditCallback = void Function(SandboxAuditEvent event);
+
+/// cube 执行审计事件（round14 第一阶段）：只记元数据，绝不记表达式原文与输出。
+///
+/// 字段约定与 `harness/sandbox_provider.dart` 的 `SandboxAuditEvent` 一致
+/// （`tool` / `first` / `chars` / `cwd` / `exit` / `ms` / `provider` / `rule`；
+/// `decision` 走审计写入的 decision 参数，不进 detail）。
+/// 本文件 import `package:flutter/foundation.dart`（`ChangeNotifier`），
+/// 在纯 Dart VM 下无法加载 harness 层，故此处保留一份同形实现；
+/// 字段顺序与 detail 格式须与 canonical 实现保持一致
+/// （见 check_sandbox_audit_round14.dart §4）。
+class SandboxAuditEvent {
+  const SandboxAuditEvent({
+    required this.tool,
+    required this.first,
+    required this.chars,
+    required this.cwd,
+    required this.exit,
+    required this.ms,
+    required this.provider,
+    required this.rule,
+    required this.decision,
+  });
+
+  final String tool;
+  final String first;
+  final int chars;
+  final String cwd;
+  final int exit;
+  final int ms;
+  final String provider;
+  final String rule;
+  final String decision;
+
+  /// 审计 detail 字符串：`k=v` 空格分隔，与 canonical 格式一致。
+  String get detail =>
+      'tool=$tool first=$first chars=$chars cwd=$cwd '
+      'exit=$exit ms=$ms provider=$provider rule=$rule';
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'tool': tool,
+        'first': first,
+        'chars': chars,
+        'cwd': cwd,
+        'exit': exit,
+        'ms': ms,
+        'provider': provider,
+        'rule': rule,
+        'decision': decision,
+        'detail': detail,
+      };
+
+  /// 从 cube 表达式构造事件：cube 执行无 cwd（记 '.'），首词取表达式
+  /// 首个空白分隔 token（≤40 字符），空表达式回落为工具名。
+  factory SandboxAuditEvent.fromExpression({
+    required String expression,
+    required int exit,
+    required int ms,
+    required String decision,
+    String rule = '',
+  }) {
+    final String text = expression.trim();
+    String first = 'cube';
+    if (text.isNotEmpty) {
+      final String token = text.split(RegExp(r'\s+')).first;
+      first = token.length > 40 ? token.substring(0, 40) : token;
+    }
+    return SandboxAuditEvent(
+      tool: 'cube',
+      first: first,
+      chars: text.length,
+      cwd: '.',
+      exit: exit,
+      ms: ms,
+      provider: 'isolate-cube',
+      rule: rule,
+      decision: decision,
+    );
+  }
+}
+
 /// 应用级沙箱门面（单例）。加载契约后即具备能力校验与执行能力；
 /// 契约加载失败则永久处于拒绝态（零执行），绝不假装安全。
 class SandboxedShell extends ChangeNotifier {
@@ -362,6 +453,25 @@ class SandboxedShell extends ChangeNotifier {
   bool _loading = false;
   bool _loaded = false;
   String? _loadError;
+
+  /// deny 预检回调（可选，由 EmbeddedBackend 在构造时注入；只查 deny）。
+  /// 挂在单例本身而非内核对象上：hotSwap 只换插件节点，不重建本单例，
+  /// 也不重跑 EmbeddedBackend._bootKernel，回调不会被热替换丢掉。
+  SandboxDenyCheck? denyCheck;
+
+  /// 执行审计回调（可选，由 EmbeddedBackend 在构造时注入；只收元数据）。
+  SandboxAuditCallback? onAudit;
+
+  /// 审计发送：回调为空或抛错时静默跳过，绝不阻断执行。
+  void _fireAudit(SandboxAuditEvent event) {
+    final SandboxAuditCallback? cb = onAudit;
+    if (cb == null) return;
+    try {
+      cb(event);
+    } on Object {
+      // 审计失败绝不阻断执行。
+    }
+  }
 
   CubeContract? get contract => _contract;
   bool get loaded => _loaded;
@@ -398,7 +508,72 @@ class SandboxedShell extends ChangeNotifier {
         _loadError ?? '能力契约未加载，沙箱处于拒绝态（零执行）。',
       );
     }
-    return _env!.exec(cube, args);
+    // round14 第一阶段：deny 预检 + 执行审计。只查 deny，不碰 ask/auto；
+    // 预检在 Isolate 启动之前：被拒的表达式绝不进入执行体。
+    // 表达式取参顺序与 _execute 内保持一致（code / expression / text）。
+    final String expression =
+        (args['code'] ?? args['expression'] ?? args['text'] ?? '').toString();
+    final Stopwatch execSw = Stopwatch()..start();
+    final SandboxDenyCheck? check = denyCheck;
+    if (check != null) {
+      String? rule;
+      try {
+        rule = await check(cube, expression);
+      } on Object {
+        _fireAudit(SandboxAuditEvent.fromExpression(
+          expression: expression,
+          exit: -1,
+          ms: execSw.elapsedMilliseconds,
+          decision: 'denied',
+        ));
+        return SandboxResult(
+          ok: false,
+          error: '安全策略检查失败，拒绝执行',
+          cube: cube,
+        );
+      }
+      if (rule != null && rule.isNotEmpty) {
+        _fireAudit(SandboxAuditEvent.fromExpression(
+          expression: expression,
+          exit: -1,
+          ms: execSw.elapsedMilliseconds,
+          decision: 'denied',
+          rule: rule,
+        ));
+        return SandboxResult(
+          ok: false,
+          error: '表达式被安全策略拒绝（规则 $rule）',
+          cube: cube,
+        );
+      }
+    }
+    try {
+      final SandboxResult r = await _env!.exec(cube, args);
+      _fireAudit(SandboxAuditEvent.fromExpression(
+        expression: expression,
+        exit: r.ok ? 0 : 1,
+        ms: execSw.elapsedMilliseconds,
+        decision: r.ok ? 'allowed' : 'failed',
+      ));
+      return r;
+    } on RefusalError {
+      // 能力缺失 / 未知 cube / 超时：执行体未完成，记 failed、exit -1。
+      _fireAudit(SandboxAuditEvent.fromExpression(
+        expression: expression,
+        exit: -1,
+        ms: execSw.elapsedMilliseconds,
+        decision: 'failed',
+      ));
+      rethrow;
+    } on Object {
+      _fireAudit(SandboxAuditEvent.fromExpression(
+        expression: expression,
+        exit: -1,
+        ms: execSw.elapsedMilliseconds,
+        decision: 'failed',
+      ));
+      rethrow;
+    }
   }
 
   List<String> get cubeNames => _contract?.cubes.keys.toList() ?? const <String>[];
