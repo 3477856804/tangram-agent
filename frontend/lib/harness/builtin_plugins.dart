@@ -84,6 +84,16 @@ class KernelHost {
 
 typedef PluginBuild = void Function(PluginContext ctx);
 
+/// 依赖信号标记（round13）：_CapabilityPlugin 往服务表里登记的不是
+/// CapabilitySeam 对象本身——旧写法把可变接缝对象交出去，任何拿到它
+/// 的插件都能直改 providers/consumers/activeProviderId。
+/// 这个不透明标记只起一个作用：让 mount() 的 requires 校验（服务名已
+/// 挂载）继续成立，本身不携带任何可写状态。
+class _SeamDependencyMarker {
+  const _SeamDependencyMarker(this.seam);
+  final String seam;
+}
+
 class _CapabilityPlugin extends Plugin {
   _CapabilityPlugin({
     required this.id,
@@ -95,6 +105,7 @@ class _CapabilityPlugin extends Plugin {
     required this.build,
     this.requires = const <String>[],
     this.consumers = const <String>[],
+    this.caps = const <String>[],
   });
 
   @override
@@ -111,15 +122,20 @@ class _CapabilityPlugin extends Plugin {
   @override
   final List<String> requires;
   final List<String> consumers;
+  /// 声明可用的能力（接缝名或能力令牌）。round13：高危接缝的提供方
+  /// 必须显式声明，否则 consumeSeam 即拒绝、boot 失败。
+  @override
+  final List<String> caps;
 
   @override
   List<String> get providesSeams => <String>[seam];
 
   @override
   Future<void> apply(PluginContext ctx) async {
-    // 把接缝对象本身登记为具名服务，供依赖它的插件 inject。
-    final CapabilitySeam s = ctx.seam(seam, definition);
-    ctx.provideService(seam, s);
+    // 只确保接缝存在（返回只读视图）；依赖信号用不透明标记登记，
+    // CapabilitySeam 对象本身不再交出去。
+    ctx.seam(seam, definition);
+    ctx.provideService(seam, _SeamDependencyMarker(seam));
     build(ctx);
     for (final String c in consumers) {
       ctx.consumeSeam(seam, c);
@@ -313,8 +329,7 @@ class BuiltinPlugins {
             description: '查看当前插件内核的实时状态（挂载数/接缝/模式）',
             tier: ApprovalTier.read,
             execute: (Map<String, dynamic> a, CancelToken? t) async {
-              final Map<String, dynamic> s =
-                  await ctx.kernel.handle('describe', <String, dynamic>{});
+              final Map<String, dynamic> s = ctx.kernel.describe();
               return ToolResult.ok(jsonEncodeSafe(s));
             },
           ));
@@ -341,7 +356,7 @@ class BuiltinPlugins {
               (String method, Map<String, dynamic> args) async {
             switch (method) {
               case 'append':
-                ctx.kernel.emit('session.cell', 'core.session',
+                ctx.kernel.emit('session.cell',
                     <String, dynamic>{
                       'kind': (args['kind'] ?? 'context').toString(),
                       'text': (args['text'] ?? '').toString(),
@@ -403,7 +418,7 @@ class BuiltinPlugins {
           ctx.registerPromptSection('kernel.capabilities', () {
             final int mounted = ctx.kernel.mountedCount;
             return '[运行内核] 当前为插件化 harness，已挂载 $mounted 个能力插件，'
-                '运行模式 ${ctx.kernel.profile.mode.label}。'
+                '运行模式 ${ctx.kernel.modeLabel}。'
                 '能力通过接缝按需替换，工具调用经三段式校验执行。';
           });
         },
@@ -427,7 +442,7 @@ class BuiltinPlugins {
               if (forceBuiltin) 'model_kind': 'builtin',
             };
             final Map<String, dynamic> r = await host.chat(p);
-            ctx.kernel.emit('model.chat', 'core.model', <String, dynamic>{
+            ctx.kernel.emit('model.chat', <String, dynamic>{
               'engine': (r['engine'] ?? '').toString(),
               'ok': r['ok'] == true,
             });
@@ -468,6 +483,8 @@ class BuiltinPlugins {
         definition: '命令/代码执行；本地 shell、SSH、proot、Isolate cube 分离',
         requires: const <String>['core/storage'],
         consumers: const <String>['shell', 'terminal', 'code-task', 'super-agent'],
+        // round13：高危接缝提供方必须显式声明，否则 consumeSeam 即拒绝。
+        caps: const <String>['sandbox:exec'],
         build: (PluginContext ctx) {
           // 沙箱参数可自定义且真实生效：env 注入命令（转义防注入），
           // timeout_ms > 0 时 Future.timeout 真实终止等待并如实报错。
@@ -539,7 +556,7 @@ class BuiltinPlugins {
               final String effective = prefix.isEmpty ? command : prefix + command;
               final Map<String, dynamic> r = await withTimeout(
                   () => host.shell(effective, (args['cwd'] ?? '.').toString()));
-              ctx.kernel.emit('sandbox.exec', 'core.sandbox',
+              ctx.kernel.emit('sandbox.exec',
                   <String, dynamic>{'provider': 'real-shell', 'ok': r['ok'] == true});
               return r;
             }
@@ -566,7 +583,7 @@ class BuiltinPlugins {
               if (env.isNotEmpty) cubeArgs['env'] = env;
               final Map<String, dynamic> r = await withTimeout(() => host.cube(
                   (args['cube'] ?? 'eval_expression').toString(), cubeArgs));
-              ctx.kernel.emit('sandbox.exec', 'core.sandbox',
+              ctx.kernel.emit('sandbox.exec',
                   <String, dynamic>{'provider': 'isolate-cube', 'ok': r['ok'] == true});
               return r;
             }
@@ -733,6 +750,10 @@ class BuiltinPlugins {
         definition: '接收目标，驱动工具/推理回路，产出回复',
         requires: const <String>['core/model', 'core/tools', 'core/sandbox'],
         consumers: const <String>['chat', 'super-agent'],
+        // round13：声明调用 core/model 与自身接缝所需的两项能力。
+        // 只声明 model:invoke 会导致 consumeSeam('core/agent-loop')
+        // 失败——自身接缝要 'agent:run'（或接缝名本身）。
+        caps: const <String>['model:invoke', 'agent:run'],
         build: (PluginContext ctx) {
           ctx.provideSeamProvider('core/agent-loop', 'default-loop',
               '内置意图路由 + 真实工具求值 + 记忆检索',
@@ -745,7 +766,7 @@ class BuiltinPlugins {
           });
           // 子 Agent / hooks 事件：监听插件生命周期，记录到 append-only 流。
           ctx.on('plugin.mounted', (KernelEvent e) {
-            ctx.kernel.emit('agent-loop.observe', 'core.agent-loop',
+            ctx.kernel.emit('agent-loop.observe',
                 <String, dynamic>{'on': 'plugin.mounted', 'seq': e.seq});
           });
         },
@@ -789,6 +810,8 @@ class BuiltinPlugins {
         definition: '增删改查定时/主动任务规则',
         requires: const <String>['core/storage'],
         consumers: const <String>['super-agent'],
+        // round13：高危接缝提供方必须显式声明，否则 consumeSeam 即拒绝。
+        caps: const <String>['scheduler:schedule'],
         build: (PluginContext ctx) {
           ctx.provideSeamProvider('core/scheduler', 'proactive-rules',
               '真实 proactive_rules 集合',
@@ -822,6 +845,8 @@ class BuiltinPlugins {
         seam: 'core/im',
         definition: '查询各通道真实连接状态',
         consumers: const <String>['super-agent'],
+        // round13：高危接缝提供方必须显式声明，否则 consumeSeam 即拒绝。
+        caps: const <String>['channel:send'],
         build: (PluginContext ctx) {
           ctx.provideSeamProvider('core/im', 'agp-gateway',
               '真实 ImService 适配器快照',
@@ -878,6 +903,8 @@ class BuiltinPlugins {
         seam: 'ui/pages',
         definition: '列出真实导航基线，并对内核自定义页面注册表增删改排序',
         consumers: const <String>['creator'],
+        // round13：页面写操作（facade add/remove/reorder）须声明 ui:open。
+        caps: const <String>['ui:open'],
         build: (PluginContext ctx) {
           ctx.provideSeamProvider('ui/pages', 'workspace-nav',
               '真实侧边栏导航基线（只读）+ 内核自定义页注册表（可增删改排序）',
