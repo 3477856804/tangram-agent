@@ -130,7 +130,7 @@ def _positive_float(value: Any, default: float) -> float:
     return max(0.1, min(300.0, parsed))
 
 
-def def _normalize_tier(raw: Any) -> str:
+def _normalize_tier(raw: Any) -> str:
     """解析插件分级；未知值兜底 T1（官方），不静默升为 T0。"""
     if isinstance(raw, str):
         s = raw.strip()
