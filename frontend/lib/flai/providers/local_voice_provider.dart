@@ -5,9 +5,13 @@
 ///    抛 UnsupportedError，不伪造。
 ///  - TTS：走已实测可出音的 Edge TTS（微软 readaloud 免费端点，
 ///    见 services/tts_edge.dart），默认音色晓伊。
-///  - 自托管 Whisper + Kokoro 是预留的后端槽位：用户本地跑起
-///    whisper-server / Kokoro 后，可把 OpenAiCompatibleVoiceProvider
-///    指过去；本轮不编造该服务已存在，本地后端不假装已接它们。
+///  - 自托管 Whisper + Kokoro 是已接线的后端槽位：用户本地跑起
+///    whisper-server / Kokoro 后，用
+///    `OpenAiCompatibleVoiceProvider.kokoro` 或
+///    `VoiceProviderRegistry.registerKokoro`（baseUrl 默认
+///    http://localhost:8880/v1）构造并注册，再经 buildTangramConfig
+///    的 kokoroBaseUrl / preferredVoiceBackend 启用；本轮不编造该
+///    服务已存在——服务未起时调用如实抛错。本地后端默认仍是 Edge TTS。
 library;
 
 import 'dart:async';
