@@ -856,14 +856,18 @@ class PluginKernel {
 
   /// 回退脏标志（round14）：restoreSnapshot 任一变异阶段失败即置真，直到
   /// 三条出路之一清脏（重试同一快照成功 / 回滚到回退前备份成功 /
-  /// resolve_dirty 显式确认）。只在内存，进程重启即失——启动时脏态
-  /// 无法从磁盘恢复，见 docs/CODE-AUDIT-0.0.41.md §9 已知局限。
+  /// resolve_dirty 显式确认）。round16：boot 失败（挂载/卸载失败、启动快
+  /// 照预检失败）同样置真（journal phase 'boot_dirty'）。只在内存，进程
+  /// 重启即失——跨重启持久化未做（_persistConfig 只存 profile/home_patch），
+  /// 重启后旧脏态仍无法从磁盘恢复，见 docs/CODE-AUDIT-0.0.41.md §11。
   bool _restoreDirty = false;
   String _restoreDirtyReason = '';
 
   /// 回退 journal（Map，不新增类型）：目标快照、回退前备份、当前阶段、
   /// 已完成卸载/挂载、失败插件与阶段、时间戳。失败时随结构化结果返回，
-  /// describe()/status 可读摘要。
+  /// describe()/status 可读摘要。round16：启动标脏复用同一张 journal，
+  /// 另记 failed_mounts/failed_unmounts/boot_errors（见
+  /// _markBootDirtyIfNeeded）。
   Map<String, dynamic> _restoreJournal = <String, dynamic>{};
 
   final Map<String, _ServiceEntry> _services = <String, _ServiceEntry>{};
@@ -959,7 +963,130 @@ class PluginKernel {
       'mode': _profile.mode.label,
       'builtin': builtinPlugins.length,
     });
-    await _applyProfile(reset: true);
+    // round16：启动标脏（脏标志启动缓解，见 docs/CODE-AUDIT-0.0.41.md §11）。
+    //
+    // 快照只在内存、_persistConfig 只存 profile/home_patch，重启后磁盘上
+    // 没有可恢复的“最新快照”——boot 的“最新快照”就是本次装配结果本身：
+    // _applyProfile 之后立即 captureSnapshot('启动快照')，再对它跑
+    // verifyDependencies（活态依赖核查）+ _preflightSnapshot（闭包预检，
+    // 复用 round14 判定口径）。任一失败都标脏，但首轮挂载不阻塞：预检
+    // 在 _applyProfile 之后跑，脏门禁又只在 handle() 入口，boot 直调
+    // _applyProfile 不走 handle()，故脏态不可能卡住启动流程、不会死锁。
+    // 出路复用既有 rollback（回滚到启动快照）/ resolve_dirty。
+    final Map<String, dynamic> applied = await _applyProfile(reset: true);
+    final Map<String, dynamic> bootSnapJson = captureSnapshot('启动快照');
+    final String bootSnapId = (bootSnapJson['id'] ?? '').toString();
+    final Map<String, dynamic> deps = verifyDependencies();
+    final Map<String, dynamic> preflight = _preflightSnapshot(
+        KernelSnapshot.fromJson(bootSnapJson));
+    _markBootDirtyIfNeeded(
+      applied: applied,
+      deps: deps,
+      preflight: preflight,
+      bootSnapId: bootSnapId,
+    );
+  }
+
+  /// round16：启动标脏收口。_applyProfile 的失败挂载/卸载与启动快照的
+  /// 预检（verifyDependencies + _preflightSnapshot）任一失败都标脏、
+  /// 写 journal、发事件；全部通过则什么都不做（干净启动不留脏痕）。
+  /// 脏门禁只拦 handle() 改动类动作，boot 流程本身不受影响。
+  void _markBootDirtyIfNeeded({
+    required Map<String, dynamic> applied,
+    required Map<String, dynamic> deps,
+    required Map<String, dynamic> preflight,
+    required String bootSnapId,
+  }) {
+    final List<Map<String, dynamic>> failedMounts =
+        ((applied['failed_mounts'] as List?) ?? const <dynamic>[])
+            .whereType<Map>()
+            .map((Map m) => Map<String, dynamic>.from(m))
+            .toList();
+    final List<Map<String, dynamic>> failedUnmounts =
+        ((applied['failed_unmounts'] as List?) ?? const <dynamic>[])
+            .whereType<Map>()
+            .map((Map m) => Map<String, dynamic>.from(m))
+            .toList();
+    final List<String> bootErrors = <String>[];
+    if (preflight['ok'] != true) {
+      bootErrors.addAll(((preflight['errors'] as List?) ?? const <dynamic>[])
+          .map((dynamic e) => e.toString()));
+    }
+    if (deps['ok'] != true) {
+      for (final Map b in ((deps['broken'] as List?) ?? const <dynamic>[])
+          .whereType<Map>()) {
+        bootErrors.add('插件 ${b['plugin']} 依赖服务 ${b['missing_service']} '
+            '在启动后核查中缺失');
+      }
+    }
+    if (failedMounts.isEmpty &&
+        failedUnmounts.isEmpty &&
+        bootErrors.isEmpty) {
+      return;
+    }
+    // 失败阶段：先发生的为准（挂载/卸载失败先于预检失败）。
+    final String failedPhase =
+        failedMounts.isNotEmpty || failedUnmounts.isNotEmpty
+            ? 'boot_apply'
+            : 'boot_verify';
+    String failedPlugin = '';
+    if (failedMounts.isNotEmpty) {
+      failedPlugin = (failedMounts.first['plugin'] ?? '').toString();
+    } else if (failedUnmounts.isNotEmpty) {
+      failedPlugin = (failedUnmounts.first['plugin'] ?? '').toString();
+    } else if (deps['ok'] != true) {
+      final List<dynamic> broken =
+          (deps['broken'] as List?) ?? const <dynamic>[];
+      if (broken.isNotEmpty && broken.first is Map) {
+        failedPlugin =
+            ((broken.first as Map)['plugin'] ?? '').toString();
+      }
+    }
+    final List<String> reasons = <String>[];
+    if (failedMounts.isNotEmpty) {
+      reasons.add('启动挂载失败：${failedMounts.map(
+          (Map<String, dynamic> m) => '${m['plugin']}（${m['error']}）').join('；')}');
+    }
+    if (failedUnmounts.isNotEmpty) {
+      reasons.add('启动卸载失败：${failedUnmounts.map(
+          (Map<String, dynamic> m) => '${m['plugin']}（${m['error']}）').join('；')}');
+    }
+    if (bootErrors.isNotEmpty) {
+      reasons.add('启动预检失败：${bootErrors.join('；')}');
+    }
+    _restoreDirty = true;
+    _restoreDirtyReason = reasons.join('；');
+    _restoreJournal = <String, dynamic>{
+      'target_snapshot': bootSnapId,
+      'pre_restore_snapshot': '',
+      'phase': 'boot_dirty',
+      'failed_phase': failedPhase,
+      'failed_plugin': failedPlugin,
+      // 启动时实际挂上的插件（_applyProfile 不报告成功卸载，
+      // done_unmounts 留空，不编造）。
+      'done_unmounts': <String>[],
+      'done_mounts': _nodes.keys.toList(),
+      'failed_mounts': failedMounts,
+      'failed_unmounts': failedUnmounts,
+      'boot_errors': bootErrors,
+      'at': DateTime.now().toIso8601String(),
+    };
+    if (failedMounts.isNotEmpty || failedUnmounts.isNotEmpty) {
+      emit('kernel.boot_mount_failed', 'kernel', <String, dynamic>{
+        'failed_mounts': failedMounts,
+        'failed_unmounts': failedUnmounts,
+        'snapshot': bootSnapId,
+        'dirty': true,
+      });
+    }
+    if (bootErrors.isNotEmpty) {
+      emit('kernel.boot_dirty', 'kernel', <String, dynamic>{
+        'phase': 'boot_verify',
+        'errors': bootErrors,
+        'snapshot': bootSnapId,
+        'dirty': true,
+      });
+    }
   }
 
   RuntimeProfile _profileFromConfig(
@@ -991,8 +1118,9 @@ class PluginKernel {
   ///
   /// round14：返回应用结果（此前 mount/unmount 的返回值被直接丢弃，
   /// _setMode 无法知道模式切换是否真正落完）。失败项只收集、不抛——
-  /// 调用方（_setMode）决定是结构化返回还是继续；boot 忽略返回值，
-  /// 语义不变。
+  /// 调用方（_setMode）决定是结构化返回还是继续；round16：boot 同样消费
+  /// 返回值，失败挂载/卸载写入 journal 并发事件、标脏（见
+  /// _markBootDirtyIfNeeded），首轮挂载本身不阻塞。
   Future<Map<String, dynamic>> _applyProfile({required bool reset}) async {
     final List<Map<String, dynamic>> failedMounts = <Map<String, dynamic>>[];
     final List<Map<String, dynamic>> failedUnmounts =
@@ -1750,9 +1878,10 @@ class PluginKernel {
         'error': '改动类动作 $action 须由 UI（root）发起，或由动作 owner 插件自身在 allowlist 内发起；未表明身份的调用方无权执行',
       };
     }
-    // round14 脏门禁：回退失败置脏后，改动类动作一律拒绝，只留两条出路——
-    // rollback（重试同一快照 / 回滚到回退前备份）与 resolve_dirty（仅
-    // trustedRoot，显式确认接受当前半回退态）。只读动作与 invoke 不拦截；
+    // round14 脏门禁（round16：启动标脏同样走此门禁）：回退/启动失败置脏后，
+    // 改动类动作一律拒绝，只留两条出路——rollback（重试同一快照 / 回滚到
+    // 回退前备份 / 回滚到启动快照）与 resolve_dirty（仅 trustedRoot，
+    // 显式确认接受当前半态）。只读动作与 invoke 不拦截；
     // 鉴权门禁在前，未表明身份的调用方仍先拿 mutation_requires_root。
     if (_restoreDirty &&
         _isMutation(action, p) &&
@@ -2039,6 +2168,8 @@ class PluginKernel {
   }
 
   /// 回退 journal 摘要（只读动作可查的口径）：复制一份，调用方改不动内核内账。
+  /// round16：启动标脏另记 failed_mounts/failed_unmounts/boot_errors，
+  /// 缺省为空列表（旧调用方按 key 访问，不破坏）。
   Map<String, dynamic> _restoreJournalSummary() => <String, dynamic>{
         'target_snapshot': _restoreJournal['target_snapshot'],
         'pre_restore_snapshot': _restoreJournal['pre_restore_snapshot'],
@@ -2049,6 +2180,18 @@ class PluginKernel {
             (_restoreJournal['done_unmounts'] as List?) ?? const <String>[]),
         'done_mounts': List<String>.from(
             (_restoreJournal['done_mounts'] as List?) ?? const <String>[]),
+        'failed_mounts': ((_restoreJournal['failed_mounts'] as List?) ??
+                const <dynamic>[])
+            .whereType<Map>()
+            .map((Map m) => Map<String, dynamic>.from(m))
+            .toList(),
+        'failed_unmounts': ((_restoreJournal['failed_unmounts'] as List?) ??
+                const <dynamic>[])
+            .whereType<Map>()
+            .map((Map m) => Map<String, dynamic>.from(m))
+            .toList(),
+        'boot_errors': List<String>.from(
+            (_restoreJournal['boot_errors'] as List?) ?? const <String>[]),
         'at': _restoreJournal['at'],
       };
 
