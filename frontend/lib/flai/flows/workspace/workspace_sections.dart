@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import 'package:tangram/harness/ui_customization.dart';
 import 'package:tangram/mosaic/generated_registry.dart';
 import 'package:tangram/mosaic/host.dart';
 import 'package:tangram/mosaic/panel.dart';
