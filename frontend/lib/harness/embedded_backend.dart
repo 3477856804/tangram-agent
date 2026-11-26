@@ -97,6 +97,14 @@ class BackendReply {
   final List<Map<String, dynamic>> events;
 }
 
+/// cube ask 预检（round15 第二阶段，与 sandboxed_shell.dart 的约定契约）：
+/// 策略判为 ask 时返回命中规则 id，否则返回 null（allow/deny 不走 ask 链路）。
+typedef SandboxAskCheck = Future<String?> Function(String cube, String expression);
+
+/// cube ask 审批入口：ask 命中时调用，返回 true＝已获批（一次性凭据已消费），
+/// false＝已建审批单待人工确认。
+typedef SandboxAskApproval = Future<bool> Function(String cube, String expression);
+
 class EmbeddedBackend implements QqShellRunner {
   EmbeddedBackend._(this.store, this.downloads) {
     _registerTools();
@@ -104,11 +112,23 @@ class EmbeddedBackend implements QqShellRunner {
     // 审批单入口由此接线（未接线时 run() 不拦截，见 core.dart）。
     tools.policyProvider = _ensurePolicy;
     tools.onApprovalRequired = _requestToolApproval;
+    // round15 第二阶段：ToolRegistry 的策略决策审计（deny / ask 获批 /
+    // ask 被拒）落盘到 security 类审计；ask_approved 记 allowed，其余记 denied。
+    tools.onPolicyDecision = (ToolPolicyAuditEvent event) {
+      unawaited(_auditLog().append(
+        category: 'security',
+        action: 'tool_dispatch_${event.decision}',
+        decision: event.decision == 'ask_approved' ? 'allowed' : 'denied',
+        actor: 'policy',
+        detail: event.detail,
+      ));
+    };
     // round14 第一阶段：cube 执行的 deny 预检 + 审计回调挂在
     // SandboxedShell 单例本身（静态单例，hotSwap 只换插件节点、不重建
     // 内核也不重跑 _bootKernel，故回调不会被热替换丢掉；后端本身也是
     // 进程级单例，构造时接线一次即覆盖全部 cube 调用点）。
-    // 只查 deny：ask/auto 不建单、不消费一次性凭据（第二阶段再补 ask）。
+    // round15 第二阶段：deny 预检之外补上 ask 接线——ask 命中时查规则 id
+    // 建审批单并消费一次性凭据（与 ToolRegistry 的 ask 链路同款语义）。
     cube_shell.SandboxedShell.instance.denyCheck = (String cube, String expression) async {
       final PermissionPolicy policy = await _ensurePolicy();
       if (policy.evaluate(tool: 'cube', args: expression) !=
@@ -120,6 +140,14 @@ class EmbeddedBackend implements QqShellRunner {
     cube_shell.SandboxedShell.instance.onAudit = (cube_shell.SandboxAuditEvent event) {
       unawaited(_auditCubeEvent(event));
     };
+    // round15 第二阶段：cube ask 接线（askCheck 只查 ask，不碰 deny/allow；
+    // onAskApproval 建单并消费一次性凭据；成员由 sandboxed_shell.dart 定义）。
+    cube_shell.SandboxedShell.instance.askCheck = (String cube, String expression) async {
+      final PermissionPolicy policy = await _ensurePolicy();
+      if (policy.evaluate(tool: 'cube', args: expression) != PolicyDecision.ask) return null;
+      return policy.matchedRuleId(tool: 'cube', args: expression);
+    };
+    cube_shell.SandboxedShell.instance.onAskApproval = (String cube, String expression) async => _requestCubeApproval(cube, expression);
     // 真实 IM 网关：微信/QQ/飞书消息进来后走 _chat 的真实模型推理，
     // 回复经 AGP WebSocket 原样发回，绝不编造。QQ 沙箱直连扫码需要真实
     // shell 执行能力，把本后端作为 QqShellRunner 注入。
@@ -7686,6 +7714,33 @@ class EmbeddedBackend implements QqShellRunner {
       decision: 'ask',
       actor: tool,
       detail: '审批单 $id：$tool',
+    );
+    return false;
+  }
+
+  /// cube ask 审批入口（round15 第二阶段）：照抄 [_requestToolApproval]
+  /// 的结构——grantKey 用表达式前 160 字符；批准后重试同一表达式直接放行，
+  /// 未批准则建审批单并返回 false。
+  Future<bool> _requestCubeApproval(String cube, String expression) async {
+    final String truncated =
+        expression.length > 160 ? expression.substring(0, 160) : expression;
+    final String grantKey = 'cube|$truncated';
+    if (await _consumeGrant(grantKey)) return true;
+    final String preview =
+        expression.length > 80 ? expression.substring(0, 80) : expression;
+    final int id = await store.insert('approvals', <String, dynamic>{
+      'action': '执行表达式: $cube $preview',
+      'status': 'pending',
+      'grant_key': grantKey,
+      'consumed': 0,
+      'ts': _now(),
+    });
+    await _auditLog().append(
+      category: 'approval',
+      action: 'cube_approval_required',
+      decision: 'ask',
+      actor: 'cube',
+      detail: '审批单 $id：$cube',
     );
     return false;
   }
