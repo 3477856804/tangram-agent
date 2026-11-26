@@ -73,6 +73,15 @@ class ProotSandboxProvider extends SandboxProvider {
   }) async {
     final SandboxExecResult? refused = takeoverRefusal();
     if (refused != null) return refused;
+    // round15 第二阶段：deny 预检（只查 deny；接管门禁优先，仍以接管拒绝为准）。
+    // 预检在 installed 检查之前：被拒的命令不触碰任何执行状态。
+    final Stopwatch execSw = Stopwatch()..start();
+    final SandboxExecResult? denied = await checkDeny(
+      command,
+      cwd: cwd,
+      ms: execSw.elapsedMilliseconds,
+    );
+    if (denied != null) return denied;
     if (!proot.installed) {
       return SandboxExecResult.notInstalled(
         kind: kind,
@@ -101,7 +110,10 @@ class ProotSandboxProvider extends SandboxProvider {
     final int exitCode = r['exit_code'] is num
         ? (r['exit_code'] as num).toInt()
         : (r['ok'] == true ? 0 : 1);
-    return SandboxExecResult(
+    // round15 第二阶段：执行收尾审计（只记元数据；not-installed / proot.run
+    // 返回 null 的 early return 均在执行体启动前，命令未执行，故不记执行审计；
+    // deny 由 checkDeny 代发，不重复记）。
+    final SandboxExecResult result = SandboxExecResult(
       ok: r['ok'] == true,
       kind: kind,
       stdout: SandboxProvider.capOutput(stdoutAll, maxOutputChars),
@@ -112,6 +124,16 @@ class ProotSandboxProvider extends SandboxProvider {
       error: (r['error'] ?? '').toString(),
       cwd: (r['cwd'] ?? cwd).toString(),
     );
+    fireAudit(SandboxAuditEvent.fromCommand(
+      tool: 'shell',
+      command: command,
+      cwd: cwd,
+      exit: exitCode,
+      ms: execSw.elapsedMilliseconds,
+      provider: kind.name,
+      decision: result.ok ? 'allowed' : 'failed',
+    ));
+    return result;
   }
 
   /// guest 路径 → 宿主真实路径：`/workspace/...` 走 App 沙箱工作区，
