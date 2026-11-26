@@ -11,9 +11,14 @@ import 'flows/sidebar/sidebar_config.dart';
 import 'flows/workspace/workspace_sections.dart';
 import 'providers/ai_provider.dart';
 import 'providers/local_voice_provider.dart';
+import 'providers/openai_compatible_voice_provider.dart';
 import 'providers/speech_voice_provider.dart';
 import 'providers/storage_provider.dart';
 import 'providers/tangram_auth_provider.dart';
+import 'providers/voice_credentials.dart';
+import 'providers/voice_provider.dart';
+import 'providers/voice_provider_registry.dart';
+import '../services/secret_vault.dart';
 import 'widgets/tangram_surfaces.dart';
 
 /// 主页顶栏「静音」开关（设计稿 2026-11-13：白底圆形按钮，与顶栏其他按钮同构）。
@@ -62,6 +67,19 @@ AppScaffoldConfig buildTangramConfig({
   List<ModelOption> availableModels = const <ModelOption>[],
   // UI 自定义的可见导航项；null / 空集合 = 全部入口（配置缺失时不缩减侧栏）。
   List<String>? visibleNavKeys,
+  // Kokoro 本地 TTS（OpenAI 兼容协议）：默认关闭。不传 kokoroBaseUrl
+  // 时与以前完全一致；传了也仍默认本地 Edge TTS，只有同时传
+  // preferredVoiceBackend 为 VoiceProviderKind.openAiCompatible 时
+  // 才切到 Kokoro（见 _resolveVoiceProvider）。密钥走安全存储
+  // （voiceCredentials 未传时用 FlutterSecretVault），Kokoro 本地
+  // 服务通常无密钥，无密钥时请求不带 Authorization 头。
+  // 不新增操作页面：开关与地址目前只走本函数参数（调用方传入），
+  // UI 设置入口待以后接现有语音/模型配置页时再加。
+  String? kokoroBaseUrl,
+  String kokoroTtsVoice = OpenAiCompatibleVoiceProvider.kokoroDefaultVoice,
+  String kokoroTtsModel = OpenAiCompatibleVoiceProvider.kokoroDefaultModel,
+  VoiceCredentials? voiceCredentials,
+  VoiceProviderKind preferredVoiceBackend = VoiceProviderKind.local,
 }) => AppScaffoldConfig(
   authProvider: TangramLocalAuthProvider(),
   aiProvider: aiProvider,
@@ -70,8 +88,15 @@ AppScaffoldConfig buildTangramConfig({
   // （speech_to_text）真实实现，TTS 补上已实测的 Edge TTS；注入后 app_router
   // 自动启用 enableVoice，麦克风按钮、录音波形（真实声级）、转写全部生效。
   // 云端后端（OpenAI 兼容 / ElevenLabs）由 VoiceProviderRegistry 切换，
-  // 未配置密钥时诚实报未配置、不伪造成功。
-  voiceProvider: LocalVoiceProvider(stt: SpeechToTextVoiceProvider()),
+  // 未配置密钥时诚实报未配置、不伪造成功；Kokoro 本地 TTS 见上方
+  // kokoroBaseUrl / preferredVoiceBackend 参数（默认关闭）。
+  voiceProvider: _resolveVoiceProvider(
+    kokoroBaseUrl: kokoroBaseUrl,
+    kokoroTtsVoice: kokoroTtsVoice,
+    kokoroTtsModel: kokoroTtsModel,
+    voiceCredentials: voiceCredentials,
+    preferredVoiceBackend: preferredVoiceBackend,
+  ),
   theme: TangramTheme.flaiTheme(),
   // 应用显示名：产品名 tangram-agent 的简称，短到 Android 启动器不会截断。
   // 产品全称仍为 tangram-agent（见「关于」区），版本取单一真源 kAppVersion。
@@ -134,3 +159,37 @@ AppScaffoldConfig buildTangramConfig({
     topNavActions: <Widget>[_MuteAction()],
   ),
 );
+
+/// 解析语音后端：默认本地（STT 平台识别 + Edge TTS），行为不变。
+/// kokoroBaseUrl 非空时把 Kokoro 后端构造并注册进注册表；是否启用
+/// 由 preferredVoiceBackend 决定，未传 Kokoro 地址时传
+/// openAiCompatible 也会被忽略、留在本地。
+/// 同步构造期不做异步自检：Kokoro 自检只查 baseUrl 在位、无密钥也
+/// 通过；服务未起时首次合成/转写如实抛错，不伪装可用。
+VoiceProvider _resolveVoiceProvider({
+  String? kokoroBaseUrl,
+  required String kokoroTtsVoice,
+  required String kokoroTtsModel,
+  VoiceCredentials? voiceCredentials,
+  required VoiceProviderKind preferredVoiceBackend,
+}) {
+  final VoiceProvider local = LocalVoiceProvider(
+    stt: SpeechToTextVoiceProvider(),
+  );
+  final String kokoroUrl = (kokoroBaseUrl ?? '').trim();
+  if (kokoroUrl.isEmpty) return local;
+  final VoiceProviderRegistry voiceRegistry = VoiceProviderRegistry();
+  voiceRegistry.register(local);
+  final OpenAiCompatibleVoiceProvider kokoro =
+      voiceRegistry.registerKokoro(
+    credentials:
+        voiceCredentials ?? VoiceCredentials(const FlutterSecretVault()),
+    baseUrl: kokoroUrl,
+    ttsModel: kokoroTtsModel,
+    ttsVoice: kokoroTtsVoice,
+  );
+  if (preferredVoiceBackend == VoiceProviderKind.openAiCompatible) {
+    return kokoro;
+  }
+  return local;
+}
