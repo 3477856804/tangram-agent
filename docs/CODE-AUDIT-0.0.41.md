@@ -289,3 +289,71 @@ caps=[]，`seamAllowed()` 在 caps 为空时非 T3 一律放行。以下修复�
 8. 回退前自动备份计入 20 份快照上限：快照列表已满时，本次备份会淘汰最旧一份；若目标快照恰是最旧那份，它会在备份落盘时被逐出列表——`restoreSnapshot` 手里已有快照对象引用，本次回退仍能完成，但事后列表里不再有它。
 9. `handle('set_mode')` 的调用方注意：`_setMode` 现在失败返回结构化 `{ok:false}` 而不是抛异常；`_persistConfig` 抛错不再穿出 `handle()`。
 10. 本轮 8.2 第 3 条（`restoreSnapshot` 中途失败留半回退状态、快照 id 碰撞）**已关闭**，由本节覆盖；其余 8.2 条目维持原状。
+
+## 10. round15 修复（2026-11-26 19:00 轮次，基线 825ab421）
+
+本轮主项：沙箱审计第二阶段（9.4 遗留第 ③ 项）。HEAD 未变（仍为
+825ab421），直接在 round14 融合树上做；不含 round12/13 重基。本轮只改
+`frontend/lib/harness/{core,sandbox_proot_provider,sandbox_provider,audit_log}.dart`、
+`frontend/lib/agent/sandbox/sandboxed_shell.dart`、
+`frontend/lib/harness/embedded_backend.dart`（另加本文档一节、conformance
+G5c 7 条关卡、本地断言脚本两处），未动 `plugin_kernel.dart`、
+`kernel_guard.dart`、`approval_gate.dart`、`security_policy.dart`、
+`builtin_plugins.dart`、`im/*`。
+
+### 10.0 审计结论（实证，旧行为）
+
+| 缺口 | 旧行为 | 证据 |
+|---|---|---|
+| dispatch 层 deny/ask 无审计 | `ToolRegistry._policyCheck` 的 deny 决定只以 error 字符串回给调用方，不留审计；ask 获批（一次性凭据已消费）同样无记录；hook 为空时 ask 按拒绝处理完全无声 | 旧 `core.dart` `_policyCheck`（约 305–360 行）；`_requestToolApproval` 只在建单时记一条 approval 审计 |
+| cube ask 缺口 | `SandboxedShell.denyCheck` 只查 deny；策略判 ask 的表达式直接执行，不建单、不消费一次性凭据 | `embedded_backend.dart` 构造注释“只查 deny：ask/auto 不建单、不消费一次性凭据（第二阶段再补 ask）” |
+| proot 后端无 deny/审计 | `ProotSandboxProvider.exec` 不调 `checkDeny`、不 `fireAudit`；同接口的 Local 后端 round14 已接 | 旧 `sandbox_proot_provider.dart` `exec`（约 68–130 行） |
+| 审计日志 append O(n) 且无轮转 | 每次 append 全量 `_readEvents()` 取尾 hash；`audit.jsonl` 只增不减 | 旧 `audit_log.dart` `append` |
+| `SandboxAuditEvent` 两份同形实现 | `sandbox_provider.dart` 与 `sandboxed_shell.dart` 各一份，字段顺序靠人工保持一致 | round14 本文档 9.4 遗留；round14 断言脚本 §4 逐行比对两份 detail |
+
+### 10.1 修复（新行为）
+
+| 项 | 新行为 | 旧行为对照 |
+|---|---|---|
+| dispatch 审计 | `ToolRegistry` 新增 `ToolPolicyAuditEvent{tool, decision, rule, detail}` + `ToolPolicyAuditCallback`；`_policyCheck` 在 deny / ask 获批 / ask 被拒时发事件（decision `'deny'`/`'ask_approved'`/`'ask_denied'`，rule 取 `matchedRuleId`，detail 为 `tool=… rule=… args=<前 160 字符>`）；allow、无 ask、read 级、自带守卫工具（shell/workspace.*，已有各自审计）、未接线时不发，避免日志洪水；回调包 try/catch，抛错不改变 `run()` 行为 | 无记录 |
+| dispatch 审计接线 | `EmbeddedBackend` 构造：`tools.onPolicyDecision` 落盘 `category 'security'`、`action 'tool_dispatch_<decision>'`，ask_approved 记 decision `allowed`、其余记 `denied` | 未接线 |
+| cube ask | `SandboxedShell` 新增 `SandboxAskCheck`（返 ask 规则 id 或 null）/`SandboxAskApproval`（返 bool）+ `askCheck`/`onAskApproval` 字段；`exec` 在 deny 预检之后、`_env!.exec` 之前插入 ask 流程：askCheck 抛错 fail-closed 记 `denied` 审计；命中 ask 时调 onAskApproval，hook 为空或返回 false 记 `denied` 审计并拒绝（无审批入口与已建单两种文案区分），返回 true 继续执行；askCheck 为空时行为与之前完全一致 | ask 直接执行 |
+| cube ask 接线 | `EmbeddedBackend` 构造：`askCheck` 复评策略（仅 ask 时返 `matchedRuleId`）；`onAskApproval` → 新增 `_requestCubeApproval`（照抄 `_requestToolApproval`：grantKey `'cube|<表达式截 160>'`，先消费一次性凭据，否则建单 action `'执行表达式: $cube <前 80 字符>'` 并记 `cube_approval_required` 审计）；旧“第二阶段再补 ask”注释已更新 | 未接线 |
+| proot 钩子 | `ProotSandboxProvider.exec` 照抄 Local 顺序：takeoverRefusal 之后、installed 检查之前加 Stopwatch + `checkDeny`，命中直接返回；尾部成功/失败收尾处加一条 `fireAudit`（fromCommand，tool `'shell'`，decision 按 ok 取 allowed/failed，exit 用真实 exitCode）；not-installed / `proot.run` 返回 null 的 early return 在执行体启动前，不记执行审计 | 无 deny、无审计 |
+| 审计轮转 | `AuditLog` 新增 `AuditLog.forDirectory(Directory root, {maxFileBytes = 512KB})`；当前文件达到阈值时在串行链内轮转为 `audit-<yyyyMMdd-HHmmss>-<seq>.jsonl`，新文件先写轮转标记事件（category `'audit'`、action `'rotated'`、decision `'info'`、detail `'prev=<旧尾 hash> file=<旧文件名>'`、prevHash=旧尾 hash），哈希链跨文件不断；`all()`/`query()`/`stats()`/`verifyChain()`/`exportJsonl()` 按时间顺序读全部轮转文件 + 当前文件；`exportJsonl()` 改为导出全部文件拼接（旧版只导出当前文件） | 无轮转；导出只含当前文件 |
+| append 去 O(n) | 尾 hash 缓存：懒加载时 RandomAccessFile 从尾部倒读最后一行非空行（单行超长/尾行损坏时全量读兜底）；append 成功更新缓存；importJsonl 每写一条后置空，写失败也置空 | 每次全量读文件取尾 hash |
+| `SandboxAuditEvent` 单一真源 | canonical 类新增 `fromExpression` 工厂（shell 版语义逐字移植：tool `'cube'`、cwd `'.'`、provider `'isolate-cube'`、空表达式回落、首词截断 40）；删除 `sandboxed_shell.dart` 里的重复类与重复静态 helper；shell 侧加 `import` + `export … show SandboxAuditEvent`（export 本身不把名字带入本文件名字空间，只加 export 时 analyze 曾报 9 个错，补 import 后清零），`cube_shell.SandboxAuditEvent`（`embedded_backend.dart` 在用）继续解析；`fromCommand` 行为与 detail 格式逐字未动 | 两份同形实现，靠人工同步 |
+| AuditLog 可测试性 | `audit_log.dart` 不再 import `store.dart`（后者经 path_provider 牵出 `dart:ui`，纯 Dart VM 无法加载）：旧构造 `AuditLog(store: store)` 保留、调用点不变，内部只取 `store.root`（`final Object? store` + dynamic 访问，刻意为之，见文件头注释）；轮转断言脚本因此可在纯 Dart VM 跑 | import store.dart，VM 无法加载 |
+
+### 10.2 本轮验证结果
+
+| 验证 | 结果 |
+|---|---|
+| 新 Dart VM 断言脚本 `~/workspace/tangram-agent-work/check_sandbox_audit_phase2_round15.dart` | ✅ **76 passed / 0 failed**（dispatch 审计：deny/ask 获批/ask 被拒/hook 为空/allow 不发/回调抛错不影响 run/未接线旧行为；proot 与 cube 链路因 import Flutter 只做结构断言） |
+| 新 Dart VM 断言脚本 `~/workspace/tangram-agent-work/check_audit_rotation_round15.dart` | ✅ **167 passed / 0 failed**（无轮转一致性、多次轮转跨文件读取与标记核对、轮转后继续追加、import 后追加、fromCommand/fromExpression detail 逐字比对、结构断言） |
+| `check_sandbox_audit_round14.dart`（已更新两处过时断言以反映统一后的状态：`_fireAudit` 出现 6→8 次；“两份 detail 行一致”改为唯一真源断言） | ✅ **118 passed / 0 failed**（原 116 + 新增 2） |
+| `check_restore_dirty_round14.dart` / `check_kernel_guard_round13.dart` / `check_kernel_guard_round12.dart` | ✅ **95 / 110 / 46 passed，0 failed** |
+| round2–11 回归 17 个 `_r12` 脚本 | ✅ **全部通过** |
+| `node tests/conformance_0_0_41.mjs` | ✅ **40 passed / 0 failed**（33 → 40，新增 G5c 7 条关卡：dispatch 审计、接线、cube ask 钩子顺序与接线、proot 钩子、轮转、唯一真源） |
+| `node frontend/tool/gen_mosaic_registry.mjs --check` | ✅ 通过（2 面板） |
+| pytest 全套 | ✅ **262 passed / 8 skipped**（与 round14 基线逐项持平） |
+| `flutter analyze`（全量） | ✅ **No issues found**（0 issues） |
+| `flutter test` / Dart 编译 / 真机 | ❌ **未跑**（llamadart 的 `.so` 是 arm64、宿主是 x64，原生资产构建失败，环境限制；`flutter test` 尝试 1 次即在构建 native assets 阶段失败，未再反复试） |
+| cube ask / proot exec 的**行为** | ❌ **未在 VM/真机跑到**（两文件 import Flutter，纯 Dart VM 无法加载；只做了源码结构断言 + analyze + 代码复核） |
+
+### 10.3 仍然保留的诚实边界与已知局限
+
+1. 尾 hash 缓存假设同一目录只有一个 `AuditLog` 实例；外部进程直接改写 audit 文件时缓存可能过期（写失败与 import 时会置空自愈，多实例并发不在契约内）。
+2. `importJsonl` 导入的事件仍不进哈希链（旧行为未变）：导入后下一 append 重新从磁盘读尾，链尾接在最后一条导入事件上，导入事件自身的 prevHash 不与链衔接，`verifyChain` 会在导入事件处按 legacy/断裂口径报告——与 round14 之前一致，未在本轮扩大范围。
+3. dispatch 审计只覆盖 `run()` 层的策略决定：`run()` 捕获的工具执行异常仍只以 error 结果回给调用方，不另记审计（轨迹层记录结果）；`shell`/`workspace.*` 的 allow 决定不记（各自守卫只记 ask/deny，见 `_workspaceGuard` 与 `_shellExec`）。
+4. cube ask 的 fail-closed 与 `onAskApproval` 抛错按 false 计，均经代码走读，未经真实表达式触发。
+5. 脏标志启动标脏缓解（9.4 遗留）与 Pages 审批卡（语义待定夺）仍未做，见 10.4。
+6. `SandboxAuditEvent` 两份同形实现已合并，但三份 deny 正则的漂移点仍在（见 8.2 遗留）。
+7. `exportJsonl()` 改为全量拼接是行为变化：调用方原先只拿到当前文件，现拿到全部轮转文件 + 当前文件；备份/导出场景更完整，增量同步场景需注意去重。
+
+### 10.4 下一轮可做的
+
+1. 脏标志启动标脏缓解（9.4 遗留第 ⑤ 项；需先定“启动即脏是否阻塞首轮挂载”语义）。
+2. Pages 审批卡 + `unapprove()`（需先定“批准是否等于置顶”语义）。
+3. 沙箱审计第三阶段：dispatch 路径 ask 的 allow 决定抽样审计、proot 之外后端的审计覆盖核查、审计导出去重约定。
+4. `PluginTier.parse` 未知值兜底 T1 的收紧（见 8.2 遗留）。
