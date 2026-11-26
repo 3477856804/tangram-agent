@@ -7,13 +7,21 @@
 ///   绝不伪装成已切换成功。
 /// - 注册表本身不持有任何密钥；密钥只存在 [VoiceCredentials] 背后的
 ///   安全存储里，切换原因与返回值里永不出现密钥明文。
+/// - Kokoro 本地 TTS：见 [registerKokoro]，用 OpenAI 兼容协议接本地
+///   Kokoro-FastAPI（默认 http://localhost:8880/v1，模型 kokoro，
+///   音色 af_heart，无密钥）；默认不注册、不启用，本地 Edge TTS 仍是
+///   默认后端。注册只构造 provider，不验证服务是否真的在跑。
 library;
 
+import 'package:http/http.dart' as http;
+
+import 'openai_compatible_voice_provider.dart';
+import 'voice_credentials.dart';
 import 'voice_provider.dart';
 
 class VoiceProviderRegistry {
   VoiceProviderRegistry({VoiceProvider? defaultProvider})
-      : _current = defaultProvider;
+    : _current = defaultProvider;
 
   final Map<VoiceProviderKind, VoiceProvider> _providers =
       <VoiceProviderKind, VoiceProvider>{};
@@ -28,6 +36,32 @@ class VoiceProviderRegistry {
   void register(VoiceProvider provider) {
     _providers[provider.kind] = provider;
     _current ??= provider;
+  }
+
+  /// 构造并注册 Kokoro 本地 TTS 后端（OpenAI 兼容协议，见
+  /// [OpenAiCompatibleVoiceProvider.kokoro]），返回该后端。
+  /// 默认 baseUrl / 模型 / 音色即 Kokoro-FastAPI 的默认值；
+  /// 不改当前后端——要启用须再调 [switchTo]（自检只查 baseUrl 在位，
+  /// 不要求密钥、不联网）。重复注册会覆盖同 kind 的旧后端。
+  OpenAiCompatibleVoiceProvider registerKokoro({
+    required VoiceCredentials credentials,
+    String baseUrl = OpenAiCompatibleVoiceProvider.kokoroDefaultBaseUrl,
+    String ttsModel = OpenAiCompatibleVoiceProvider.kokoroDefaultModel,
+    String ttsVoice = OpenAiCompatibleVoiceProvider.kokoroDefaultVoice,
+    String? language,
+    http.Client? client,
+  }) {
+    final OpenAiCompatibleVoiceProvider kokoro =
+        OpenAiCompatibleVoiceProvider.kokoro(
+          credentials: credentials,
+          baseUrl: baseUrl,
+          client: client,
+          ttsModel: ttsModel,
+          ttsVoice: ttsVoice,
+          language: language,
+        );
+    register(kokoro);
+    return kokoro;
   }
 
   List<VoiceProviderKind> get registeredKinds =>
