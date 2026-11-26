@@ -9,6 +9,16 @@ import 'package:path/path.dart' as p;
 
 import 'cube_schema.dart';
 
+/// `SandboxAuditEvent` 唯一真源在 `harness/sandbox_provider.dart`，
+/// 本文件不再自有重复实现，直接 export（round15 统一）：
+/// `cube_shell.SandboxAuditEvent`（embedded_backend.dart 在用）与本文件内
+/// 引用都解析到同一 canonical 类；`sandbox_provider.dart` 只 import
+/// `sandbox_takeover.dart`，不 import agent 代码，无 import 环。
+/// 注意：export 本身不把名字带入本文件的名字空间（Dart 规则），本文件
+/// 内的引用靠下面这行 import 解析；两者缺一不可。
+import 'package:tangram/harness/sandbox_provider.dart' show SandboxAuditEvent;
+export 'package:tangram/harness/sandbox_provider.dart' show SandboxAuditEvent;
+
 /// 命名稳定错误：能力缺失 / 未知 cube 时抛出。沙箱以「显式拒绝 + 零执行」
 /// 回应，绝不静默降级成不受限执行（对齐 flutter_agent_harness 的 `_refusal`）。
 class RefusalError implements Exception {
@@ -362,84 +372,11 @@ typedef SandboxDenyCheck = Future<String?> Function(
 /// 回调抛错时调用方一律吞掉，绝不阻断执行。
 typedef SandboxAuditCallback = void Function(SandboxAuditEvent event);
 
-/// cube 执行审计事件（round14 第一阶段）：只记元数据，绝不记表达式原文与输出。
-///
-/// 字段约定与 `harness/sandbox_provider.dart` 的 `SandboxAuditEvent` 一致
-/// （`tool` / `first` / `chars` / `cwd` / `exit` / `ms` / `provider` / `rule`；
-/// `decision` 走审计写入的 decision 参数，不进 detail）。
-/// 本文件 import `package:flutter/foundation.dart`（`ChangeNotifier`），
-/// 在纯 Dart VM 下无法加载 harness 层，故此处保留一份同形实现；
-/// 字段顺序与 detail 格式须与 canonical 实现保持一致
-/// （见 check_sandbox_audit_round14.dart §4）。
-class SandboxAuditEvent {
-  const SandboxAuditEvent({
-    required this.tool,
-    required this.first,
-    required this.chars,
-    required this.cwd,
-    required this.exit,
-    required this.ms,
-    required this.provider,
-    required this.rule,
-    required this.decision,
-  });
+/// ask 预检回调（第二阶段）：返回命中 ask 的规则 id，未命中返回 null。
+typedef SandboxAskCheck = Future<String?> Function(String cube, String expression);
 
-  final String tool;
-  final String first;
-  final int chars;
-  final String cwd;
-  final int exit;
-  final int ms;
-  final String provider;
-  final String rule;
-  final String decision;
-
-  /// 审计 detail 字符串：`k=v` 空格分隔，与 canonical 格式一致。
-  String get detail =>
-      'tool=$tool first=$first chars=$chars cwd=$cwd '
-      'exit=$exit ms=$ms provider=$provider rule=$rule';
-
-  Map<String, dynamic> toJson() => <String, dynamic>{
-        'tool': tool,
-        'first': first,
-        'chars': chars,
-        'cwd': cwd,
-        'exit': exit,
-        'ms': ms,
-        'provider': provider,
-        'rule': rule,
-        'decision': decision,
-        'detail': detail,
-      };
-
-  /// 从 cube 表达式构造事件：cube 执行无 cwd（记 '.'），首词取表达式
-  /// 首个空白分隔 token（≤40 字符），空表达式回落为工具名。
-  factory SandboxAuditEvent.fromExpression({
-    required String expression,
-    required int exit,
-    required int ms,
-    required String decision,
-    String rule = '',
-  }) {
-    final String text = expression.trim();
-    String first = 'cube';
-    if (text.isNotEmpty) {
-      final String token = text.split(RegExp(r'\s+')).first;
-      first = token.length > 40 ? token.substring(0, 40) : token;
-    }
-    return SandboxAuditEvent(
-      tool: 'cube',
-      first: first,
-      chars: text.length,
-      cwd: '.',
-      exit: exit,
-      ms: ms,
-      provider: 'isolate-cube',
-      rule: rule,
-      decision: decision,
-    );
-  }
-}
+/// ask 审批回调：返回 true＝已获批（一次性凭据已消费），false＝已建审批单待人工确认。
+typedef SandboxAskApproval = Future<bool> Function(String cube, String expression);
 
 /// 应用级沙箱门面（单例）。加载契约后即具备能力校验与执行能力；
 /// 契约加载失败则永久处于拒绝态（零执行），绝不假装安全。
@@ -461,6 +398,16 @@ class SandboxedShell extends ChangeNotifier {
 
   /// 执行审计回调（可选，由 EmbeddedBackend 在构造时注入；只收元数据）。
   SandboxAuditCallback? onAudit;
+
+  /// ask 预检回调（可选，由 EmbeddedBackend 在构造时注入；只查 ask，
+  /// 返回命中 ask 的规则 id，未命中返回 null）。
+  /// 挂在单例本身而非内核对象上：hotSwap 只换插件节点，不重建本单例，
+  /// 也不重跑 EmbeddedBackend._bootKernel，回调不会被热替换丢掉。
+  SandboxAskCheck? askCheck;
+
+  /// ask 审批回调（可选，由 EmbeddedBackend 在构造时注入；ask 命中时调用，
+  /// 返回 true=已获批继续执行，false=已建审批单待人工确认）。
+  SandboxAskApproval? onAskApproval;
 
   /// 审计发送：回调为空或抛错时静默跳过，绝不阻断执行。
   void _fireAudit(SandboxAuditEvent event) {
@@ -545,6 +492,54 @@ class SandboxedShell extends ChangeNotifier {
           error: '表达式被安全策略拒绝（规则 $rule）',
           cube: cube,
         );
+      }
+    }
+    // round15 第二阶段：ask 预检 + 审批。只查 ask，不碰 deny/allow；
+    // askCheck 未接线时行为与之前完全一致。
+    final SandboxAskCheck? ask = askCheck;
+    if (ask != null) {
+      String? askRule;
+      try {
+        askRule = await ask(cube, expression);
+      } on Object {
+        _fireAudit(SandboxAuditEvent.fromExpression(
+          expression: expression,
+          exit: -1,
+          ms: execSw.elapsedMilliseconds,
+          decision: 'denied',
+        ));
+        return SandboxResult(
+          ok: false,
+          error: '安全策略检查失败，拒绝执行',
+          cube: cube,
+        );
+      }
+      if (askRule != null && askRule.isNotEmpty) {
+        bool approved = false;
+        final SandboxAskApproval? approval = onAskApproval;
+        if (approval != null) {
+          try {
+            approved = await approval(cube, expression);
+          } on Object {
+            approved = false;
+          }
+        }
+        if (!approved) {
+          _fireAudit(SandboxAuditEvent.fromExpression(
+            expression: expression,
+            exit: -1,
+            ms: execSw.elapsedMilliseconds,
+            decision: 'denied',
+            rule: askRule,
+          ));
+          return SandboxResult(
+            ok: false,
+            error: approval == null
+                ? '表达式需人工确认：未接审批入口，拒绝执行'
+                : '表达式需人工确认后才能执行（已建审批单，批准后重试）',
+            cube: cube,
+          );
+        }
       }
     }
     try {
