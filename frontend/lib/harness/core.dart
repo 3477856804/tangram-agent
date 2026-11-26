@@ -222,6 +222,31 @@ Map<String, dynamic> validateToolArguments({
   return Map<String, dynamic>.unmodifiable(arguments);
 }
 
+/// round15：ToolRegistry 策略决策审计事件（不可变小类）。
+///
+/// 只在 deny / ask 获批 / ask 被拒时发出；allow、read 级、自带守卫工具、
+/// 未接线时不发事件（避免日志洪水）。decision 取值：
+/// 'deny' / 'ask_approved' / 'ask_denied'。
+class ToolPolicyAuditEvent {
+  const ToolPolicyAuditEvent({
+    required this.tool,
+    required this.decision,
+    required this.rule,
+    required this.detail,
+  });
+
+  final String tool;
+  final String decision;
+  final String rule;
+
+  /// canonical 形：`tool=<name> rule=<id> args=<argsText 前 160 字符>`。
+  final String detail;
+}
+
+/// ToolRegistry 策略决策审计回调：收到 [ToolPolicyAuditEvent] 后记审计。
+/// 回调抛错由调用方吞掉，绝不改变 run() 的行为。
+typedef ToolPolicyAuditCallback = void Function(ToolPolicyAuditEvent event);
+
 /// 具名工具集合：注册 / 查重 / 查找 / 参数校验 / 执行。失败契约与参考项目
 /// 一致：未知工具抛 [ToolNotFoundException]，参数非法抛
 /// [ToolValidationException]，两者都被 [run] 转成 error [ToolResult]。
@@ -242,6 +267,11 @@ class ToolRegistry {
   /// false＝已建审批单待人工确认；null＝无审批入口，ask 按拒绝处理。
   Future<bool> Function(String tool, Map<String, dynamic> args)?
       onApprovalRequired;
+
+  /// 策略决策审计回调（round15，可选）：deny / ask 获批 / ask 被拒时
+  /// 各发一条 [ToolPolicyAuditEvent]；allow、read 级、自带守卫工具、
+  /// 未接线时不发事件。回调抛错被吞掉，绝不改变 run() 行为。
+  ToolPolicyAuditCallback? onPolicyDecision;
 
   /// run() 层跳过策略检查的工具：它们在 execute 内自己过策略并消费
   /// 一次性批准凭据（shell → _shellExec，workspace.* → _workspaceGuard），
@@ -330,6 +360,12 @@ class ToolRegistry {
     final PolicyDecision decision =
         policy.evaluate(tool: name, path: path, args: argsText);
     if (decision == PolicyDecision.deny) {
+      _emitPolicyDecision(
+        'deny',
+        policy.matchedRuleId(tool: name, path: path, args: argsText),
+        name,
+        argsText,
+      );
       return <String, dynamic>{
         'ok': false,
         'error': '工具 $name 被安全策略拒绝执行',
@@ -338,9 +374,36 @@ class ToolRegistry {
     if (decision == PolicyDecision.ask) {
       final Future<bool> Function(String, Map<String, dynamic>)? hook =
           onApprovalRequired;
-      final bool approved =
-          hook == null ? false : await hook(name, validated);
-      if (!approved) {
+      if (hook == null) {
+        // 无审批入口：ask 按拒绝处理，同时记一条 ask_denied 审计
+        //（此前是完全无声的拒绝）。
+        _emitPolicyDecision(
+          'ask_denied',
+          policy.matchedRuleId(tool: name, path: path, args: argsText),
+          name,
+          argsText,
+          note: '无审批入口',
+        );
+        return <String, dynamic>{
+          'ok': false,
+          'error': '工具 $name 需人工确认后才能执行（已建审批单，批准后重试）',
+        };
+      }
+      final bool approved = await hook(name, validated);
+      if (approved) {
+        _emitPolicyDecision(
+          'ask_approved',
+          policy.matchedRuleId(tool: name, path: path, args: argsText),
+          name,
+          argsText,
+        );
+      } else {
+        _emitPolicyDecision(
+          'ask_denied',
+          policy.matchedRuleId(tool: name, path: path, args: argsText),
+          name,
+          argsText,
+        );
         return <String, dynamic>{
           'ok': false,
           'error': '工具 $name 需人工确认后才能执行（已建审批单，批准后重试）',
@@ -348,6 +411,35 @@ class ToolRegistry {
       }
     }
     return null;
+  }
+
+  /// round15：策略决策审计事件发送。只在 deny / ask 获批 / ask 被拒时
+  /// 调用；allow、read 级、自带守卫工具、未接线时不调用本方法。
+  /// detail 用 canonical 形 `tool=<name> rule=<id> args=<argsText 前 160 字符>`。
+  /// 回调抛错被吞掉，绝不改变 run() 的行为；回调为 null 时行为与旧版逐字一致。
+  void _emitPolicyDecision(
+    String decision,
+    String ruleId,
+    String tool,
+    String argsText, {
+    String note = '',
+  }) {
+    final ToolPolicyAuditCallback? cb = onPolicyDecision;
+    if (cb == null) return;
+    final String args =
+        argsText.length > 160 ? argsText.substring(0, 160) : argsText;
+    final String detail =
+        'tool=$tool rule=$ruleId args=$args${note.isEmpty ? '' : ' $note'}';
+    try {
+      cb(ToolPolicyAuditEvent(
+        tool: tool,
+        decision: decision,
+        rule: ruleId,
+        detail: detail,
+      ));
+    } on Object {
+      // 审计回调抛错绝不阻断工具执行。
+    }
   }
 
   List<Map<String, dynamic>> describe() =>
