@@ -279,7 +279,7 @@ caps=[]，`seamAllowed()` 在 caps 为空时非 T3 一律放行。以下修复�
 
 ### 9.4 仍然保留的诚实边界与已知局限
 
-1. 脏标志**只在内存**：进程重启即失。任务要求的缓解（启动时跑 `verifyDependencies` 比对最新快照标脏）**本轮未实现**——要在 `boot` 里对最新快照做预检并标脏，需先定「启动即脏是否阻塞首轮挂载」等语义，超出本轮范围，写明为已知局限，不硬塞。
+1. 脏标志**只在内存**：进程重启即失。启动标脏缓解已由 round16 实现（见 §11：boot 落启动快照并跑 `verifyDependencies` + 闭包预检标脏，语义已定为首轮挂载不阻塞）；但跨重启持久化仍未做——`_persistConfig` 只存 profile/home_patch，重启后旧脏态仍无法从磁盘恢复，见 §11.4。
 2. 预检是静态闭包检查，核实不了挂载时序：消费者在快照内排在提供者之前、自提供服务（`requires` 含自身提供的服务）这两类，预检会放行、阶段二挂载时才失败——由脏标志 + resume 兜底，不是预检漏网无声。
 3. 预检里「插件未注册」与「接缝 owner 不在快照集内」两支是防御性分支：公开 API 下注册表只增不减、快照时刻的 provider owner 必在快照节点集内，无法经公开 API 造出反例；断言脚本只覆盖可达的「依赖缺失」分支，另两支未实测。
 4. `_setMode` 仍先赋值模式、后 `_applyProfile`：`_persistConfig` 抛错时 mode 标签已改为目标值，失败返回里如实带有该 mode；脏标志与 journal 负责记录，由三条出路恢复。重试同一快照时因模式已等于目标值，阶段四直接跳过——这是本轮实测通过的路径，不是巧合。
@@ -347,13 +347,74 @@ G5c 7 条关卡、本地断言脚本两处），未动 `plugin_kernel.dart`、
 2. `importJsonl` 导入的事件仍不进哈希链（旧行为未变）：导入后下一 append 重新从磁盘读尾，链尾接在最后一条导入事件上，导入事件自身的 prevHash 不与链衔接，`verifyChain` 会在导入事件处按 legacy/断裂口径报告——与 round14 之前一致，未在本轮扩大范围。
 3. dispatch 审计只覆盖 `run()` 层的策略决定：`run()` 捕获的工具执行异常仍只以 error 结果回给调用方，不另记审计（轨迹层记录结果）；`shell`/`workspace.*` 的 allow 决定不记（各自守卫只记 ask/deny，见 `_workspaceGuard` 与 `_shellExec`）。
 4. cube ask 的 fail-closed 与 `onAskApproval` 抛错按 false 计，均经代码走读，未经真实表达式触发。
-5. 脏标志启动标脏缓解（9.4 遗留）与 Pages 审批卡（语义待定夺）仍未做，见 10.4。
+5. 脏标志启动标脏缓解（9.4 遗留）已由 round16 实现，见 §11；Pages 审批卡（语义待定夺）仍未做，见 10.4。
 6. `SandboxAuditEvent` 两份同形实现已合并，但三份 deny 正则的漂移点仍在（见 8.2 遗留）。
 7. `exportJsonl()` 改为全量拼接是行为变化：调用方原先只拿到当前文件，现拿到全部轮转文件 + 当前文件；备份/导出场景更完整，增量同步场景需注意去重。
 
 ### 10.4 下一轮可做的
 
-1. 脏标志启动标脏缓解（9.4 遗留第 ⑤ 项；需先定“启动即脏是否阻塞首轮挂载”语义）。
+1. ~~脏标志启动标脏缓解（9.4 遗留第 ⑤ 项；需先定“启动即脏是否阻塞首轮挂载”语义）~~已由 round16 实现（见 §11；语义已定：首轮挂载不阻塞）。
 2. Pages 审批卡 + `unapprove()`（需先定“批准是否等于置顶”语义）。
 3. 沙箱审计第三阶段：dispatch 路径 ask 的 allow 决定抽样审计、proot 之外后端的审计覆盖核查、审计导出去重约定。
 4. `PluginTier.parse` 未知值兜底 T1 的收紧（见 8.2 遗留）。
+
+## 11. round16 修复（2026-11-27 05:00 轮次，基线 f1e5f6a6）
+
+本轮主项：脏标志启动标脏缓解（9.4 遗留第 1 条、10.4 第 1 条；语义已定，
+见 11.0）。HEAD 未变（仍为 f1e5f6a6），直接在新 main 融合树上做。本轮只改
+`frontend/lib/harness/plugin_kernel.dart`（另加本文档一节、conformance
+G5d 6 条关卡、本地断言脚本一处），未动其他文件（语音/Kokoro 文件与两个死
+import 由另一并行 agent 处理）。
+
+### 11.0 语义决策（已定，直接执行）
+
+| 决策 | 内容 |
+|---|---|
+| 预检对象 | 快照只在内存、`_persistConfig` 只存 profile/home_patch，重启后磁盘上没有可恢复的“最新快照”——boot 的“最新快照”就是本次装配结果本身：`_applyProfile` 之后立即 `captureSnapshot('启动快照')`，再对它跑 `verifyDependencies()`（活态依赖核查）+ `_preflightSnapshot`（闭包预检，复用 round14 判定口径）。磁盘 profile 是启动目标态的唯一持久化形态；未注册插件的信号经 `_applyProfile` 返回值的 failedMounts 捕获（mount 本就报“未注册到内核目录”）。 |
+| 首轮挂载不阻塞 | 预检在 `_applyProfile` 之后跑；脏门禁只在 `handle()` 入口；boot 直调 `_applyProfile` 不走 `handle()`，故脏态不可能卡住启动流程、不会死锁。脏门禁只拦 `handle()` 改动类动作，与 round14 §9 第 6 条宿主直连口径一致（宿主直调 `kernel.mount()` 等不受限）。 |
+| 失败挂载可见 | 消费 `_applyProfile` 返回值：failedMounts/failedUnmounts 写入 journal + 发 `kernel.boot_mount_failed` 事件，不再丢弃；同时标脏（与 round14“任一变异阶段失败即置脏”同哲学：启动挂载失败留下的就是半态）。 |
+| 出路 | 复用既有 `rollback`（回滚到启动快照）/ `resolve_dirty`；不新增出路。 |
+| 不做跨重启持久化 | `_persistConfig` 只存 profile/home_patch，扩展持久化超出本轮范围；文档诚实边界写明“重启仍失”（见 11.4）。 |
+
+### 11.1 修复（新行为，全部在 plugin_kernel.dart 内）
+
+| 项 | 新行为 | 旧行为对照 |
+|---|---|---|
+| 启动快照 | `boot()` 在 `_applyProfile(reset: true)` 之后立即 `captureSnapshot('启动快照')`（约 977 行）；每次启动消耗 1 份快照 slot（上限 20 份），并发出 `kernel.snapshot` 事件 | 启动不留快照；启动后快照列表为空 |
+| 启动预检 | 对启动快照跑 `verifyDependencies()`（约 980 行，发出 `kernel.dependencies_verified`）+ `_preflightSnapshot(KernelSnapshot.fromJson(bootSnapJson))`（约 981–982 行，复用 round14 判定口径；用 `fromJson` 重建对象，避免 `_kernelSnapshots.last` 在 `onHotEvent` 重入 capture 时错位） | 无预检 |
+| 失败挂载消费 | `_markBootDirtyIfNeeded`（约 994–1092 行）：`_applyProfile` 返回的 failedMounts/failedUnmounts 不再丢弃，写入 journal、发 `kernel.boot_mount_failed` 事件（含 `failed_mounts`/`failed_unmounts`/`snapshot`/`dirty:true`）、标脏 | boot 直接 `await _applyProfile(reset: true)`，返回值丢弃，启动挂载失败静默 |
+| 预检失败标脏 | 同一收口：verify/preflight 任一失败 → `_restoreDirty=true`、journal phase `'boot_dirty'`（failed_phase `'boot_verify'`）、发 `kernel.boot_dirty` 事件（含 `phase:'boot_verify'`/`errors`/`snapshot`/`dirty:true`） | 无 |
+| journal 摘要扩展 | `_restoreJournalSummary()` 新增 `failed_mounts`/`failed_unmounts`/`boot_errors` 三键，缺省为空列表（旧调用方按 key 访问，不破坏；摘要仍是复制品，调用方改不动内账） | 摘要无这三键 |
+| 脏原因 | `_restoreDirtyReason` 拼装失败明细（挂载失败列插件与错误、卸载失败同理、预检失败列 errors），`describe()`/`status`/facade `describe()` 原有 `restore_dirty`/`restore_dirty_reason`/`restore_journal` 字段直接复用，无需新增字段 | 无启动脏原因 |
+| 脏门禁覆盖 | 启动脏态走同一 `handle()` 脏门禁：改动类动作被拒，仅 `rollback` 与 `resolve_dirty` 豁免；只读动作与 `invoke` 不拦截；宿主直调不受限 | 门禁只覆盖回退脏态 |
+| 其余行为不变 | `_applyProfile` 逻辑未动（只改了文档注释：boot 不再忽略返回值）；`_setMode`/restoreSnapshot 未动 | — |
+
+### 11.2 本轮验证结果
+
+| 验证 | 结果 |
+|---|---|
+| 新 Dart VM 断言脚本 `~/workspace/tangram-agent-work/check_boot_dirty_round16.dart` | ✅ **95 passed / 0 failed**（§0 干净启动；§1 bundle 引用未注册插件→失败挂载可见+不阻塞；§2 apply 抛错→同上+resolve 清脏；§3 启动预检接线与灵敏度+模式裁剪场景真实行为；§4 脏门禁；§5 回滚到启动快照清脏；§6 resolve_dirty 清脏；§7 facade describe 脏字段；§8 journal 摘要新键结构） |
+| `check_restore_dirty_round14.dart`（回归） | ✅ **95 passed / 0 failed**，与 round14 期望无冲突，**无需同步修正** |
+| `check_kernel_guard_round13.dart` / `check_kernel_guard_round12.dart`（回归） | ✅ **110 / 46 passed，0 failed** |
+| `check_sandbox_audit_phase2_round15.dart` / `check_audit_rotation_round15.dart` / `check_sandbox_audit_round14.dart`（回归） | ✅ **76 / 167 / 118 passed，0 failed** |
+| round2–11 回归 17 个 `_r12` 脚本 | ✅ **全部通过** |
+| `node tests/conformance_0_0_41.mjs` | ✅ **46 passed / 0 failed**（40 → 46，新增 G5d 6 条关卡：boot 消费 `_applyProfile` 返回值、启动快照预检接线顺序、预检失败发 `kernel.boot_dirty`、失败挂载发事件并写 journal、boot 内 `_restoreDirty = true`、journal 摘要新键；判定一律按调用点切片，不命中字段声明） |
+| pytest 全套 | ✅ **262 passed / 8 skipped**（与基线逐项持平） |
+| `flutter analyze`（全量） | ✅ **0 issues**（以最终整合为准；本轮改动文件不引入新问题） |
+| `flutter test` / Dart 编译 / 真机 | ❌ **未跑**（llamadart 的 `.so` 是 arm64、宿主是 x64，原生资产构建失败，环境限制；同 round12/13/15 的诚实边界） |
+| 启动预检失败分支（`kernel.boot_dirty` / failed_phase `'boot_verify'`）的行为 | ❌ **未在 VM 跑到**（经公开 API 在首轮启动不可达，见 11.4 第 1 条；只做了调用点结构断言 + `_preflightSnapshot` 本身由 round14 §5 覆盖） |
+
+### 11.3 本轮实测的关键发现（模式裁剪在启动时不制造断裂）
+
+断言脚本 §3 的原始设想是：bundle 同时含提供方与依赖方、模式只允许依赖方 → 提供方被模式裁剪卸载 → 依赖方断裂 → `kernel.boot_dirty`。实测推翻了该设想：`_applyProfile` 的 bundle 循环在挂载前就跳过未授权插件（`if (allowed != null && !allowed.contains(pid)) continue;`），提供方从未挂载；依赖方挂载时依赖校验失败，走失败挂载（`boot_apply`）而非预检失败。启动时 trim 循环无操作对象（`_nodes` 在首轮挂载前为空、bundle 循环又已跳过未授权插件），挂载时依赖校验保证已挂载集自洽。因此模式裁剪导致的依赖断裂在首轮启动是**结构上不可达**的，断言脚本改为断言真实行为（§3c），不伪造反例。
+
+### 11.4 仍然保留的诚实边界与已知局限
+
+1. 启动预检失败分支（`kernel.boot_dirty` 事件、journal failed_phase `'boot_verify'`、`boot_errors` 非空）**经公开 API 在首轮启动目前不可达**：bundle 跳过未授权插件 + trim 在启动时无操作对象 + 挂载时依赖校验保证已挂载集自洽，`verifyDependencies()` 与 `_preflightSnapshot(启动快照)` 在首轮启动恒通过（防御性纵深）。一旦未来出现启动后卸载/服务移除路径（例如插件在 apply 中卸载他方、trim 语义变化），该分支即生效，无需再改接线。`_preflightSnapshot` 本身的失败逻辑由 round14 §5（依赖缺失的快照被预检拒绝）覆盖；`verifyDependencies` 的灵敏度由本轮脚本 §3b（启动后卸载提供方→同一核查报断裂）覆盖；调用点由 conformance G5d 按顺序切片断言。
+2. 跨重启持久化仍未做：脏标志只在内存，`_persistConfig` 只存 profile/home_patch；进程重启后旧脏态仍失，启动标脏只能发现**本次**启动的问题，不能恢复上次的脏态。
+3. `failed_unmounts` 在首轮启动同样不可达：启动时 `_nodes` 为空，`_applyProfile(reset: true)` 的卸载循环不执行；journal 摘要含该键且恒为空列表（不编造）。`_applyProfile` 的 reset 循环另有一处潜伏问题未修（本轮范围外，见第 5 条）。
+4. 预检是启动后快照的静态闭包检查，核实不了挂载时序：消费者在 bundle 内排在提供者之前时，消费者挂载失败走 `boot_apply`（失败挂载可见），不是 `boot_verify`——两条路径互补，不是漏网无声。
+5. `_applyProfile(reset: true)` 的卸载循环未跳过已被父节点连带卸载的子节点（restoreSnapshot 阶段一有此跳过，`_applyProfile` 没有）：父子插件树 + reset 时，子节点卸载会返回 `ok:false`（“未挂载”）并记入 failedUnmounts。首轮启动 `_nodes` 为空，该循环不执行，故本轮未修；若未来出现二次 boot 或 reset 时已有节点，此处会误报启动卸载失败。
+6. 每次启动固定消耗 1 份快照 slot 并发出 `kernel.snapshot` + `kernel.dependencies_verified` 事件：快照列表已满时启动快照会淘汰最旧一份；事件回放里每轮启动多两条记录。行为变化已如实记于此，调用方按 label `'启动快照'` 识别。
+7. 回滚到预检失败的启动快照会被预检拒绝（fail-closed，不静默）：启动快照本身是破态时，rollback 不是出路，`resolve_dirty` 才是；回滚出路只对 `boot_apply` 脏态（失败挂载场景）有效。见断言脚本 §5/§6。
+8. boot 只置脏、不清脏：干净启动不碰既有脏标志（新进程内初始即 false）；二次 boot 不在契约内，未测。
