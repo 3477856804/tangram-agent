@@ -147,9 +147,11 @@ typedef SandboxProviderAuditCallback = void Function(
 ///
 /// `decision`（`allowed` / `denied` / `failed`）不进 [detail]——它走
 /// 审计写入的 decision 参数，与 Python 侧的 decision 字段同义。
-/// 本文件是三条执行链里唯一能在纯 Dart VM 加载的审计载体，`detail` 格式
-/// 即 canonical 格式；`SandboxedShell` 侧因 import 分层保留一份同形实现，
-/// 字段顺序与本类须保持一致（见 check_sandbox_audit_round14.dart §4）。
+/// 本类是 `SandboxAuditEvent` 的唯一真源：`SandboxedShell` 侧的重复实现
+/// 已在 round15 删除，改为 export 本类（见
+/// `agent/sandbox/sandboxed_shell.dart`）；`detail` 格式即 canonical 格式
+/// （见 check_sandbox_audit_round14.dart §2/§4 与
+/// check_audit_rotation_round15.dart）。
 class SandboxAuditEvent {
   const SandboxAuditEvent({
     required this.tool,
@@ -214,6 +216,36 @@ class SandboxAuditEvent {
       exit: exit,
       ms: ms,
       provider: provider,
+      rule: rule,
+      decision: decision,
+    );
+  }
+
+  /// 从 cube 表达式构造事件：cube 执行无 cwd（记 '.'），首词取表达式
+  /// 首个空白分隔 token（≤40 字符），空表达式回落为工具名。
+  /// （round15：原 `sandboxed_shell.dart` 的同形实现已并入本类，此处为
+  /// 唯一真源；shell 侧改为 export 本类。语义与原实现逐字一致。）
+  factory SandboxAuditEvent.fromExpression({
+    required String expression,
+    required int exit,
+    required int ms,
+    required String decision,
+    String rule = '',
+  }) {
+    final String text = expression.trim();
+    String first = 'cube';
+    if (text.isNotEmpty) {
+      final String token = text.split(RegExp(r'\s+')).first;
+      first = token.length > 40 ? token.substring(0, 40) : token;
+    }
+    return SandboxAuditEvent(
+      tool: 'cube',
+      first: first,
+      chars: text.length,
+      cwd: '.',
+      exit: exit,
+      ms: ms,
+      provider: 'isolate-cube',
       rule: rule,
       decision: decision,
     );
