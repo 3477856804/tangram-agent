@@ -1,0 +1,456 @@
+# Sign-in and accounts
+
+Choose who can create an account and how people sign in: allowlists, email verification, SSO,
+passkeys and password rules.
+
+## Who can sign up
+
+```env
+SIGNUPS_ENABLED=true
+SIGNUP_ALLOWLIST=you@example.com,@company.com
+```
+
+`SIGNUPS_ENABLED` and `SIGNUP_ALLOWLIST` come from the operator's environment on every start. An empty allowlist clears any old stored list; signup order never grants privileges.
+
+Server configuration belongs in the operator's environment. App accounts cannot change signup policy,
+server integration credentials, or deployment updates, and cannot read deployment security logs.
+
+The first account to sign up gets no special rights. Two kinds of admin exist, and neither can
+change server configuration:
+
+- **Server admins** are the accounts named in `RAKAZO_ADMIN_EMAILS`, comma-separated, once their
+  email is verified. They review plugin submissions, add stdio MCP servers
+  ([integrations](self-host-integrations.md)), choose the model for everyone
+  ([models](self-host-models.md#default-for-everyone)), and, on deployments that sell model
+  credits, give free access at `/admin/access`. Nothing else.
+- **Organization admins** manage the members of their own organization
+  ([Set up a team](#set-up-a-team)). They have no rights over the server or other organizations.
+
+A free-access grant names an email and gives up to $1,000 of model credits, up to 12 free own-key
+months, or both. Whoever owns an organization with that verified email receives it the next time they
+open the app, whether they signed up before or after the grant. A grant can be revoked until it is
+received.
+
+## Set up a team
+
+A team shares one organization. Everyone in it gets their own private space, and shares the spaces
+they choose.
+
+1. **Let teammates sign up.** An invitation does not bypass signup policy. Keep
+   `SIGNUPS_ENABLED=true` and list the team's addresses or domain in `SIGNUP_ALLOWLIST`, or provision
+   them through [SSO](#openid-connect-sso) or [SCIM](#directory-provisioning-scim).
+2. **Give everyone a model.** Teammates without a model of their own use the
+   [deployment model](./self-host-models.md#deployment-model), billed to the operator's key. Each
+   person can still connect their own.
+3. **Invite them to the organization.** In **Settings → Organization → Members**, enter an email
+   and choose **Invite**. The invitee signs in with that address and chooses **Join**. Without
+   [email](#verification-and-password-recovery-email), nothing is sent: choose **Copy invite link**
+   on the pending invitation and send it yourself. Invitations expire after 7 days.
+4. **Share spaces.** In a space's **Settings**, **Invite** lists organization members to add
+   directly. See [Share a space](./spaces.md#share-a-space).
+
+The owner and admins invite people, change roles and remove members; the owner can't be removed. A
+removed member's spaces that nobody else uses pass to whoever removed them.
+
+SSO and SCIM create accounts but don't add anyone to an organization: invite them after their first
+sign-in. A self-hosted server has no seats or billing unless you
+[set it up](./self-host-billing.md).
+
+## Email verification and sign-in codes
+
+With a nonempty signup allowlist and SMTP configured, users—including existing accounts—must
+verify their email to sign in. Without an allowlist, verification never blocks: a password signup
+signs in at once and is sent a verification link that only marks the address verified.
+
+SMTP also enables sign-in with a six-digit emailed code, which expires after ten minutes and allows
+three attempts. A code can create an account, so it follows the same registration and allowlist
+rules as password signup. Signing in with a code to an existing unverified account removes that
+account's password, SSO links and sessions, since nothing proved they belonged to the mailbox
+owner. This is what stops someone who registered another person's address from keeping access.
+A password reset proves the mailbox the same way, so resetting an unverified account's password
+also removes its SSO links, passkeys and paired devices.
+
+Allowlisted signup requires mailbox verification and email delivery, including the first account.
+Without email delivery, use the server-side account bootstrap described below; public signup never marks an address verified or assigns server permissions.
+
+## Installations without email
+
+For an installation without email, first set `SIGNUPS_ENABLED=false` in `.env` and start the stack.
+Create the intended account privately (the password stays in the shell environment):
+
+```bash
+read -r -p "Account email: " OWNER_EMAIL
+read -r -s -p "Account password (at least 16 characters): " OWNER_PASSWORD
+export OWNER_EMAIL OWNER_PASSWORD
+docker compose --env-file .env -f docker-compose.images.yml exec -e OWNER_EMAIL -e OWNER_PASSWORD api node dist/cli/bootstrap-owner.js
+unset OWNER_EMAIL OWNER_PASSWORD
+```
+
+For a source checkout, use `-f infra/compose/docker-compose.yml` instead. This creates an ordinary verified account and a personal workspace, with no server privileges. For an existing unverified account, its password must match before it can be verified; an existing verified account is left unchanged.
+Keep an installation without email on a trusted local network.
+
+## Verification and password recovery email
+
+Password changes for signed-in users require no email configuration. Forgotten-password recovery
+appears on sign-in only when a transactional email provider is available. Rakazo uses a
+provider-neutral contract with Resend API and SMTP adapters. Templates render locally with React
+Email into HTML and plain text, independent of the sending provider.
+
+To use the Resend HTTP API, verify a sending domain and create a sending-only API key restricted
+to that domain, then configure:
+
+```env
+EMAIL_PROVIDER=resend
+EMAIL_API_KEY=replace-with-sending-api-key
+EMAIL_FROM=Rakazo <hello@mail.example.com>
+```
+
+Disable click and open tracking for account email in the provider's domain settings. Resend delivery
+has a ten-second deadline and bounded retries with the same idempotency key, including when a
+response is lost. Errors omit provider response bodies and credentials.
+
+For Amazon SES or another SMTP server, use:
+
+```env
+SMTP_URL=smtps://smtp-user:replace-with-password@smtp.example.com:465
+EMAIL_FROM=Rakazo <no-reply@example.com>
+```
+
+Set `EMAIL_REPLY_TO` to send replies somewhere other than `EMAIL_FROM`.
+
+`EMAIL_PROVIDER=smtp` is optional: an existing `SMTP_URL` continues to select SMTP when no provider
+is specified. `EMAIL_PROVIDER=none` disables external sending. Explicit provider settings take
+precedence over an old `SMTP_URL`; incomplete or unknown provider configurations fail at startup.
+
+Resend also supports SMTP: use `smtp.resend.com`, username `resend`, and an API key as the password. For Amazon
+SES, use the regional SMTP endpoint and SES SMTP credentials; these are different from ordinary AWS
+access keys. Verify the sender/domain with the provider before testing delivery. Keep credentials in
+`.env`, never in tracked files. `smtps://` uses implicit TLS; `smtp://` is also supported but requires
+STARTTLS. Rakazo rejects configuration that disables TLS or certificate verification.
+
+Local source development can use the offline email emulator instead. It captures email without
+contacting a provider:
+
+```env
+EMAIL_EMULATOR=true
+```
+
+The emulator is forcibly disabled when `NODE_ENV=production` and requires the API to bind to a
+loopback host. In `NODE_ENV=development`, captured messages are available from
+`http://127.0.0.1:3100/api/dev/emails` with cache disabled; the API logs only delivery
+metadata, never reset tokens. The inbox route is not registered in test, staging, or production.
+
+Rakazo can also send product emails, each with an unsubscribe link: a welcome email after a new
+account first signs in, a referral email when billing referrals are on, and, with billing
+configured, reminders after a plan starts (connect a model, import an agent). This repository
+holds no wording for them, so each one goes out only when you supply its copy, and only with one
+of the providers above.
+
+Copy is a folder with one `<email>.json` file per email (`welcome`, `referral`,
+`model-connection`, `agent-import`). Each file maps an app language (`en`, `de`, `pt-BR`, ...) to
+that email's strings by key:
+
+```json
+{
+  "en": { "subject": "...", "body": "... {weeks} ..." },
+  "de": { "subject": "...", "body": "... {weeks} ..." }
+}
+```
+
+Every key must be present, and a string must use exactly the `{placeholders}` its key lists in
+`packages/auth/src/email-copy/email-keys.ts`. An email is sent only when its file's English has a
+valid string for every key; a missing or invalid string in another language falls back to that
+English. At startup the API and worker log each email that is off and why.
+
+The app reads the folder from `EMAIL_COPY_DIR` (`/app/email-copy` in the image), so mount yours
+there for both the `api` and `worker` services, or point `EMAIL_COPY_DIR` at it. The worker sends
+the reminders, so give it the same mail settings as the API (the Compose files already do).
+`node packages/auth/scripts/check-email-copy.ts <dir>` checks a folder and fails on anything that
+would leave an email unsent or falling back.
+
+## Password policy
+
+New passwords (signup, reset and change) must be 8 to 128 characters, with no composition rules.
+Optionally reject new passwords that appear in known breaches:
+
+```env
+AUTH_BREACHED_PASSWORD_CHECK_ENABLED=true
+```
+
+This queries the Have I Been Pwned range API, sending only the first five characters of the
+password's SHA-1 hash. It is off by default so the server makes no outside request. If the service
+is unreachable or takes longer than three seconds, the password is accepted and the failure logged.
+
+## OpenID Connect SSO
+
+SSO works with a self-hosted or hosted OpenID Connect provider. Leave its settings unset to
+keep password authentication alone. Configure all three credentials together on the API:
+
+```env
+OIDC_ISSUER=https://identity.example.com
+OIDC_CLIENT_ID=replace-with-client-id
+OIDC_CLIENT_SECRET=replace-with-client-secret
+OIDC_NAME=SSO
+OIDC_SCOPES=openid email profile
+AUTH_PASSWORD_ENABLED=true
+OIDC_ALLOW_SIGNUP_BYPASS=false
+OIDC_EMAIL_VERIFIED_CLAIM=
+OIDC_AUTHORIZATION_PARAMS=
+```
+
+The issuer must be HTTPS and exactly match the discovery document's issuer. Rakazo loads
+`<issuer>/.well-known/openid-configuration`, verifies ID tokens against discovery JWKS with
+issuer, audience and nonce checks, and uses authorization codes with PKCE. Additional scopes
+may be space- or comma-separated; `openid email profile` are always requested. `OIDC_NAME`
+is the button label, defaulting to “SSO”. Secrets remain on the API; Compose clears the worker's
+OIDC credentials. The capabilities endpoint exposes only the label, discovery availability,
+and enabled authentication methods.
+
+Register this redirect URI at the provider (using your public `BETTER_AUTH_URL` origin):
+
+```text
+https://app.example.com/api/auth/callback/oidc
+```
+
+Web, Electron and mobile use the same provider redirect URI. Electron completes SSO in a
+sandboxed in-app popup sharing the app's session, then returns to the main window. Mobile completes the callback
+on the API, then returns to `rakazo://sign-in` (or `rakazo://account` for linking and reauthentication) through Better Auth's Expo authorization proxy
+and a native auth browser session. The `rakazo` app scheme is trusted by the auth server;
+never register a client secret in the mobile app. Mobile stores the resulting session with
+SecureStore, like password sign-in. Native builds need the Expo WebBrowser module.
+
+Provider emails are verified when `email_verified` is the boolean `true` or the string `true`
+in any capitalization. Any other value, including `false` and a missing claim, stays unverified
+on every sign-in, and an unverified claim never changes the account's email. If your provider
+omits `email_verified` and proves the email in a claim of its own, name that claim in
+`OIDC_EMAIL_VERIFIED_CLAIM`; it is read the same way, only when `email_verified` is absent. For
+Microsoft Entra ID, add the optional ID token claims `email` and `xms_edov` under **Token
+configuration** and set `OIDC_EMAIL_VERIFIED_CLAIM=xms_edov`.
+
+Sign-in never links accounts by email, except to claim an account
+[directory provisioning](#directory-provisioning-scim) created.
+If an email belongs to another account, sign in to that existing account and choose **Link SSO**
+in account settings. Linking requires an authenticated session, a verified provider email and
+matching email addresses. With email delivery, an account links SSO only after its email is
+verified. Without it, an unverified account links only from a browser signed in to it, so not
+from the mobile app. The issuer and provider subject identify the linked account thereafter. Changing issuers does
+not reuse an old identity. Old-issuer links remain stored but do not count as linked to the
+current provider, so **Link SSO** becomes available again. Link the new identity from the
+existing signed-in account; authenticated-session, verified-email and matching-email checks
+still apply. Restoring the old issuer makes its existing links usable again.
+
+Ordinary SSO sign-in and linking may reuse the identity provider's existing session. They
+do not grant fresh authentication proof for account deletion. The account settings' explicit
+reauthentication flow requests `prompt=login` and `max_age=0`, binds the callback to the
+same linked issuer and subject, and requires the initiating session to remain valid. Only
+that callback grants proof to the resulting session, expiring five minutes after provider
+authentication (callback delays do not extend it). Its verified
+ID token must contain an `auth_time` consistent with that request (allowing 60 seconds of
+clock skew) and less than five minutes old. Missing, stale or invalid claims fail closed.
+OAuth callbacks are single-use, including concurrent requests. Password verification and
+emailed deletion codes remain available. Submit deletion codes through the account settings
+or the CSRF-protected `POST /api/auth/delete-user` endpoint; the GET deletion callback is disabled.
+
+SSO signup follows closed registration and the deployment allowlist before creating an account.
+Allowlisted provider emails must be verified; signup never bypasses mailbox proof. `OIDC_ALLOW_SIGNUP_BYPASS=true` explicitly admits IdP identities
+without applying the allowlist or its email-verification admission requirement. Enable it only
+when the IdP controls who may join this deployment. It does **not** reopen closed registration,
+and does not change email verification claims or linking rules. Existing admitted accounts can
+sign in while registration is closed.
+
+Set `AUTH_PASSWORD_ENABLED=false` for SSO-only operation. Password sign-in, signup, password
+reset and password mutation endpoints are disabled server-side, and sign-in forms are hidden.
+The API refuses to start in this mode unless all OIDC credentials are configured. It can still
+start while discovery is temporarily unavailable: the provider remains registered, sign-in
+returns a temporary error, and background retries recover without restarting. Discovery is lazy
+on first use, refreshed in the background, and failures back off up to one minute. Availability
+reflects discovery, not a guarantee that the provider's token endpoint is currently reachable.
+
+### Sign-in hints
+
+`OIDC_AUTHORIZATION_PARAMS` adds default parameters to every request that sends someone to the
+provider, written as `name=value` pairs joined with `&`. Values are form-encoded: write `&`, `=`
+and `+` as `%26`, `%3D` and `%2B`, since a bare `+` is read as a space. Use it for the hints a
+provider offers to skip its account or organization picker:
+
+| Provider           | Setting                      | Effect                                                                                                         |
+| ------------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Microsoft Entra ID | `domain_hint=example.com`    | Goes straight to your organization's sign-in, including a federated identity provider if your domain uses one. |
+| Google Workspace   | `hd=example.com`             | Offers only accounts in that domain.                                                                           |
+| Keycloak           | `kc_idp_hint=<alias>`        | Skips the Keycloak login page for the linked identity provider with that alias.                                |
+| Okta               | `idp=<identity provider id>` | Sends people to that identity provider.                                                                        |
+| Any                | `prompt=select_account`      | Asks which account to use, even when only one is signed in.                                                    |
+
+Several can be combined, for example `domain_hint=example.com&prompt=select_account`; a name
+may appear only once. The provider decides whether to honor a hint (an Entra tenant can be set to
+ignore `domain_hint`, for example), so check the sign-in once after setting one. A sign-in request
+that sends its own value for a parameter overrides the default here. The parameters apply to web, desktop and mobile sign-in and to linking, because the API builds the
+request. The API refuses to start if they name a parameter the sign-in flow sets itself
+(`client_id`, `redirect_uri`, `response_type`, `response_mode`, `scope`, `state`, `nonce`,
+`code_challenge`, `code_challenge_method`, `request` or `request_uri`). The explicit
+reauthentication above still sends `prompt=login` and `max_age=0`, whatever is set here. Hints only
+shorten the provider's screens: who may sign in is still decided by the provider and this
+deployment's signup rules.
+
+Account deletion keeps the existing password confirmation for password users. Users without a
+password may delete after explicit organization SSO reauthentication within five minutes; **Sign in again** starts a fresh
+provider round-trip bound to the signed-in account. Choosing a different identity cannot confirm
+deletion or create another account in that flow. A stale or borrowed session alone cannot authorize deletion. With transactional
+email configured, **Send deletion code** sends a single-use code to the account email, valid for ten
+minutes. Enter it in account settings to confirm deletion. Email-code requests are rate-limited;
+invalid, expired or wrong-account codes fail. No password needs to be created for deletion.
+
+## Google and Apple sign-in
+
+Google and Apple sign-in are off until you set their credentials on the API. With nothing set,
+sign-in stays email and password (and any OpenID Connect provider you already configured). Each
+provider turns on only when its own values are complete. Email and password stay available next
+to the buttons.
+
+```env
+GOOGLE_CLIENT_ID=replace-with-client-id
+GOOGLE_CLIENT_SECRET=replace-with-client-secret
+
+APPLE_CLIENT_ID=replace-with-services-id
+APPLE_TEAM_ID=replace-with-team-id
+APPLE_KEY_ID=replace-with-key-id
+APPLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nreplace-with-key\n-----END PRIVATE KEY-----"
+```
+
+Leave a pair empty to keep that provider off. `APPLE_PRIVATE_KEY` is the contents of the Sign in
+with Apple `.p8` file. A line break in the env value can be a real newline or the two characters
+`\n`. To mount the file instead, set `APPLE_PRIVATE_KEY_FILE` to its path and leave
+`APPLE_PRIVATE_KEY` empty. Set one of them, not both. In every Compose variant, this path is
+inside the API container: add an override for the `api` service with a read-only bind mount,
+for example `./secrets/apple.p8:/run/secrets/apple.p8:ro`, and set
+`APPLE_PRIVATE_KEY_FILE=/run/secrets/apple.p8`. The base Compose files do not mount host keys.
+
+The API signs Apple's client secret itself (ES256, from the key, team id, and key id), caches
+it, and signs a new one before it expires. Apple refuses a secret dated more than six months
+ahead, so there is nothing to rotate by hand and no client-secret JWT to paste in.
+
+Register these redirect URIs, using your public `BETTER_AUTH_URL` origin:
+
+```text
+https://app.example.com/api/auth/callback/google
+https://app.example.com/api/auth/callback/apple
+```
+
+For Google, create a web OAuth client and add that redirect URI. For Apple, create a Services ID
+(that value is `APPLE_CLIENT_ID`), enable Sign in with Apple on it, and return to the same
+redirect URI. The key is created under Keys with Sign in with Apple enabled; its id is
+`APPLE_KEY_ID`, and the team id is on the account page. Download the `.p8` once and store it
+with the API's other secrets.
+
+Web, desktop, and mobile use browser OAuth with the same callback URLs. iOS renders the native
+Apple button when available; it starts browser authorization rather than acquiring a bare identity
+token. Native token submission is not supported: the browser flow binds authorization to one-use
+server state and a nonce. The App Store requires an Apple option on a build that offers Google.
+
+Existing accounts connect Google, Apple, or generic OpenID Connect through authenticated
+linking in account settings. Matching provider and account emails never implicitly link them:
+historical provider verification does not prove current control of a mailbox hosted elsewhere.
+
+Linking requires the provider's verified email to match the verified Rakazo email. A different
+provider address, including Apple's Hide My Email relay address, cannot be linked to that account.
+
+Signup through Google or Apple follows the same closed registration and allowlist as email
+signup. The provider email must be verified before any social account is created. Google verification
+counts only for Gmail or a matching verified Workspace domain. Apple verification counts only for
+Apple-managed mailboxes and relay addresses. Other provider mailboxes cannot
+create an account through social signup; verify an account through email and link it in settings.
+
+Google and Apple sign-in and linking do not confirm sensitive actions. Their browser sessions
+may be cached; an account chooser, consent screen, or nonce does not prove fresh authentication.
+Use a password, an emailed confirmation code, or organization OIDC with verified fresh `auth_time`.
+Social-only accounts on servers without a supported confirmation method or email delivery cannot
+self-confirm sensitive actions, including account deletion. The operator must configure a supported
+method; the interface hides unavailable confirmation options.
+
+## Directory provisioning (SCIM)
+
+Your identity provider can add people to Rakazo and remove them over SCIM 2.0. Generate a token
+(`openssl rand -hex 32`) and set it on the API:
+
+```env
+SCIM_BEARER_TOKEN=<your generated token>
+```
+
+In the identity provider, set the SCIM base URL to `https://app.example.com/api/auth/scim/v2`
+(your `BETTER_AUTH_URL` origin) and the bearer token to that value. The token manages users only;
+group requests are refused. Rotating it means changing the value and restarting the API.
+
+- **Adding a person** creates an account with their email, unverified, and no password. It
+  joins Rakazo even while signup is closed or the allowlist would refuse it, so
+  `SIGNUPS_ENABLED=false` with SCIM admits exactly the people the directory assigns. They sign in
+  through [SSO](#openid-connect-sso) (the first SSO sign-in with the same verified email claims the
+  account) or with an emailed sign-in code.
+- **A person who already has an account** keeps it: the directory takes it over by email without
+  changing its name, email or logins, and can then turn it off. Only an account whose email was
+  verified is taken over. Anyone could have signed up first with an address nobody proved, so
+  the directory gets a conflict for it, as it does when two accounts' emails differ only by case;
+  the operator decides what to do with those accounts.
+- **Turning a person off** (`active: false`) or **deleting** them deactivates the account at once.
+  It ends every sign-in and paired computer, removes notification registrations, cancels runs
+  they started, skips their routines, and refuses any new sign-in, run, webhook delivery or
+  message from their linked chat apps. Their bots, chats, memory, files and connections stay.
+  They also leave every shared space someone else invited them into, as if removed: what they
+  made there passes to that space's owner, and their routines there are paused. Spaces they own
+  stay theirs.
+  Turning them back on restores sign-in and their own spaces, and routines there resume from
+  their next scheduled time. Shared spaces they left need a new invite.
+- **Adding a deleted person again** with the same external id finds their existing account.
+
+Without an identity provider, the operator can do the same from the API container:
+
+```bash
+docker compose --env-file .env -f docker-compose.images.yml exec api \
+  node dist/cli/account-status.js deactivate person@example.com   # or reactivate
+```
+
+While `SCIM_BEARER_TOKEN` is set, it leaves accounts the identity provider manages to the
+provider: it will not turn off one the provider has on, or turn back on one the provider turned
+off or deleted. Once the token is removed, it changes any account. The same command
+finishes a deactivation whose cleanup failed. Sign-in and runs are refused as soon as the account
+is off, and the API logs `directory.account_change.unfinished` with the account id if ending its
+sessions, computers or runs did not complete.
+
+Deactivation and reactivation are recorded as `auth.account.deactivated` and
+`auth.account.reactivated` [security events](./self-host-observability.md#security-events) and in
+each of the person's organizations' [audit log](./self-host-audit-log.md). The directory never
+deletes an account or its content.
+
+## Passkeys
+
+Passkeys are on whenever `WEB_ORIGIN` is an HTTPS domain (or `localhost` in development); the
+relying party is that origin's host, so existing passkeys keep working only while `WEB_ORIGIN`
+stays on the same domain. They are off when password sign-in is disabled for SSO-only
+deployments. On web, a browser offers them where it has a platform authenticator. The macOS
+desktop app uses the system passkey sheet, which only serves the domain the release is
+associated with (`app.rakazo.com`), so it hides passkeys for other servers.
+
+Native apps can use a domain's passkeys only when the domain vouches for them and the app was
+built for that domain. The iOS app's associated domain comes from `EXPO_PUBLIC_API_URL` at build
+time. A macOS desktop build takes it from `RAKAZO_PASSKEY_RP_ID` (default `app.rakazo.com`): set
+it to the same domain for `pnpm build` and for `apps/desktop/scripts/passkey-entitlements.ts`, then package with
+electron-builder's `-c.mac.entitlements` set to that script's output and `-c.mac.provisioningProfile`
+set to a profile for your App ID with the Associated Domains capability, as the release workflow
+does. Without both, macOS ignores the association and the app hides passkeys. When Apple's CDN
+cannot reach the server (a private network or a VPN such as Tailscale), also set
+`RAKAZO_PASSKEY_DEVELOPER_MODE=1` for either build: a development-signed app then fetches the
+association file itself, once associated-domains developer mode is on (Settings > Developer on
+iOS, `sudo swcutil developer-mode -e true` on macOS, where the app must also live in
+`/Applications`). To let a build use this server's passkeys, set:
+
+```bash
+# iOS and the macOS desktop app (dev.rakazo.desktop): <Apple Team ID>.<bundle id>, comma-separated.
+# Served as /.well-known/apple-app-site-association.
+PASSKEY_APPLE_APP_IDS=ABCDE12345.com.rakazo.app,ABCDE12345.dev.rakazo.desktop
+# Android: SHA-256 fingerprints of the app signing certificates, comma-separated.
+# Served as /.well-known/assetlinks.json and accepted as passkey origins.
+PASSKEY_ANDROID_CERT_SHA256=AA:BB:...:FF
+```
+
+Until a platform's setting is set, the native app on that platform hides passkeys for this
+server. Both files are served through the web origin, so a reverse proxy in front of the web container
+must pass `/.well-known/` through to it.

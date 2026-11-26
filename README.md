@@ -174,3 +174,7 @@ python3 -m im.serve --port 50432
 ## 许可
 
 Copyright © 2026 檀阁瑞木 / COSMOn — 闭源专有软件，保留所有权利。
+
+## 第三方归属
+
+- Rakazo（Apache-2.0，`https://github.com/elie222/rakazo`）：架构契约参考；许可证、NOTICE 与参考源码位于 `third_party/rakazo/`。

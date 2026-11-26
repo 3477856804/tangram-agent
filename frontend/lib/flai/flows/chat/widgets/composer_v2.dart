@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../design/dsh_motion.dart';
 import '../../../../design/dsh_tokens.dart';
 import '../../../../design/dsh_widgets.dart';
+import '../../../../design/tga_glass.dart';
 import '../../../../services/model_registry.dart';
 import '../../../../services/persona_store.dart';
 import '../../../../services/audio_transcribe_service.dart';
@@ -423,11 +424,13 @@ class _FlaiComposerV2State extends State<FlaiComposerV2> {
           duration: DshMotion.reduced(context) ? Duration.zero : DshMotion.fast,
           curve: DshMotion.standard,
           decoration: BoxDecoration(
-            color: c.inputMajor,
+            color: c.isDark
+                ? c.inputMajor.withValues(alpha: 0.82)
+                : c.inputMajor.withValues(alpha: 0.86),
             borderRadius: BorderRadius.circular(DshComposerSpec.radius),
             // 聚焦时描边点亮、投影略抬升，明确告诉用户「现在在输入」。
             border: Border.all(
-              color: _focused ? c.business.withValues(alpha: 0.45) : c.borderL1,
+              color: _focused ? c.business.withValues(alpha: 0.45) : c.borderL2,
               width: _focused ? 1.2 : DshComposerSpec.borderWidth,
             ),
             boxShadow: dshLayeredShadow(

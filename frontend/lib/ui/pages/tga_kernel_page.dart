@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import '../../bridge/backend_client.dart';
 import '../../design/tga_design.dart';
+import '../../harness/kernel_guard.dart';
 import '../../ui/i18n/tga_strings.dart';
 
 /// 插件内核（万物皆插件）管理页。
@@ -114,8 +115,10 @@ class _TgaKernelPageState extends State<TgaKernelPage> {
     String action, [
     Map<String, dynamic> extra = const <String, dynamic>{},
   ]) async {
-    final env = await backend.sendControl(
-        'plugin_kernel', <String, dynamic>{'action': action, ...extra});
+    // G2：内核调试页是 UI（root），所有控制消息统一显式带 caller，
+    // 否则改动类动作会被内核的 root 门禁拒绝。
+    final env = await backend.sendControl('plugin_kernel',
+        <String, dynamic>{'action': action, 'caller': kRootCaller, ...extra});
     return _asMap(env.payload);
   }
 

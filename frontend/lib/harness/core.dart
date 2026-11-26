@@ -14,7 +14,10 @@
 
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
+
+import 'package:tangram/harness/security_policy.dart';
 
 // ---------------------------------------------------------------------------
 // 1. 协作取消（移植自 flutter_agent_harness/lib/src/cancel_token.dart）
@@ -219,6 +222,31 @@ Map<String, dynamic> validateToolArguments({
   return Map<String, dynamic>.unmodifiable(arguments);
 }
 
+/// round15：ToolRegistry 策略决策审计事件（不可变小类）。
+///
+/// 只在 deny / ask 获批 / ask 被拒时发出；allow、read 级、自带守卫工具、
+/// 未接线时不发事件（避免日志洪水）。decision 取值：
+/// 'deny' / 'ask_approved' / 'ask_denied'。
+class ToolPolicyAuditEvent {
+  const ToolPolicyAuditEvent({
+    required this.tool,
+    required this.decision,
+    required this.rule,
+    required this.detail,
+  });
+
+  final String tool;
+  final String decision;
+  final String rule;
+
+  /// canonical 形：`tool=<name> rule=<id> args=<argsText 前 160 字符>`。
+  final String detail;
+}
+
+/// ToolRegistry 策略决策审计回调：收到 [ToolPolicyAuditEvent] 后记审计。
+/// 回调抛错由调用方吞掉，绝不改变 run() 的行为。
+typedef ToolPolicyAuditCallback = void Function(ToolPolicyAuditEvent event);
+
 /// 具名工具集合：注册 / 查重 / 查找 / 参数校验 / 执行。失败契约与参考项目
 /// 一致：未知工具抛 [ToolNotFoundException]，参数非法抛
 /// [ToolValidationException]，两者都被 [run] 转成 error [ToolResult]。
@@ -229,6 +257,26 @@ class ToolRegistry {
 
   final Map<String, AgentTool> _tools = <String, AgentTool>{};
   final List<String> duplicateNotes = <String>[];
+
+  /// 审批/策略检查（round13，可选接线）：由 EmbeddedBackend 注入真实策略
+  /// 引擎与审批单入口。未接线（测试/纯 Dart 用）时不拦截，保持旧行为。
+  /// 只对 exec/write 级工具过策略；read 级工具不受影响。
+  Future<PermissionPolicy?> Function()? policyProvider;
+
+  /// 策略判为 ask 时调用：返回 true＝已获批（一次性凭据已消费），
+  /// false＝已建审批单待人工确认；null＝无审批入口，ask 按拒绝处理。
+  Future<bool> Function(String tool, Map<String, dynamic> args)?
+      onApprovalRequired;
+
+  /// 策略决策审计回调（round15，可选）：deny / ask 获批 / ask 被拒时
+  /// 各发一条 [ToolPolicyAuditEvent]；allow、read 级、自带守卫工具、
+  /// 未接线时不发事件。回调抛错被吞掉，绝不改变 run() 行为。
+  ToolPolicyAuditCallback? onPolicyDecision;
+
+  /// run() 层跳过策略检查的工具：它们在 execute 内自己过策略并消费
+  /// 一次性批准凭据（shell → _shellExec，workspace.* → _workspaceGuard），
+  /// run() 层再查一次会在重试时把凭据重复消费、凭空多建审批单。
+  static const Set<String> _selfGuardedTools = <String>{'shell'};
 
   int get length => _tools.length;
   List<String> get names => List<String>.unmodifiable(_tools.keys);
@@ -255,6 +303,10 @@ class ToolRegistry {
   bool contains(String name) => _tools.containsKey(name);
 
   /// 三段式执行：lookup → validate → execute。异常一律转成 error 结果。
+  /// round13：exec/write 级工具在 execute 前先过一次权限策略
+  ///（PermissionPolicy.evaluate；shell 与 workspace.* 除外，见上）。
+  /// deny 直接拒绝；ask 无审批入口或未获批时拒绝并提示已建审批单——
+  /// 绝不静默放行。ptc_batch 走的也是这里（逐 call 调 run），一并覆盖。
   Future<ToolResult> run(
     String name,
     Map<String, dynamic> arguments, {
@@ -269,9 +321,124 @@ class ToolRegistry {
         toolName: name,
       );
       tool.throwIfCancelled(cancelToken);
+      final Map<String, dynamic>? denied =
+          await _policyCheck(name, tool, validated);
+      if (denied != null) return ToolResult.error(denied['error'] as String);
       return await tool.execute(validated, cancelToken);
     } on Object catch (e) {
       return ToolResult.error('$e');
+    }
+  }
+
+  /// exec/write 级工具的策略检查：未接线返回 null（不拦截）；read 级、
+  /// 自带守卫的工具返回 null。返回非 null 即拒绝原因。
+  Future<Map<String, dynamic>?> _policyCheck(
+      String name, AgentTool tool, Map<String, dynamic> validated) async {
+    if (tool.tier == ApprovalTier.read) return null;
+    if (_selfGuardedTools.contains(name) || name.startsWith('workspace.')) {
+      return null;
+    }
+    final Future<PermissionPolicy?> Function()? provider = policyProvider;
+    if (provider == null) return null;
+    final PermissionPolicy? policy = await provider();
+    if (policy == null) return null;
+    String argsText;
+    try {
+      argsText = jsonEncode(validated);
+    } on Object {
+      argsText = validated.toString();
+    }
+    if (argsText.length > 500) argsText = argsText.substring(0, 500);
+    String path = '';
+    for (final String k in <String>['path', 'file', 'cwd', 'command']) {
+      final Object? v = validated[k];
+      if (v is String && v.isNotEmpty) {
+        path = v;
+        break;
+      }
+    }
+    final PolicyDecision decision =
+        policy.evaluate(tool: name, path: path, args: argsText);
+    if (decision == PolicyDecision.deny) {
+      _emitPolicyDecision(
+        'deny',
+        policy.matchedRuleId(tool: name, path: path, args: argsText),
+        name,
+        argsText,
+      );
+      return <String, dynamic>{
+        'ok': false,
+        'error': '工具 $name 被安全策略拒绝执行',
+      };
+    }
+    if (decision == PolicyDecision.ask) {
+      final Future<bool> Function(String, Map<String, dynamic>)? hook =
+          onApprovalRequired;
+      if (hook == null) {
+        // 无审批入口：ask 按拒绝处理，同时记一条 ask_denied 审计
+        //（此前是完全无声的拒绝）。
+        _emitPolicyDecision(
+          'ask_denied',
+          policy.matchedRuleId(tool: name, path: path, args: argsText),
+          name,
+          argsText,
+          note: '无审批入口',
+        );
+        return <String, dynamic>{
+          'ok': false,
+          'error': '工具 $name 需人工确认后才能执行（已建审批单，批准后重试）',
+        };
+      }
+      final bool approved = await hook(name, validated);
+      if (approved) {
+        _emitPolicyDecision(
+          'ask_approved',
+          policy.matchedRuleId(tool: name, path: path, args: argsText),
+          name,
+          argsText,
+        );
+      } else {
+        _emitPolicyDecision(
+          'ask_denied',
+          policy.matchedRuleId(tool: name, path: path, args: argsText),
+          name,
+          argsText,
+        );
+        return <String, dynamic>{
+          'ok': false,
+          'error': '工具 $name 需人工确认后才能执行（已建审批单，批准后重试）',
+        };
+      }
+    }
+    return null;
+  }
+
+  /// round15：策略决策审计事件发送。只在 deny / ask 获批 / ask 被拒时
+  /// 调用；allow、read 级、自带守卫工具、未接线时不调用本方法。
+  /// detail 用 canonical 形 `tool=<name> rule=<id> args=<argsText 前 160 字符>`。
+  /// 回调抛错被吞掉，绝不改变 run() 的行为；回调为 null 时行为与旧版逐字一致。
+  void _emitPolicyDecision(
+    String decision,
+    String ruleId,
+    String tool,
+    String argsText, {
+    String note = '',
+  }) {
+    final ToolPolicyAuditCallback? cb = onPolicyDecision;
+    if (cb == null) return;
+    final String args =
+        argsText.length > 160 ? argsText.substring(0, 160) : argsText;
+    final String detail =
+        'tool=$tool rule=$ruleId args=$args${note.isEmpty ? '' : ' $note'}';
+    try {
+      cb(ToolPolicyAuditEvent(
+        tool: tool,
+        decision: decision,
+        rule: ruleId,
+        detail: detail,
+      ));
+    } on Object {
+      // 审计回调抛错绝不阻断工具执行。
     }
   }
 

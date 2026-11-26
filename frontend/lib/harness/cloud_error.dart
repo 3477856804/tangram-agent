@@ -47,7 +47,26 @@ bool isRateLimitError(String raw) {
 }
 
 /// 从裸错误里提取网关 message 字段（若有），用于兜底展示时去掉 `{...}` 噪声。
+///
+/// 优先解析标准 JSON 对象（`error.message` / 顶层 `message`）；解析失败或
+/// 字段缺失时，退回正则提取双引号 message，避免把堆栈里的括号噪声带给用户。
 String _extractMessage(String raw) {
+  final String trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      // 本模块保持纯 Dart、不依赖 dart:convert；JSON 结构较简单，先用
+      // 正则兼容常见网关。若后续需要完整对象解析，可在共享位置引入 convert。
+      final RegExp msgRe = RegExp(
+        r'"(?:error\.)?message"\s*:\s*"((?:[^"\\]|\\.)*)"',
+      );
+      final RegExpMatch? m = msgRe.firstMatch(trimmed);
+      if (m != null && m.group(1) != null && m.group(1)!.isNotEmpty) {
+        return m.group(1)!.replaceAll(r'\n', ' ').replaceAll(r'\"', '"');
+      }
+    } on Object {
+      // 正则/转义异常不应阻断兜底展示。
+    }
+  }
   final RegExp re = RegExp(r'"message"\s*:\s*"([^"]*)"');
   final RegExpMatch? m = re.firstMatch(raw);
   if (m != null && m.group(1) != null && m.group(1)!.isNotEmpty) {

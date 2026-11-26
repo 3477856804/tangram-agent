@@ -1,0 +1,476 @@
+# Models
+
+Choose the deployment's default model, connect local or OpenAI-compatible servers, and configure
+approvals, media generation and voice.
+
+English | [简体中文](./zh-CN/self-host-models.md)
+
+## Deployment model
+
+The deployment model is used by anyone who has not connected a model of their own. `PI_DEFAULT_PROVIDER`
+picks the provider and `PI_DEFAULT_MODEL` the model:
+
+| `PI_DEFAULT_PROVIDER`  | Key                  | Default model                |
+| ---------------------- | -------------------- | ---------------------------- |
+| `openrouter` (default) | `OPENROUTER_API_KEY` | `anthropic/claude-haiku-5.5` |
+| `anthropic`            | `ANTHROPIC_API_KEY`  | `claude-sonnet-5`            |
+| `deepseek`             | `DEEPSEEK_API_KEY`   | `deepseek-flash`             |
+
+Pick a vision-capable model so screenshot computer tools stay available.
+
+A provider that authenticates from the host needs no key: for Amazon Bedrock with an ECS task,
+IRSA or EC2 instance role, opt in with `PI_DEFAULT_CREDENTIALS=host` and set
+`PI_DEFAULT_PROVIDER=amazon-bedrock`, `PI_DEFAULT_MODEL` and `AWS_REGION`. With an instance
+role, keep [restricted computer egress](./self-host-docker-computers.md#restricted-computer-egress) on so bot computers
+cannot read the role's credentials from the metadata endpoint.
+
+Google Vertex works the same way with `PI_DEFAULT_PROVIDER=google-vertex`, using the host's
+application default credentials (`GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_PROJECT`,
+`GOOGLE_CLOUD_LOCATION`). Runs on host credentials are billed to that cloud account.
+
+On a server only you use, the deployment model can also run through the
+[Claude Code CLI](#claude-code-cli) signed in on the host.
+
+The Compose files also pass the standard provider key variables the agent runtime reads itself
+(`OPENAI_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `GROQ_API_KEY`, `XAI_API_KEY` and others) to
+the API and worker, for models that have no stored credential.
+
+### Default for everyone
+
+Admins (`RAKAZO_ADMIN_EMAILS`) can set the deployment model in **Settings → Models → Default for
+everyone** instead: choose a provider that connects with an API key, paste the key and pick the
+model. It replaces `PI_DEFAULT_PROVIDER` and `PI_DEFAULT_MODEL` for everyone without a model of
+their own, from their next run and without a restart; **Default** goes back to the environment's.
+The key is stored encrypted, is never shown again, and is redacted from run output like the
+environment's. Each change is recorded in the security audit log.
+
+`RAKAZO_MODEL_PROVIDER_ALLOWLIST` applies to it like any connection an account makes: a provider
+the list leaves out is not offered, and a saved one stops serving and the environment's model
+applies again. Deployments with model credits always run on the operator's own connection, so the
+block is not offered there and a saved choice is ignored. Calls the operator pays for, such as the
+deployment's approval checker, keep using the environment's keys. Messaging apps with open signup
+are turned on at startup only when the environment configures a model.
+
+`RAKAZO_LIVE_MODEL_CATALOG=off` (or `false`, `0`, `no`) disables provider and Codex live catalog probing; the default is on, and an unrecognized value stops the API at startup.
+
+## Approvals
+
+Approvals have three modes in **Settings → Approvals**: Never ask skips ordinary approval prompts, Auto lets an
+approval model pass actions that fit the request, and Ask asks before any change. A space starts
+in Auto, which asks like Ask until an approval model is available. Each
+person can allow or block single tools and sites in every mode, and a space can customize its
+approvals apart from the account.
+All modes still enforce block rules and safety checks. Purchases always require a person's approval;
+unattended runs that cannot request approval refuse them.
+
+In **Settings → Models → Approval model**, each user can select a model
+from an existing connection and add ordered backups, independently of their main model. Personal
+connections use their own credentials; hosted calls follow the same Rakazo credit rules as chat.
+Backups are tried only when a checker fails. An explicit ask, including an uncertain decision,
+still requires a person.
+
+The deployment checker remains the default when no approval model is selected. For OpenRouter
+Jev, set `RAKAZO_AUTO_REVIEW_PROVIDER=openrouter` and
+`RAKAZO_AUTO_REVIEW_MODEL=typesafe/jev-1.14`; it uses `OPENROUTER_API_KEY` and the Decisions API.
+TypeSafe direct remains available through `RAKAZO_AUTO_REVIEW_PROVIDER=jev` and
+`TYPESAFE_API_KEY`. Core runs without either hosted service.
+
+With TypeSafe, `RAKAZO_AUTO_REVIEW_MODEL` defaults to `jev-latest`, and
+`RAKAZO_AUTO_REVIEW_MIN_CONFIDENCE` (0 to 1) is the confidence below which Auto asks the person
+instead. Unset, each decision model uses its own calibrated floor (`0.5` for Jev). `RAKAZO_AUTO_REVIEW_TIMEOUT_MS` (200 to 30000, default `10000`) bounds each
+check.
+
+## Local models
+
+To use an operator-controlled OpenAI-compatible server such as Ollama, LM Studio, llama.cpp, or
+MLX, list its model IDs and an endpoint that both the API and worker processes can reach:
+
+```env
+RAKAZO_LOCAL_MODELS=qwen3:4b,llama3.1:8b,qwen3-vl
+RAKAZO_LOCAL_MODELS_URL=http://127.0.0.1:11434/v1
+# Optional: key for a server that requires one, sent as the bearer token.
+RAKAZO_LOCAL_MODELS_API_KEY=
+RAKAZO_LOCAL_CONTEXT_WINDOW=32768
+RAKAZO_LOCAL_MAX_TOKENS=4096
+# Optional: model ids on this endpoint that accept images (screenshot computer tools).
+RAKAZO_LOCAL_VISION_MODELS=qwen3-vl
+# Optional: model ids on this endpoint that accept OpenAI-style reasoning_effort.
+RAKAZO_LOCAL_REASONING_MODELS=qwen3:4b
+# Optional: prompt tokens per minute the server accepts (a rate-limited key or quota).
+RAKAZO_LOCAL_TOKENS_PER_MINUTE=200000
+# Optional: off when the server does not cache prompts.
+RAKAZO_LOCAL_PROMPT_CACHE=off
+```
+
+Set `RAKAZO_LOCAL_MODELS_API_KEY` when the server requires a key, such as LiteLLM, vLLM started
+with `--api-key`, or a company gateway. Every request to `RAKAZO_LOCAL_MODELS_URL` then sends it as
+`Authorization: Bearer`; unset, requests carry the placeholder `local`. Like the other deployment
+keys, it stays on the API and worker and is redacted from run output. Use HTTPS unless the network
+is trusted. To make a local model the deployment model, set `PI_DEFAULT_PROVIDER=local`,
+`PI_DEFAULT_MODEL` to one of `RAKAZO_LOCAL_MODELS` and `PI_DEFAULT_CREDENTIALS=host`.
+
+A model in `RAKAZO_LOCAL_REASONING_MODELS` offers thinking levels and sends the chosen level as
+`reasoning_effort` (`medium` by default, `none` when thinking is off). Other local models never
+receive the field.
+
+`RAKAZO_LOCAL_MAX_TOKENS` is the output limit sent with every request to a local model, unless the
+connection sets its own max-tokens value. It never exceeds a quarter of
+`RAKAZO_LOCAL_CONTEXT_WINDOW`, so the prompt keeps the rest; a higher limit leaves less room for the
+prompt, so long chats are compacted sooner.
+
+A server behind a rate-limited key (a free tier, an organisation token quota) often answers `429`
+with a fixed `Retry-After` of a minute, so each rejected call costs a minute. Set
+`RAKAZO_LOCAL_TOKENS_PER_MINUTE` to the server's prompt-token limit and Rakazo paces calls to the
+local provider under it with a sliding one-minute window, waiting only as long as the window needs.
+The estimate is calibrated against the prompt tokens the server reports. Leave some headroom if
+other clients share the key; a `429` that still happens keeps the usual `Retry-After` handling.
+Unset, calls are sent as soon as they are ready. Like the other token limits, a value that is not
+a positive integer is rejected when the local provider is configured.
+
+Rakazo keeps a run's earlier messages unchanged between calls so a server's prompt cache keeps
+hitting, and trims old page state only when that saves more than the cache would. A new message in
+the same chat starts with the previous turn exactly as it was sent, so the cache carries over
+between turns too. A server without
+prompt caching (several hosted gateways and confidential-compute endpoints report no cached
+tokens) gets nothing from that, and old page snapshots are only sent again on every call. Set
+`RAKAZO_LOCAL_PROMPT_CACHE=off` to declare this: stale page state is then trimmed once about 3,000
+tokens of it have built up. Unset, behaviour is unchanged.
+
+The loopback default is suitable when running Rakazo from a source checkout. From containers,
+prefer a stable LAN RFC1918 address (not Compose service DNS alone). On Docker Desktop,
+`host.docker.internal` also works.
+On Docker Desktop, a bot computer shell can often reach services bound to host `127.0.0.1`
+through that same hostname. Do not run sensitive unauthenticated services on loopback while
+bots run, or firewall / block that path. Linux does not get `host.docker.internal` the same
+way by default.
+Only configure an endpoint you control: prompts, attachments, and tool results sent to that model
+leave Rakazo through this URL. Leave `RAKAZO_LOCAL_MODELS` blank to disable the provider.
+
+## Claude Code CLI
+
+Claude Pro and Max plans already work on any install through **Sign in with Claude** in
+**Settings → Models** ([model subscriptions](./model-subscriptions.md)). As an alternative, a server
+that only you use can run its deployment model through the official Claude Code CLI, signed in with your own account. For each model turn Rakazo starts the
+`claude` command installed on the server and reads its reply. Rakazo never reads, stores, forwards
+or refreshes your Claude sign-in, and every request to Anthropic is the CLI's own. Rakazo keeps the
+conversation, tools, memory and approvals: the CLI only answers as the model, with its own tools,
+settings and project files turned off. Each model turn continues the CLI's saved session from the
+turn before, including the first turn of a new message in the same chat, so its prompt cache
+carries over, and Rakazo removes each session once it moves on.
+
+What it needs:
+
+- The API and worker running from a source checkout on the same machine as the CLI, as the same
+  OS user. The official Docker images and the desktop app's local stack do not include Claude
+  Code, and adding it to them is not supported.
+- Claude Code 2.1.280 or newer on that user's `PATH`, signed in once in a terminal as that user
+  with `claude auth login`. On a server without a browser, the CLI can use the token
+  `claude setup-token` creates instead: set it as `CLAUDE_CODE_OAUTH_TOKEN` together with
+  `RAKAZO_CLAUDE_CODE_SETUP_TOKEN=1` in the API's and worker's environment. Either way there is
+  no Claude sign-in inside Rakazo. Prefer the token: with `claude auth login`, the CLI tells the
+  model the signed-in account's email, so bots may repeat it. With the token, the CLI runs with an
+  empty config directory of its own and the email stays out.
+- One account on the server. A Claude sign-in belongs to one person, so Rakazo refuses Claude Code
+  runs while the server has more than one account (people who only message bots from chat apps do
+  not count) or bills for model usage.
+
+```env
+PI_DEFAULT_PROVIDER=claude-code
+PI_DEFAULT_CREDENTIALS=host
+PI_DEFAULT_MODEL=claude-sonnet-5
+```
+
+Use a full model id the CLI accepts with `claude --model`, so Rakazo knows the model's context
+and output limits. Usage counts against your own Claude plan and its limits, which assume
+ordinary individual use; Rakazo shows no cost for these runs, and once the plan's limit is reached
+runs fail with a rate-limit error until it resets. Your use of Claude Code is covered by
+Anthropic's terms; see [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance).
+
+The CLI runs in an empty private temporary directory with an allowlisted environment. API keys and
+other server secrets, including `ANTHROPIC_API_KEY`, are never passed to it, so it always uses its
+own sign-in. `RAKAZO_CLAUDE_CODE_SETUP_TOKEN=1` adds only `CLAUDE_CODE_OAUTH_TOKEN`, which the CLI
+reads and Rakazo does not. Only the deployment model runs on Claude Code; it is not offered as a
+connection in **Settings → Models**.
+
+## OpenCode CLI
+
+A server that only you use can run its bots through the official OpenCode CLI, so models and plans
+that OpenCode offers only in its own app, such as its free models, work for your bots. For each
+turn Rakazo starts `opencode acp` on the server and talks to it over the Agent Client Protocol, the
+same way an editor does. OpenCode runs the bot's turn itself, and Rakazo keeps the chat, memory and
+approvals: OpenCode gets the bot's instructions as its system prompt and Rakazo's tools through a
+private connection on this machine, and every tool call goes through Rakazo's approvals as usual.
+OpenCode's own tools, plugins, MCP servers, skills and instruction files are turned off, and a turn
+in which OpenCode tries to use one of its own tools is stopped. Rakazo never reads, stores or
+refreshes your OpenCode sign-in.
+
+What it needs:
+
+- The API and worker running from a source checkout on your own computer, as the same OS user as
+  the CLI. OpenCode can reach that computer's files and network, so this is only for your own
+  machine: the official Docker images and hosted servers do not include it.
+- OpenCode on that user's `PATH`. Its free models need no sign-in; for a plan or provider, sign in
+  once in a terminal as that user with `opencode auth login`.
+- One account on the server. The CLI's sign-in and plan are one person's, and the CLI runs with
+  that person's access to the computer, so Rakazo refuses OpenCode runs while the server has more
+  than one account (people who only message bots from chat apps do not count) or bills for model
+  usage.
+
+The desktop app's **This computer** server is not covered yet: it has no setting for a
+deployment model, and it looks for commands only in a few standard folders, which do not include
+where OpenCode's own installer puts it. Run from a source checkout instead.
+
+```env
+PI_DEFAULT_PROVIDER=opencode-cli
+PI_DEFAULT_CREDENTIALS=host
+PI_DEFAULT_MODEL=opencode/big-pickle
+```
+
+Use a model id from `opencode models`. Each chat continues OpenCode's session from its previous
+turn, so OpenCode keeps its context and prompt cache; after a restart, the next turn starts a new
+session with the recent chat. Bots on OpenCode can use their computer's screen and see the images
+people send, through the same tools and approvals as any bot, when the model OpenCode runs takes
+images. Rakazo goes by its own model list where it knows the model, so a text-only model gets
+neither. Usage counts against your OpenCode plan or provider, and Rakazo shows no cost
+for these runs. Your use of OpenCode and of the models it reaches is covered by their own terms.
+
+The CLI runs in a private working folder with an allowlisted environment: API keys and other server
+secrets are never passed to it. Only the deployment model runs on OpenCode; it is not offered as a
+connection in **Settings → Models**.
+
+## Antigravity CLI
+
+A server that only you use can run its bots through Google's official Antigravity CLI (`agy`), so
+a Google plan that covers Antigravity works for your bots. For each turn Rakazo starts `agy acp`
+on the server and talks to it over the Agent Client Protocol, as described for
+[OpenCode](#opencode-cli): the CLI runs the bot's turn with Rakazo's tools and approvals, and
+Rakazo keeps the chat and memory. Every session turns off all of the CLI's built-in tools, and a
+turn in which it tries to use one is stopped. The CLI adds the bot's instructions to its own
+system prompt rather than replacing it. Rakazo never reads or refreshes your Google sign-in.
+
+What it needs:
+
+- The API and worker running from a source checkout on your own computer, as the same OS user as
+  the CLI. As with OpenCode, this is only for your own machine.
+- `agy` on that user's `PATH`, signed in once in a terminal as that user with `agy acp --login`.
+  Rakazo finds that sign-in in the default `~/.gemini`, so leave `GEMINI_HOME` unset when you sign
+  in.
+- One account on the server, as with the other CLI routes.
+
+```env
+PI_DEFAULT_PROVIDER=antigravity-cli
+PI_DEFAULT_CREDENTIALS=host
+PI_DEFAULT_MODEL=<a model the CLI offers>
+```
+
+The CLI runs with a home folder of Rakazo's own in place of `~/.gemini`, linked only to the files
+it keeps its sign-in in, so your Antigravity hooks, MCP servers, skills and other settings stay out
+of the bot's turns. A sign-in the CLI saves there when it refreshes is replaced by the link again
+before the next turn, so signing out or switching accounts with `agy` reaches your bots.
+
+If the model id is not one the CLI offers, the run's error lists the ones it does. Bots on
+Antigravity can use their computer's screen and see the images people send, as on OpenCode. Usage
+counts against your Google plan, and Rakazo shows no cost for these runs. Your use is covered by
+[Google's Antigravity terms](https://antigravity.google/terms).
+
+## Ollama Cloud
+
+In **Settings → Models**, choose **Ollama Cloud**, paste an API key from ollama.com, then choose a model from the list that loads. This uses an OpenAI-compatible connection with no environment configuration, and stays available when `RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC=0`. `RAKAZO_MODEL_PROVIDER_ALLOWLIST` without `ollama-cloud` removes the preset, and with `RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC=0` its host exemption too; see [Limiting model providers](#limiting-model-providers).
+
+## OpenAI-compatible connections
+
+Each user can also connect their own OpenAI-compatible endpoint from **Connect a model** /
+**Settings → Models** on web and mobile. Choose **OpenAI-compatible**, enter the server base URL
+(for example `http://127.0.0.1:8000/v1`), the exact model id, and an optional API key.
+Add optional request headers under **Advanced**; values are stored encrypted, and only their names
+are shown afterwards.
+Public hosts and ordinary hostnames need HTTPS when they receive an API key or custom headers,
+and must resolve only to public addresses. Set `RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC=0` on the API
+and worker to block them.
+Literal private IP, loopback, mDNS `.local` names, and `host.docker.internal` targets do not,
+but they are refused unless `MCP_ALLOW_PRIVATE_ENDPOINT=true` is set on the API and worker, which
+allows them for every user. This is checked on save, on model discovery, and on every run.
+With the Docker images install and the desktop app, a `localhost` or `127.0.0.1` connection
+reaches the computer running Docker (through `host.docker.internal`). On Linux, the model server
+must listen on an address the Docker bridge can reach, not only `127.0.0.1`.
+For a self-hosted endpoint whose hostname resolves to private IPs, set
+`RAKAZO_OPENAI_COMPAT_PRIVATE_HOSTS=models.example.test,other.example.test` in the deployment
+environment for both API and worker, then recreate those containers. Entries are exact hostnames
+(case-insensitive, optional trailing dot), not URLs, suffixes, or wildcards. mDNS `.local` names
+name a LAN host by convention, so they need no entry. mDNS resolves where the API and worker run:
+it works on native installs and mDNS-aware hosts, but usually not on container bridge DNS. These
+hosts ignore `RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC`; every DNS answer must be private, and metadata and
+link-local destinations remain blocked. This applies to discovery and model requests.
+HTTPS still validates the hostname's certificate. Like private IP endpoints, trusted hostnames
+also permit HTTP with API keys; use HTTPS unless the network is trusted. Only allow hosts you
+control. Private endpoints require `MCP_ALLOW_PRIVATE_ENDPOINT=true` for the deployment; no app account bypasses that policy.
+If that endpoint's model
+accepts images, enable **Supports images** under **Advanced** when connecting so attachments and
+screenshot computer tools stay available. Existing connections default to disabled. For centrally
+managed endpoints, the deployment-wide fallback remains
+`RAKAZO_OPENAI_COMPATIBLE_VISION_MODELS=gpt4o-vision,llava`.
+
+## Limiting model providers
+
+Set `RAKAZO_MODEL_PROVIDER_ALLOWLIST=provider1,provider2` in the deployment environment for both
+API and worker, then recreate those containers, to limit which model providers users can connect.
+Entries are the model registry's provider ids (for example `openrouter`, `anthropic`, and
+`openai-compatible` for OpenAI-compatible endpoints). The list applies to the model catalog: a
+provider not on it is not offered, a key for it is refused on save and on import, a bot cannot be
+switched to it, and its runs fail with a clear error. An unset or empty list means every provider,
+exactly the behavior without it.
+
+Hosted OpenAI-compatible presets include Ollama Cloud (`ollama-cloud`), Concentrate AI
+(`concentrate`) and DeepInfra (`deepinfra`). Choose one in **Settings → Models**, enter its API key, and select
+a model. Rakazo loads the list automatically. Their HTTPS hosts remain available with `RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC=0`.
+If you set a provider allowlist, include `openai-compatible` and the ids of the presets you
+want to keep. Leaving out a preset id hides it and removes its host exemption.
+
+## Thinking
+
+For servers that accept standard `reasoning_effort`, enable **Supports thinking** under
+**Advanced** when connecting. The setting is saved on the connection (no env var or restart).
+Existing connections default to disabled. Deployment-local models opt in through
+`RAKAZO_LOCAL_REASONING_MODELS`; reconnect through **Settings → Models** only to move to a personal
+connection.
+
+Enabled connections default to medium thinking. Web and desktop expose **Thinking** in a bot's
+advanced settings; mobile inherits the same backend policy. Rakazo sends standard
+`reasoning_effort` (`minimal`, `low`, `medium`, `high`, or `none` when off); the server owns
+model-specific translation. Leave **Supports thinking** off when the server lacks standard effort
+support. Existing token limits still apply; effort is not a separate reasoning-token budget.
+
+## Prompt cache capabilities
+
+The model connection API accepts `cacheCapabilities`, including `scope`,
+`retentionMs`, `minimumTokens`, and `retentionMode`. Declare a positive
+`retentionMs` only when the endpoint supports prefix reuse for that window.
+For these connections with usable history-retrieval tools, the runtime
+automatically uses cache-aware context:
+recent history remains bounded on a cold request, and subsequent requests keep
+that selected prefix while it is likely warm and fits the context budget.
+Connections with unknown retention or `retentionMode: "none"` retain the default
+retrieval policy, whose kept history starts at the same message for several exchanges in a row
+instead of moving with each one, so the cached prefix holds. An explicit executor context strategy still takes precedence.
+Callers without usable history-retrieval tools keep fitting original history
+under the model's context budget instead of replacing it with snapshots.
+
+Cache warmth is advisory. Changing instructions or tools, context pressure,
+worker eviction, or a process restart can require fresh prompt processing.
+These settings do not create backend KV snapshots or keep a model loaded;
+the inference server is responsible for retention and conversation switching.
+
+## Paid data services
+
+Bots can look up paid data (map places, search results, work emails, people and company profiles,
+social posts, SEO data) through one deployment account. It is off by default. Configure the worker
+(and API for inline execution):
+
+```dotenv
+PAID_SERVICES_PROVIDER=treg
+PAID_SERVICES_API_KEY=replace-with-org-scoped-token
+```
+
+`PAID_SERVICES_PROVIDER` accepts `disabled` (the default), `treg`, or `fake` (for offline testing
+only). `PAID_SERVICES_BASE_URL` points at a self-hosted Treg instead of `https://treg.to`. Use an
+org-scoped token, and keep the account topped up or on automatic top-up: an empty balance makes
+every call fail.
+
+Bots get `service_search` and `service_call` in every run; `service_call` follows the bot's
+approval mode like other actions. Only read-only lookups are offered: actions on accounts, generation tasks, and services that need the account's own connections are left out.
+Each call has a cost ceiling the bot sets and the approval card shows (at most $2) that the
+provider enforces before it charges. When model credits are on, a call first holds that ceiling
+from the organization's credits and then settles to what the provider charged plus 20%, never
+above the ceiling; calls the provider does not bill are
+free. A call that may have run without an answer keeps its hold for the credit
+reconciler to flag. Every call appears in Usage under the `services` provider.
+
+## Image and video generation
+
+Bot media tools are disabled by default. Configure the worker (and API for inline
+execution) with a provider and its generic HTTP connection:
+
+```dotenv
+MEDIA_GENERATION_PROVIDER=fal
+MEDIA_GENERATION_BASE_URL=https://queue.fal.run
+MEDIA_GENERATION_API_KEY=replace-with-media-api-key
+MEDIA_GENERATION_IMAGE_MODEL=fal-ai/flux/schnell
+MEDIA_GENERATION_VIDEO_MODEL=fal-ai/wan/v2.2-a14b/text-to-video
+```
+
+For images only, `openai` uses the Images API (`POST /images/generations`) instead:
+
+```dotenv
+MEDIA_GENERATION_PROVIDER=openai
+MEDIA_GENERATION_BASE_URL=https://api.openai.com/v1
+MEDIA_GENERATION_API_KEY=replace-with-media-api-key
+MEDIA_GENERATION_IMAGE_MODEL=gpt-image-1
+```
+
+`openrouter` makes images through OpenRouter's Images API (`POST /images`) and four-second
+videos through its video jobs API (`POST /videos`); set either model or both:
+
+```dotenv
+MEDIA_GENERATION_PROVIDER=openrouter
+MEDIA_GENERATION_BASE_URL=https://openrouter.ai/api/v1
+MEDIA_GENERATION_API_KEY=replace-with-media-api-key
+MEDIA_GENERATION_IMAGE_MODEL=openai/gpt-image-1-mini
+MEDIA_GENERATION_VIDEO_MODEL=google/veo-3.1-fast
+```
+
+The video model must accept a four-second duration.
+
+`MEDIA_GENERATION_PROVIDER` accepts `disabled` (the default), `fal`, `openai`, `openrouter`, or `fake`
+(for offline testing only). The base URL is optional and defaults to the provider's URL above.
+Only set the image/video model fields for capabilities you want enabled; `openai` takes an
+image model only. Compatible servers can use the same connection fields; models must support
+the corresponding fal queue API and Flux/Wan input and output shapes, or the Images API with
+base64 image data (`b64_json`) in the response. Credentials stay on the server. Set these in
+your deployment secret configuration; never commit actual credentials.
+
+Bots use `generate_image` to attach one image (PNG, JPEG or WebP) or `generate_video` to submit a
+four-second MP4. The video tool returns a job ID and queued/running status. The
+worker keeps checking the job in the background, including after a restart, and
+posts the finished video to the chat that asked for it, once; the bot then gets a
+turn to follow up. A video that fails, or is still unfinished after an hour, is
+marked failed and the bot gets a turn to say so. The bot can also call the tool
+again with `jobId` to check progress. Use the existing per-bot tool switches and action approval rules to
+control access. Both tools require approval by default. Ticket board runs keep
+these chat-only media tools unavailable so ticket work stays on the board.
+
+Each run allows at most two submissions (including failures). Submissions are
+never retried automatically: a lost response can mean the provider accepted and
+charged for the request. Provider errors omit remote response bodies. Configure
+account budgets and rate limits with your provider; the run cap is not a currency
+budget. Provider 429 responses are returned without automatic retries. Outputs
+must fit both the 10 MiB media ceiling and the configured attachment limit;
+larger outputs are rejected.
+
+Images use existing inline chat rendering. MP4 files can be previewed with native
+video controls on web and Electron and opened/downloaded through the existing
+native file flow on mobile. No new mobile player or settings screen is required.
+
+## Voice
+
+### macOS voices
+
+When the API runs on macOS, Voice settings also offers **macOS**, which needs no key. The API renders each reply with the built-in `/usr/bin/say` into an audio clip, so it plays on the listener's device and stops like any other voice. Docker and Linux hosts do not list it.
+
+### Spoken summaries
+
+Off by default. Set `VOICE_SUMMARY_MIN_CHARS` (for example `600`) to have a voice read a bot reply longer than that many characters as a short summary written by that bot's own model. Each summary is an extra model call billed to the bot. The chat keeps the full reply, and if the summary call fails the full reply is read.
+
+### Fish Audio
+
+`FISH_TTS_MODEL` sets the Fish Audio speech model for connections that do not choose one (default
+`s2.1-pro`), and `FISH_ASR_MODEL` the transcription model (default `transcribe-1-pro`). Set them on
+the API and worker.
+
+### Calls
+
+Bots can call a user in the app, and users can hold to talk, when `PHONE_CALLS_ENABLED=true` is set on
+the API and worker. `PHONE_CALL_COOLDOWN_MINUTES` (default `2`) is the minimum time between a bot's
+calls to the same person, and `PHONE_CALL_RING_SECONDS` (default `45`) how long an unanswered call
+rings.
+
+For native mobile ringing and optional APNs VoIP configuration, see [Mobile incoming calls](./self-host-clients.md#mobile-incoming-calls).

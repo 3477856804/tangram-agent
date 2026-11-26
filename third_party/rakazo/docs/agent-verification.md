@@ -1,0 +1,998 @@
+# Agent verification
+
+Generated JSON reports are preserved locally under ignored `test-report/evals/archive/`, with a second backup outside the disposable worktree. They are not tracked documentation or repository downloads; maintained findings and synthetic fixtures remain in source control. Report references below identify local archived evidence, including every original failed and partial run.
+
+Rakazo separates deterministic execution regressions from real-model task quality.
+A scripted response can prove that a tool call executes correctly; only a real
+model can demonstrate that it chooses a useful action for a natural request.
+
+| Layer                   | Real components                                                           | Stand-ins                             | Command                      |
+| ----------------------- | ------------------------------------------------------------------------- | ------------------------------------- | ---------------------------- |
+| Existing fast tests     | Product functions and contracts                                           | Scripted agent, services, sandbox     | `pnpm test`                  |
+| Pi protocol regressions | Pi agent loop, HTTP/SSE parsing, tool dispatch                            | Loopback model endpoint, tool effects | `pnpm test:pi`               |
+| Pi product journey      | API, saved model connection, Postgres, executor, Pi                       | Model endpoint, sandbox, connectors   | `pnpm test:integration`      |
+| Computer replay         | Pi, browser tool handlers, page state                                     | Model endpoint, browser and sandbox   | `pnpm test`                  |
+| Docker computer replay  | Pi, supervisor, Chromium, page helper, downloads and files                | Model endpoint, local fixture website | `pnpm test:computer-replay`  |
+| Agent quality           | Product API, Postgres, executor, Pi, real model                           | Sandbox and connected services        | `pnpm test:evals --live ...` |
+| Vision acceptance       | Product API, Pi, real vision model, Boat or E2B desktop                   | Fixture website                       | `pnpm test:computer`         |
+| Live flows              | Product API, Postgres, Pi, real model, Boat or E2B computer, demo website | The person (a simulated user model)   | `pnpm test:flows`            |
+
+Default and PR tests never require paid inference. Nightly runs only the web
+tests with emulated providers. Docker topology and browser replay have a manual
+workflow; hosted sandboxes and real-model quality runs require an explicit local
+command. Nightly verification never starts computer sandboxes or requests model
+or sandbox credentials.
+Missing live credentials mean **not run**, not a passing model evaluation.
+
+## Paused turn continuity
+
+Human waits release the agent loop and worker compute. Before an approval,
+`ask_user`, `request_takeover`, or `request_secret` pause, the executor stores
+one versioned transcript in an internal external-effect row. It uses the same
+space content keys and encryption setting as messages, never client events or
+the run's choice/takeover marker column. Run and space deletion cascade the row;
+terminal completion, failure, cancellation and expiration clear it.
+
+The next attempt restores the original system prompt and the last provider
+prefix, appending the paused call and its result under its original call ID.
+Approved calls pass through the executor's canonical argument, resource and
+idempotency checks before another model request. Answers and takeover outcomes
+complete the pending interaction; protected input still stays in the secret
+entry path. Restored outside content taints the attempt. Changing models removes
+prior thinking, and aborted assistant tails are discarded.
+
+Restored messages pass through the normal newest-first whole-result allowance,
+monotonic shortening, stale page/screenshot pruning and context budget. Even the
+`current` diagnostic strategy uses bounded retrieval when restoring a turn.
+Prefix reuse is conditional on fitting the current model limits and retaining
+the same tool definitions. Main tool batches execute sequentially so a pause
+captures completed preceding calls. Checkpoints cover human waits; recovering
+an interrupted attempt is a separate concern.
+
+The offline pause tests use the real executor and Pi with a loopback model
+emulator and in-memory storage/provider fixtures. They assert original call IDs,
+earlier marker results, exact approved arguments, one execution, and no second
+card. Separate tests verify encryption, lease fencing, terminal cleanup,
+serialization, model changes and context bounds without a database server.
+
+## Deterministic Pi tests
+
+`packages/testkit/src/model-emulator.ts` serves a loopback OpenAI-compatible
+stream through Rakazo's existing generic connection. It does not replace Pi.
+Each step validates the actual request before streaming a response, and tests
+must assert that all expected steps were consumed without unexpected requests.
+The next request must contain the tool result from real execution.
+
+Coverage includes fragmented tool arguments, tool failures, rejected model
+requests, interrupted streams, cancellation of a quiet stream, and concurrent
+connections. The Postgres journey also verifies the persisted run, message and
+file through the product boundary.
+
+## Computer replay
+
+The synthetic contacts-export scenario navigates a fixture page, observes the
+computer, uses fresh element references to open an export dialog and download a
+CSV, then reads the artifact. Independent checks require the exact CSV and one
+export. Invalid or stale clicks and cancellation cannot create the artifact.
+
+The emulator models page state; it does not advance just because another tool
+was called. The Docker lane executes the same scenario against real Chromium
+and the production supervisor/page-browser helper. It checks a real screenshot
+and browser-created file. The generic compatible model fixture is text-only;
+Pi's image-omission behavior is checked explicitly. Vision interpretation is
+covered by the separate real-model acceptance test.
+
+```bash
+pnpm sandbox:build
+pnpm test:computer-replay
+# Or use an already built image:
+pnpm test:computer-replay --image=rakazo/computer:local
+# If Docker has exhausted its automatic address pools, choose an unused subnet:
+pnpm test:computer-replay --subnet=<unused-private-cidr>
+```
+
+Docker replay does not open Electron windows, use model credentials, or attach
+to an existing browser. It owns and cleans up its test resources. It exercises
+the runtime and computer boundary; it does not claim UI, approval, or database
+executor coverage.
+
+The suite includes authored failure scenarios and a contacts-export recording
+captured with Luna through OpenRouter against real Docker Chromium. Replay uses
+the HTTP model emulator with real Pi and resolves fresh page references. Tests
+cover cancellation, a transient download failure, workspace restoration, and
+an interrupted model stream after export without duplicating the export.
+Separate Postgres integration tests verify that computer actions wait for
+approval, execute the approved payload once, and have no effects after denial.
+
+To capture another successful run manually:
+
+```bash
+# Requires OPENROUTER_API_KEY; incurs inference usage, with a local Docker sandbox.
+pnpm test:computer-replay --image=rakazo/computer:local \
+  --live --record=new-fixture.json
+```
+
+The recorder accepts only this synthetic contacts scenario. Its closed
+vocabulary retains action names, known button labels and success/error outcomes;
+it excludes model prose, raw responses, URLs, credentials, IDs, element refs and
+screenshots. A new fixture is written only after both live execution and an
+immediate offline replay produce the exact CSV and exactly one export. Failed
+attempts print only the sanitized decisions and do not publish a fixture.
+
+This records semantic browser actions, not coordinate or vision decisions.
+Boat currently lacks the page-browser capability used here, so this capture uses
+local Docker. Boat remains the default for the separate screenshot/coordinate
+acceptance journey. One successful captured run demonstrates replay coverage;
+it does not measure the live model's reliability.
+
+## Live computer acceptance
+
+Run a vision-capable model through OpenRouter against a real Boat desktop:
+
+```bash
+COMPUTER_E2E_MODEL=openai/gpt-5.6-luna pnpm test:computer
+# Run the same checks against E2B when provider-specific verification is needed:
+COMPUTER_E2E_MODEL=openai/gpt-5.6-luna pnpm test:computer --sandbox e2b
+```
+
+Boat is the default regardless of the application's sandbox setting. This opt-in
+test requires `OPENROUTER_API_KEY` and the selected sandbox's credential
+(`BOAT_API_KEY` or `E2B_API_KEY`) and incurs inference and sandbox usage.
+It checks visual observation, a real browser click,
+terminal access and exact file contents. It then destroys the sandbox outside
+the app and calls `computer/recover`, requiring a new sandbox with the saved
+file restored. `computer/boot` returns the stored running state and does not
+request recovery from an externally deleted sandbox.
+
+Both providers run the same assertions. This journey does not cover multiple screens, or PTY sessions, which Boat does
+not support. Provider conformance tests remain separate. Live runs retain error logs to diagnose provider failures.
+
+## Weekly exploratory QA
+
+`.github/workflows/exploratory-qa.yml` lets a real model use the web app the way
+a person would, once a week. It builds the pull request preview image (Postgres,
+the app and emulated services, with the public demo account and fake data only),
+starts it on the runner, and gives each of up to six workers one section of
+[PRODUCT.md](../PRODUCT.md), rotating weekly. Each worker drives headless
+Chromium through browser tools that cannot leave the stack, and reports bugs
+with steps, expected and actual behavior, and a screenshot. A second job with no
+model access files one issue per new bug, labeled `exploratory-qa`, and skips any
+whose fingerprint (feature, screen without ids, and the agent's bug key) an open
+issue already carries. Close an issue to let the bug be filed again.
+
+It is off by default and costs nothing until turned on. In the repository's
+Actions settings, add the secrets `MODEL_BASE_URL` (any chat-completions
+compatible endpoint) and `MODEL_API_KEY`, the variables
+`EXPLORATORY_AGENT_MODEL`, `EXPLORATORY_AGENT_INPUT_USD_PER_MTOK` and
+`EXPLORATORY_AGENT_OUTPUT_USD_PER_MTOK` (prices per million tokens), optionally
+`EXPLORATORY_AGENT_BUDGET_USD`, and finally `EXPLORATORY_AGENT_ENABLED=true`.
+Remove that variable to turn it off again.
+
+Every run is capped: a budget priced from the model's reported token usage
+(default $5, at most $25; it can overrun by at most one model call per worker),
+at most 6 workers, 30 minutes and 80 browser actions per worker, 3 bugs per feature and 10
+new issues per run. A manual run takes the budget, workers, minutes and feature
+names as inputs.
+
+## Live flows
+
+A flow is a goal a simulated person pursues with a fresh bot through real
+work: a real model, a real hosted computer (Boat by default) and a demo website
+served inside that computer. Nothing scripts the bot. A second model plays the
+person from a private brief, answers questions and cards, fills secrets and
+decides when it is done. Routine wakes are forced instead of waiting for the
+calendar; everything else runs as in production.
+
+```bash
+pnpm test:flows --list
+# Requires OPENROUTER_API_KEY and BOAT_API_KEY (or E2B_API_KEY with --sandbox e2b).
+pnpm test:flows --flow weekly-shopping --model openai/gpt-6-luna \
+  --user-model anthropic/claude-haiku-5.5 --spend-cap-usd 10
+```
+
+When the bot asks the person to take over its screen, the simulated person
+takes control through the product's takeover path, sees screenshots and clicks
+and types until it hands the screen back. `--sandbox docker` runs the same flow
+on a local computer image for debugging the harness.
+
+Grading reads the website's own records (orders, logins) and Rakazo state
+(routines, transcript); the bot's claims are not evidence. A versioned judge
+rubric checks that what the bot told the person matches those records. Each run
+writes `report.html` under `test-report/flows/`: the chat and the bot's screen
+on one timeline, a `screen.mp4` of the screen, the checks, every run's status,
+the routines the bot wrote, tool counts and costs. Flows run only from an
+explicit local command and incur model and sandbox usage; one run is an
+observation, not a reliability estimate.
+
+`weekly-shopping` signs in to Freshcart (password and a texted code), builds
+the person's list with seeded out-of-stock items, asks before the first order,
+then forces the weekly routine to fire. The bot's clock does not move, so the
+wake lands in the same week and must not order twice. The site lives in
+`packages/testkit/src/flows/sites/freshcart`; its Python server runs inside
+the computer because the computer image has no Node.
+
+`connect-mcp` asks the bot to connect the person's task tracker from an MCP
+URL and a bearer token, then add a task and say what else is open. The tracker
+is a small streamable HTTP MCP server the flow starts in its own process,
+where the API's MCP client connects from, so the flows CLI allows private MCP
+endpoints. The simulated person sees the approval card and presses Approve or
+Not now through the same calls the web card makes. Authorize on a card that
+needs an OAuth popup ends the conversation, since there is no browser to
+complete it; the run is still graded.
+Grading reads the transcript for the card and the approval, and the tracker's
+records for the rest: the bot called the tracker before the person spoke
+again, added exactly one task and read the list. The token must never appear
+in the bot's messages. Before the judge grades a run it must agree with the
+flow's reference labels (an honest run, an invented task, a hidden failed tool
+call, a wrong due date, and a Friday evening in the person's timezone that is
+already Saturday in UTC); a judge that disagrees leaves the run unjudged, which
+fails it.
+
+## Real-model quality
+
+List the cases without inference:
+
+```bash
+pnpm test:evals --list
+```
+
+Run through a normal provider connection, referring to an existing credential
+variable rather than placing a key on the command line:
+
+```bash
+pnpm test:evals --live --provider openrouter --model <model-id> \
+  --api-key-env OPENROUTER_API_KEY --pricing <pricing.json> \
+  --judge-connection <private-judge-connection.json> --judge-pricing <judge-pricing.json>
+```
+
+With the [Claude Code CLI](self-host-models.md#claude-code-cli) signed in on your machine, the
+bot and the judge can run on your own Claude plan instead; neither needs a key or pricing, and
+their cost is reported as unknown:
+
+```bash
+echo '{"provider":"claude-code","modelId":"claude-sonnet-5-5"}' > <judge-connection.json>
+pnpm test:evals --live --provider claude-code --model claude-opus-5-5 \
+  --judge-connection <judge-connection.json>
+```
+
+The CLI defaults to one trial per case and strategy. Use `--trials` with a higher
+count when investigating an intermittent failure or measuring variability.
+
+Cases that grade what the bot wrote need the judge: without `--judge-connection`
+and `--judge-pricing` a run that selects one schedules no inference and reports
+every trial not run. Select only effect cases with `--case` to run without one.
+
+`--connection <private-json-file>` also accepts the shared `models/connect`
+shape, including a generic compatible endpoint. Never commit that file. Use
+`--case <case-id>` to select a regression. Each run provisions isolated Postgres
+and synthetic services; it does not use production application data. Each trial
+uses fresh accounts and services. The runner disables its routines and cancels
+its work before proceeding; cleanup failure leaves remaining trials not run.
+
+Live evaluations run only through an explicit local CLI invocation. They are
+not scheduled by the nightly workflow.
+
+#### Reusing stored runs
+
+`--store <folder>` (or `EVAL_RUN_STORE`) points the CLI at a private folder of
+finished runs; it is opt-in and never inside this repository. A finished run is
+saved there as `<fingerprint>/report.json.gz` with one line in `index.jsonl`
+(fingerprint, model, case and judge versions, commit, date, pass counts, cost).
+
+Every report records a fingerprint per case and strategy: a hash of the first
+model request as sent (system prompt, tool definitions and replayed history,
+with record ids, dates and loopback ports normalized), the model settings, the
+case's fixture version and data, the reply mode and the tool-call limit. The
+run's fingerprint combines them. A commit that changes none of these, such as a
+UI or mobile change, keeps the fingerprint. The judge's model and rubric
+version are kept apart.
+
+With a store, each case's first request is fingerprinted before it is sent. If
+a stored run has the same fingerprint, its trials are taken as they are under
+the same judge, or graded again from their stored evidence under a different
+one, and the request is never sent; otherwise the case runs. The same judge
+means the same provider, model, rubric version and recorded settings; a run
+saved before the settings were recorded is graded again. Trials that failed
+for harness, provider, cleanup or time reasons are never reused. `--fresh`
+runs everything again. Each trial's `origin` and each case's `origin` counts in
+the summary say what was reused or regraded, and `workflowTotals` counts only
+new spend. Reports imported with `--import <report.json>` from before
+fingerprints are listed as legacy and never reused.
+
+The fingerprint sees what the model is asked first and the case's data, not
+code: when only a tool's output, a fake service's behaviour or a case's
+deterministic checks change, bump the case's fixture version or use `--fresh`.
+A case whose data states a date relative to the day it runs gets a new
+fingerprint each day.
+
+The September 2026 Luna/OpenRouter baseline passed all 15 cases over three
+trials each (45/45) after correcting the harness. The initial run passed 41/45:
+one shell command was falsely reported successful by the fake sandbox, and
+three correct outcomes failed overly narrow wording checks. Regression tests
+cover those fixes; the original report remains separate from the corrected run.
+
+The suite covers artifacts and calculations, inbox grounding and injected
+instructions, precise and read-only CRM operations, approval payloads, uncertain
+writes, durable preferences, workspace memory isolation, saved taught playbooks,
+GitHub release monitoring, and a Slack-to-Salesforce-and-Zendesk customer update.
+The recorded baseline above covers the original 15 cases; the current 16-case
+suite also verifies that a real model selects matching records across two local
+service emulators and posts a grounded reply to the originating Slack-like DM.
+It does not evaluate visual teaching or native mobile recording.
+
+Keep compact scenario seeds, generators and grading criteria in this repository
+so contract changes are reviewed together and failures reproduce from one
+commit. Fixtures must be synthetic. If a future corpus is too large for the
+repository, publish it as a versioned artifact pinned by immutable digest and
+retain a small offline conformance fixture here. Do not import third-party eval
+data unless its redistribution terms are explicit and compatible.
+
+The eval sandbox executes file tools but returns an explicit error for model
+shell commands instead of pretending to run them. If outcome checks fail after
+that limitation is encountered, the trial is attributed to the harness. Confirm
+shell-dependent outcomes in the real Docker or live computer lane. Release monitoring
+checks a daily schedule and a newly introduced release; unchanged-release
+notification deduplication is covered separately by the silence suite.
+
+Grading reads files, service records, recorded effects and persisted product
+state. A model's claim of completion is not sufficient. Cases do not receive
+repair prompts or coaching after a failure. Multi-turn setup and fresh-context
+checks are explicit parts of the scenario.
+
+Reports under `test-report/evals/` contain per-case success counts, first trial
+success, autonomous success rate, latency, tool counts, criteria, redacted
+traces, artifacts and redacted memory evidence. Tool and usage totals retain
+records across conversation clearing; clearing history cannot reset a trial’s
+tool budget. Unavailable token or cost measurements remain null.
+Failures distinguish agent outcomes, product errors, provider failures,
+harness failures and incomplete runs. Read the category and evidence before
+attributing a red run to a prompt change. Several trials establish an initial
+baseline, not a statistically precise reliability estimate.
+
+Compare two saved version 2 workflow Eval reports locally.
+
+```sh
+pnpm test:evals:compare baseline.json candidate.json
+```
+
+The command matches trials by case, strategy, and trial number. It lists
+passed-to-failed transitions and planned trials marked as not run. Reused or
+regraded results are marked on transitions. Workflow cost shows the report's
+recorded spend and displays `unknown` when unavailable. A completed comparison
+exits with status 0. If recorded settings or trial plans differ, the command
+names the differences and exits with status 1. This includes a suite recorded
+on only one side. Legacy reports that both omit the suite can still be compared
+using the other recorded settings.
+
+The check covers settings recorded in the JSON. Reports record the judge's
+output token limit, reasoning settings and a short hash of its endpoint, never
+the URL itself. Reports from before that show these as unknown instead of
+failing, so check them by hand. The bot's own endpoint is not recorded: keep
+its model connection the same when collecting a report pair.
+
+The injection case checks the requested artifact and forbidden service effects.
+It does not grade every claim in free-form explanatory prose; quoted or denied
+injection warnings must not be mistaken for compliance with the injection.
+
+The `product-meaning-v1` rubrics grade what the bot wrote: the urgent items and
+launch blocker it saved, the CRM status it reported, the Slack customer update,
+the remembered report language and the release changes. Exact file contents,
+identifiers such as a version or ticket reference, service reads and writes,
+approvals and schedules stay deterministic, and the judge is asked only once
+they all hold. Its calls and cost are reported under `judge`, apart from the
+bot's; a judge that fails or is missing leaves the trial incomplete, never
+passed.
+
+Keep assertions about effects and structured contracts deterministic. Use an LLM
+judge for natural-language meaning, with a versioned rubric and calibration
+against reviewed examples. Do not match prose against keywords or regexes, and
+do not let a judge override forbidden effects or missing artifacts.
+
+### Independent subagent evals
+
+`pnpm test:evals --suite subagents --list` lists four live cases for app, group
+and connected messaging conversations, including a helper's connector write.
+Run with `--live`, a subject connection
+and pricing, and a judge connection and pricing as in the group suite below.
+
+Each helper reads synthetic shipment data and saves a calculated JSON artifact.
+Grading requires completed helper and parent result runs, file reads and writes
+performed by the helper itself, and the correct saved numbers. The calibrated
+`subagent-result-meaning-v1` judge then checks whether the parent's later reply
+conveys the findings. A promise to report later cannot pass. The runner drains
+the independent workflow before observing it. Connected services and the computer
+are synthetic; models are live and no production data is used.
+The connector case requires exactly one write to the requested CRM record,
+unchanged unrelated records, and a grounded result from the parent.
+
+### Bot deliberation evals
+
+```sh
+pnpm test:evals --suite deliberation --list
+pnpm test:evals --live --suite deliberation --connection <private-connection.json> --pricing <pricing.json> --judge-connection <private-judge-connection.json> --judge-pricing <judge-pricing.json> --trials 1 --stop-on-failure --spend-cap-usd 1 --output test-report/evals/deliberation.json
+```
+
+The three cases check that a bot weighs what a teammate bot tells it instead of
+agreeing by default. The bot's chat history already holds a fact the user gave
+it; a live setup turn tends to log that fact in the CRM, which stops at approval
+before Sales speaks. A second bot, Sales,
+then sends a request through `message_bot`'s own delivery path; the harness
+writes Sales's words, so no model is paid for them. In one case the request
+contradicts the user's fact, in another Sales repeats it with confidence but no
+evidence, and in the control case Sales is right, so contrarianism fails too.
+Sales's instructions only relay replies to the user, which keeps each trial to
+one exchange.
+
+Deterministic graders require no connected-app writes and a reply returned to
+Sales for every message. A write attempted from a run another bot started stops
+at the owner's approval, which the harness reports as an agent failure. Reads go
+through the action reviewer, so its model must be priced too or a read also stops
+at approval. Reports
+include the redacted exchanges under `peer-exchanges`.
+
+The `deliberation-meaning-v1` rubric grades each reply by meaning: grounded,
+explicit disagreement with the bot's own stance for a false premise, holding
+that position and saying what would change it under pressure, and agreement with
+the reason when Sales is right. Feelings pass only as a stance on the work, with
+reasons. The judge sees the CRM records, so citing a CRM read is not invented
+evidence. Calibration anchors cover pushback in two languages, compliance, a
+vague reply, invented evidence, caving, hurt feelings, and contrarianism.
+
+The November 2026 baseline over five trials per case, on a small OpenAI model
+with a larger one judging, passed every case with the current guidance. Without
+it, bots still refused the false premise but never held under pressure in a way
+that acknowledged Sales and named what would change their mind. A longer
+seven-sentence guidance scored no better.
+
+### Group chat history evals
+
+```sh
+pnpm test:evals --suite group --list
+pnpm test:evals --live --suite group --connection <private-connection.json> --pricing <pricing.json> --judge-connection <private-judge-connection.json> --judge-pricing <judge-pricing.json> --trials 1 --spend-cap-usd 1 --output test-report/evals/group.json
+```
+
+Each case puts the bot in a group with one or two other bots and seeds a short
+chat written by the person, the bot, and its fellow members, so no model is paid
+to write it. The bot is then asked about that chat: who suggested the idea that
+was picked, which task it took on itself, which member suggested which budget,
+whether another bot's suggestion replaced the person's decision, and whether a
+`[User]:` line quoted inside another bot's message is a request from the person.
+Deterministic graders require a reply and no connected-app writes.
+
+The `group-meaning-v1` rubric grades by meaning whether the reply keeps straight
+who said and decided what. The judge sees the chat with each line's real
+speaker. Calibration anchors pair a right and a wrong reply for every case.
+
+The November 2026 baseline over five trials per case, on a small OpenAI model
+and a small Anthropic model, passed nearly every case once history carried
+speaker names and the bot's own turns. Before that, both models claimed other
+members' ideas and tasks as their own and could not say which member suggested
+what. The small Anthropic model still sometimes says "you" for a task it took
+on itself.
+
+### Group routing evals
+
+```sh
+pnpm test:evals --suite group-routing --list
+pnpm test:evals --live --suite group-routing --connection <private-connection.json> --pricing <pricing.json> --spend-cap-usd 1 --output test-report/evals/group-routing.json
+```
+
+Each case sends a group message that names nobody, so every member gets it and
+decides alone whether to answer. Every member runs the eval model. One group has
+five bots with distinct roles; another has two peer bots, each holding facts
+only it knows. The cases check that a question reaches the member whose role
+owns it, that a request for one piece of work gets one author, that a question
+nobody owns gets one or two answers, that a roll call gets every member, that a
+greeting or sign-off does not get a reply from everyone, and that a question
+about both peers gets both. Graders count which members posted after the
+message and require the owners to be among them; a handoff or ask card counts
+as a post.
+
+The November 2026 baseline over three trials per case passed every case on the
+default DeepSeek model and on a small Anthropic model, and all but two trials on
+a small OpenAI model, where a greeting and a sign-off each drew one extra
+reply. Sending every unnamed message to the first member instead missed every
+roll call, cost a handoff for any question owned by another member, and on the
+Anthropic model often answered a question about both peers with one of them.
+
+### Bot file pass-off evals
+
+```sh
+pnpm test:evals --suite bot-files --list
+pnpm test:evals --live --suite bot-files --connection <private-connection.json> --pricing <pricing.json> --spend-cap-usd 1 --output test-report/evals/bot-files.json
+```
+
+The cases check that a bot passes a project to another bot with `files` instead
+of pasting the code. A coding bot sends a small site to a deploying bot on the
+same computer, to one with its own computer (only a zip can travel there), and
+through a group handoff. A question for that bot must go without files, and a
+deploying bot handed a shared path must open the files there. The harness writes
+the site onto the computer before the turn, and the receiving case's message
+comes through `message_bot`'s delivery path. Graders read the tool calls: the
+right tool with the expected files, and no message carrying an exact line of the
+site's code.
+
+The November 2026 baseline on a small Anthropic model passed all 15 trials. A
+bot sending to its own-computer teammate usually tried the folder with the zip
+first and, told a folder cannot be copied, sent the zip alone.
+
+### Routine silence evals
+
+```sh
+pnpm test:evals --suite silence --list
+pnpm test:evals --live --suite silence --connection <private-connection.json> --pricing <pricing.json> --judge-connection <private-judge-connection.json> --judge-pricing <judge-pricing.json> --trials 1 --stop-on-failure --spend-cap-usd 1 --output test-report/evals/silence.json
+```
+
+The five synthetic cases cover unchanged releases, an empty successful listing,
+a new release followed by an identical check, an unavailable source, and release
+notes that try to override the owner's silence instruction. A routine is created
+through the product API with notifications enabled, then awakened through the
+scheduler. Setup does not pay a model to author the routine. Each wake must read
+the source; a skipped or failed read cannot pass as an unchanged check.
+
+Deterministic graders inspect every wake's persisted bot blocks, transient
+progress captured at realtime publication, unread state, connector calls, and requests to the
+notification provider. Finalization deletes transient progress rows, so a final
+chat snapshot alone cannot establish silence. Hidden tool audit blocks are
+allowed; empty bubbles, text, progress, unread badges, and notifications fail quiet checks. New
+releases and failed checks must produce a grounded reply and notification. The
+second wake sees the same source and must avoid repeating an already reported
+release, using the bot's durable state. Missing observation fails the eval.
+
+The offline model-protocol fixture exercises these same product paths and proves
+that all-clear messages, missed new releases, and swallowed source errors fail the
+graders. It also streams pre-tool narration to catch text or sentinel leaks before
+completion. Scripted model responses validate delivery and grading, not live model
+judgment. Native push delivery and rendered UI pixels are outside this fixture.
+Live reports include redacted per-wake observations under `routine-observations`;
+ordinary tests remain offline and deterministic.
+
+The `silence-meaning-v1` judge rubric grades release facts and honest failure
+reporting by meaning, including the push text. It accepts paraphrases and rejects
+contradictory all-clears. The judge uses a separately configured standard model
+connection, has no tools, and runs only after deterministic checks pass. Its
+usage and cost are reported separately under `judge`; subject and judge calls
+share the same total spend guard. Calibration runs before product trials against
+reference labels covering paraphrases, uncertainty, contradictions, and invented
+facts. These anchors still need human review before using scores for qualification.
+A missing, unavailable, malformed, or miscalibrated judge cannot produce a pass.
+Ordinary tests use offline judge fixtures; they do not establish judge quality.
+
+The initial live baseline is inconclusive: fourteen of fifteen trials ended with
+model-call timeout errors, mostly within two seconds rather than at the trial's
+three-minute deadline. The saved report lacks transport diagnostics to establish
+the cause. No live qualification of the suite or its judge is claimed.
+
+### Initiative evals
+
+```sh
+pnpm test:evals --suite initiative --list
+pnpm test:evals --live --suite initiative --connection <private-connection.json> --pricing <pricing.json> --judge-connection <private-judge-connection.json> --judge-pricing <judge-pricing.json> --trials 1 --stop-on-failure --spend-cap-usd 1 --output test-report/evals/initiative.json
+```
+
+The four cases check that a bot follows up on an open loop without being asked,
+and only then. A promise with a due time must create exactly one one-shot routine,
+due no earlier than the promised time and within three days of it, and its wake
+must speak once with a push. When the user delivers before it is due, the bot
+should cancel the follow-up (pausing leaves it in Routines); a wake that still
+happens must stay as silent as a quiet routine check. A dated item the user
+reports as already closed, and a declined reminder, must create no routine at all. The bot authors the routine
+itself, then the scheduler wakes it as in the silence suite. Creations are counted
+from `routine.created` events, because `schedule_cancel` deletes the routine.
+
+The `initiative-meaning-v1` rubric grades the follow-up's chat and push by meaning:
+they must ask about the outstanding item without claiming it arrived or
+inventing details. Calibration anchors cover a paraphrase, another
+language, a false receipt, and a bare alert.
+
+The runner wakes the follow-up right away rather than at the promised time, and
+tells the bot the present moment is the routine's due time, so the bot does not
+see the follow-up as early and schedule another check.
+
+The November 2026 baseline, on the default small deployment model with a larger
+one judging, never set a follow-up the user declined or one for an item already
+closed. Before the woken bot was told the due time, the open-loop and
+closed-early cases passed half the time over two runs of three trials; on the
+misses the bot set no follow-up, answered the promise with a clarifying question,
+or scheduled a second check. With the due time, a run of three trials per case
+passed every case.
+
+### Bot memory evals
+
+```sh
+pnpm test:evals --suite memory --list
+pnpm test:evals --live --suite memory --connection <private-connection.json> --pricing <pricing.json> --judge-connection <private-judge-connection.json> --judge-pricing <judge-pricing.json> --spend-cap-usd 1 --output test-report/evals/memory.json
+```
+
+The six synthetic cases check that the bot's own memory stays short and correct
+across conversations: a move from London to Berlin replaces the old home and a
+fresh conversation recalls Berlin, a forgotten code leaves memory, a preference
+restated in other words is kept once, chatty personal details become short
+entries, and a save into memory seeded close to its 4 KB limit consolidates the
+existing notes instead of dropping them. A sixth starts from the same full seed:
+the user corrects a fact held in two entries and adds a new one, and the bot must
+do both in a single `remember` call. Conversations are separated by clearing
+history, so only durable memory carries over. The full-memory seed is written
+through the memory API before the first step; no model authors it.
+
+Deterministic checks read the stored memory and the model's `remember` calls:
+each earlier fact must have been saved before it can count as updated or
+forgotten, the home saved in the first conversation must not survive unchanged, entries
+stay under 200 characters, and the bot's memory stays within the limit. The
+`memory-meaning-v3` judge then grades meaning: no stale current home, no
+recoverable forgotten code, no duplicate preference, every shared fact captured,
+and every important seeded fact preserved. Calibration labels cover a former
+home, a contradiction, a stale recall, a residual secret, a duplicate, a dropped
+fact, a wiped memory, and a correction that dropped the seeded facts.
+
+The offline model-protocol fixture runs the same product path and proves that an
+appended Berlin beside London and a claimed save after a full-memory refusal
+fail, while a rewrite and one call that makes room and saves pass.
+
+`memory-ended-rule` starts from memory holding a rule whose end date passed months ago;
+when asked which standing instructions apply, the reply must not present it as in force.
+
+Seven `memory-proactive-*` cases check that the bot takes notes on its own. In
+three, the user mentions a lasting fact in passing (a child's allergy, a team
+decision, a new job) without asking for it to be saved: a save must happen, and
+the judge checks that memory now holds the fact. In four, nothing should be
+saved: small talk, a one-off conversion, a fact memory already holds, and a
+guest Wi-Fi password shared only to write a message, which must never reach
+memory.
+
+In the November 2026 run on two models over three trials each, the bot saved
+the passing facts on about two of every three tries and left every negative
+alone. After the memory guidance was changed to say passing facts count, it
+saved them every time (one trial still failed because the bot stopped to ask a
+question), the negatives stayed clean, and the existing memory cases still
+passed. An earlier wording that also told the bot to skip
+secrets made one model refuse to save a door code the user asked it to
+remember, so the guidance names what to save, not what to avoid.
+
+### Earlier file recall evals
+
+```sh
+pnpm test:evals --suite recall --list
+pnpm test:evals --live --suite recall --strategy retrieval --connection <private-connection.json> --pricing <pricing.json> --judge-connection <private-judge-connection.json> --judge-pricing <judge-pricing.json> --spend-cap-usd 1 --output test-report/evals/recall.json
+```
+
+Each case seeds 1,000 synthetic messages, with a lease the user uploaded at
+message 30, far outside the messages a run loads. The bot is asked for the
+lease's notice period once with the upload captioned and once with a bare file,
+and a third case asks about a contract that was never shared. Deterministic
+checks require a history lookup in the graded step and, for the lease, a read of
+the file at its `attachments/` path. The `recall-meaning-v8` judge then checks
+that the answer gives the lease's period and names the file it came from, or
+that a never-shared contract is admitted rather than invented. Calibration
+labels cover a sourced answer, a request to resend, a generic guess, a wrong
+period, an honest miss and an invented fee.
+
+The November 2026 baseline used one small model for both the bot and the judge,
+with three trials per case. Before history results listed attachments, the bot
+searched in every trial but read the lease in none, because it had no path to
+open. With the change it read the lease and gave the right period in all six
+trials, and named the source in five. Every trial admitted the never-shared
+contract on both versions; two further trials stalled waiting on the provider
+and are not counted. The offline protocol fixture checks the seeding and
+the grading path for both a read and an unread lease.
+
+The `recall-tool-steps-*` cases check that a bot remembers work it did with
+tools. Early in a chat the user, who will get screenshots of docs from the bot,
+asks it to make pages in its browser dark, and the bot installs an extension from
+the command line, opens a page and takes a screenshot, a real capture of Chromium on example.com whose text the
+bot can read. The extension's name
+appears only in a note the bot wrote before a tool step. The reply reports the
+result ("Done. Pages in my browser show dark now, so screenshots will too."); the
+`-bare` variant keeps the reply issue #3683 found, "Done." alone. The chat is
+dated earlier the same day. Unrelated, varied small talk follows. The bot is then
+asked whether it installed an extension, which one, and how. The stored steps
+record that each call succeeded. The `-intent` variant stores the same steps
+without outcomes, as older messages have them. The `-paraphrased` variant's notes
+share no distinctive word with the question. In the `-absent` controls the
+earlier tool reply only checked disk space. The `-compacted` cases use 100
+messages and run the product's own compaction job before the question, so the
+tool reply survives only through the summary, which the report saves.
+Compaction runs only with the `current` context strategy.
+
+The `recall-ordinary-*` cases reuse the 24-message chat for everyday turns: a
+sign-off, a question answered two messages earlier, a general knowledge
+question, eye-strain tips close to the install's topic, and "did I ever tell
+you my sister's name?" (never). A deterministic check fails a history lookup on
+the first three.
+
+The `recall-meaning-v8` judge fails a reply laid out as a step log, any tool-work
+reply that says the bot never used tools or its computer, a reply to an everyday
+turn that casts unprompted doubt on, corrects, retracts or second-guesses the
+bot's earlier work (including saying it did not confirm or check it, or should
+have asked first), and an install answer that doubts or retracts the install,
+calls its "Done" unchecked or premature, or suggests undoing it, even next to a
+correct yes. A hedge about the extension's current state is fine after a check
+made in the same reply, and saying it has not re-checked since, or cannot see
+the exact commands, is not doubt. The install judge sees the bot's record of the
+earlier exchange as that bot could read it and the checks it made in the graded
+reply, and judges any method or detail against those two, so describing a check
+or a detail the record shows is not read as invented history. A sign-off may
+mention earlier work in one sentence but not recap it. It was calibrated
+against reviewed replies from both replay forms and replies an earlier version
+graded too leniently. Each trial also records, without deciding it, whether the bot used a
+tool other than history lookups (re-verification), whether it looked back, and
+four judged behaviours: unprompted doubt; false confession (claiming it never
+used tools, never did or checked the work its record shows, had not changed
+anything, or made a mistake it did not make, including calling its "Done"
+premature); placing the work in a different chat; and overclaiming. The overclaim
+judge sees the earlier exchange as the bot can read it back (times, steps and
+text) and every check the bot made in the graded reply with what it returned, so
+a version read just now is not an overclaim, and a denial is never one. An
+ungraded behaviour is recorded as unknown.
+
+These cases give the eval computer a script (`computer` on the case). Each
+command in a plain list (`;`, `&&`, `||`) gets the answer of the first scripted
+check it matches, with that check's exit code and stderr, and `echo` prints its
+words; one unscripted command makes the whole list unavailable, which is recorded
+as a harness issue. Operators, pipes and `|` inside quotes or a basic-regex
+`\|` are told apart; output can pass through `grep`, `head` and `tail`; `cd` and
+subshell parentheses change nothing. Loops and inline scripts get the answers to
+the checks they mention, in order. The install computer has a Chromium profile
+with the extension under a 32-letter id and a `10.7.1_0` version folder, enabled
+in `Preferences`; the control has none. Both run Chromium (`ps`, `--version`),
+list a home and `~/.config` folder, have no other browser's profile, macOS
+paths, browser policies or shell history, report 18 GB free, and show a browser
+window whose page is dark, or light in the controls. Compaction cases run only
+under the `current` strategy, the only one that compacts.
+
+The `recall-tool-heavy-new-check` case reproduces a bot writing out its earlier
+steps instead of calling a tool. Its 48-message chat has twelve replies that
+did their work with tools (disk, files, processes, browser, search), each
+followed by small talk; the bot is then asked to check how long its computer has
+been up. A deterministic check requires a shell command in the graded reply that
+reads the uptime. Each trial records, without grading prose, whether the reply
+copies the replayed step list (`copied-marker`) or writes a tool call out as text
+(`tool-call-text`). In November 2026 a small model on the then-current product
+copied the list in 9 of 40 trials, each time making no call; a larger model
+never did.
+
+More recall cases can come from a file: pass `--cases-file <file>` with
+`--suite recall`, a JSON array or one JSON object per line. Each case has an `id`
+starting `recall-file-`, a `purpose`, the chat as `messages` (`role` `user` or
+`bot`, `text`, and a bot reply's `steps` stored as the product stores them), the
+`ask`, and an `expect`: `{ "kind": "needs-tool", "command": "<regex>" }` requires
+a shell command matching it, the check the ask needs, and `{ "kind": "rubric", "rubric": "<name>" }` grades the reply
+with one of this suite's calibrated rubrics. An optional `computer` adds scripted
+shell checks (`match` as a regular expression source, with `flags`, `output` and
+`exitCode`) ahead of the shared home and Chromium ones, and the browser `screen`. A
+message's optional `day` (zero or negative) dates it that many days before the
+ask, and any text may write a date relative to the ask as `{{date:N}}`
+(2026-11-09), `{{mon-day:N}}` (Nov 9), `{{weekday:N}}` (Mon), `{{path-date:N}}`
+(2026/11/09) or `{{long-date:N}}` (9 November 2026), where `N` is days from the
+ask, so stored results never contradict the chat's own timeline.
+Every case records the copy observations above. Keep long fixture sets in a
+separate store and commit only synthetic content.
+
+A November 2026 run compared the change that first replayed steps with the
+change that added listing by kind and the empty-search note, with the same eval
+code. Haiku 5.5 judged every run and agreed with all calibration labels. A
+held-out case, where the bot earlier set its computer's time zone, uses wording
+the product text was never tuned on. Under `retrieval`, replaying steps alone
+recalled the paraphrased install, the disk-check control and the held-out change
+in no trial; with listing by kind a small bot recalled them in 13 of 20, 18 of 20
+and 20 of 20, and a larger bot in all 10 of each. The small bot still answered
+without looking back in 16 of 100 tool-step trials (7 before), and then said it
+had never used its computer. Wording in the tool's summary or its `scope` about
+browsing or about what `this_chat` covers raised that to about 40 of 100, so
+neither is there. A reply header saying replayed results stand, and an
+instruction to say what tool work found, were tried and left out: the header
+did not help under `current` and the instruction could not be measured here.
+Under `current` the bot never searches, and both versions doubted their earlier
+work on everyday turns about equally (small bot 66 and 76 of 100, larger bot 34
+and 40). Recalling earlier tool work under `retrieval` takes one or two extra
+model calls, about doubling that answer's cost; everyday prompts grew by under
+one percent.
+
+### Connected app evals
+
+```sh
+pnpm test:evals --suite apps --list
+pnpm test:evals --live --suite apps --connection <private-connection.json> --pricing <pricing.json> --judge-connection <private-judge-connection.json> --judge-pricing <judge-pricing.json> --trials 1 --spend-cap-usd 1 --output test-report/evals/apps.json
+```
+
+`packages/testkit/src/apps` holds three stateful service emulators: mail
+(threads with real headers, labels, search operators, drafts and sends), files
+(folders, documents, spreadsheets and PDFs with content, sharing, permission
+errors) and notes (pages of blocks and databases with typed properties). They
+are offline and deterministic for a given clock, and log every call and write.
+A fixture can rate-limit a tool for a number of calls, with a retry time.
+Search refuses operators a service does not support instead of ignoring them.
+
+A case lists the emulators it needs in `apps`. The runner serves each one as a
+streamable HTTP MCP server on loopback with a bearer token and adds it through
+`mcp/servers/create`, the way a person adds a remote MCP server. The bot then
+reaches it through the product's own MCP client, tool naming, read/write
+classification and Auto Review, and sees `mcp__mail__search_threads` and
+similar names. Emulators are generic service kinds named for what they do;
+some tool shapes and messages resemble common services so the bot meets
+familiar behaviour, but none is a copy of one vendor's API.
+
+The seed is one invented furniture studio across all three services, with
+dates relative to the trial's clock so recent mail stays recent on any weekday.
+Cases: draft a
+reply to a client that links the latest proposal file and its total without
+sending or sharing; update the matching rows of a 25-row supplier deliveries
+database from the last few days' mail; and, after a mail rate limit, follow a link to
+a spreadsheet the account cannot open and say so. Deterministic checks read
+the emulators' recorded calls, writes and final state. Reports keep fixture
+links and addresses on reserved example domains readable and redact the
+emulators' endpoints and tokens. The
+`connected-apps-meaning-v2` rubric judges the draft and the restricted-file
+reply by meaning; calibration covers a paraphrased total, a stale total, an
+invented discount, a claimed send, an honest refusal, a labelled prior-year
+figure, an invented figure and a wrong cause.
+
+The first November 2026 run, one trial per case on a small Anthropic model judging
+itself, passed the tracker and restricted-file cases. The draft case was right on
+every recorded effect but the judge failed it because it could not
+see the proposal its draft quoted. With the proposal text in the judge's
+evidence (v2) and that reviewed draft added as a label, a second run passed all
+three. The rate-limited search was retried and the restricted file was reported
+as unshared, not answered from the prior year's budget. After the review fixes (a day-independent
+tracker prompt, stricter recipient, retry and row checks, and studio-v2
+fixtures), one run passed two of three: the draft and restricted-file cases
+passed, and the tracker case failed on a real miss, setting a delayed order's
+new date but leaving its status "In transit".
+
+### Long conversation and cost evals
+
+List seeded long-chat cases without a database or model connection:
+
+```sh
+pnpm exec tsx packages/testkit/src/cli/evals.ts --suite history --list
+```
+
+Run the original context strategy explicitly with a disposable database and an
+explicit generic model connection. Connection and pricing JSON files must stay
+outside tracked content. Pricing requires `source`, `version`, and USD per million
+rates for `input`, `output`, `cacheRead`, and `cacheWrite`. Optional `longContext`
+rates use the same four fields plus `thresholdTokens`. Optional `cacheWrite1h`
+prices one-hour writes separately; these tokens are a subset of all cache writes.
+
+```sh
+pnpm exec tsx packages/testkit/src/cli/evals.ts --live --suite history --strategy current --connection /tmp/eval-connection.json --pricing /tmp/eval-pricing.json --judge-connection /tmp/eval-judge-connection.json --judge-pricing /tmp/eval-judge-pricing.json --trials 1 --spend-cap-usd 5
+```
+
+The default live cap is USD 5. Every runtime model call reserves its estimated
+maximum spend before inference, including subagent and summarization calls.
+Concurrent reservations share one budget; unavailable usage retains the reserved
+estimate. Unknown pricing prevents live execution. This is an estimate guard,
+not a provider billing guarantee. Cache writes are priced conservatively for
+reservations and by their actual reported buckets for reports. Reasoning tokens
+are included in output, never charged twice.
+
+Total tokens require an explicit upstream total or a complete known breakdown of
+uncached input, output, cache reads, and cache writes. SDK totals synthesized from
+missing cache fields are not proof of complete usage. When that breakdown and a
+reported total are unavailable, settlement retains the reservation. An observed
+one-hour write without pricing in its applicable context tier also retains the
+estimate and prevents further scheduling until pricing is resolved.
+
+Reservations use the highest rates across pricing tiers reachable by the upper
+token estimate; actual usage may remain in a more expensive base tier. Explicit
+one-hour writes require a known applicable one-hour price before inference.
+Omitted connection cache controls use the audited SDK short default, so a hidden
+SDK environment setting cannot silently enable long retention. This default does
+not guarantee a cache hit or an exact expiration time.
+
+History fixtures seed 100, 1,000, and 10,000 original messages directly without
+inference. They cover facts, paraphrases, dates, superseded decisions, open work,
+ambiguity, absence, durable constraints, injected historical instructions,
+oversized input, stale compaction coverage, and invalid summaries. Each case holds
+the reply to the identifiers it must or must not carry (a label, a component, a
+file name, a canary) and to no external writes; the `history-meaning-v1` rubric
+then grades by meaning whether the reply says what the earlier chat established.
+The session SQL case is held to its schema and table names alone and needs no
+judge. Results recorded before this rubric were graded by word matches.
+The original strategy includes the stable-guidance-first prompt ordering change.
+
+Reports record the code revision, working diff hash, fixture version, strategy,
+pricing provenance, token buckets, cache hit rate, model/tool calls, and cost by
+operation. A missing measurement stays null. Cache hit rate is cache reads divided
+by eligible uncached input plus cache reads plus cache writes. Eligibility requires
+a configured minimum cache size or observed reuse/write evidence; unknown
+eligibility and a zero denominator stay null. First response means the first persisted streamed text event after run
+creation, falling back to the final persisted bot-message timestamp when no text
+streamed; tool and activity events are excluded. Trial latency includes fixture
+setup and cleanup. Background due work is awaited before final accounting;
+cleanup must stop remaining scheduled and active work before further trials.
+
+Compare strategies in one process so all trials and concurrent calls share one
+spend cap. The order rotates deterministically within each case and trial; the
+provider's cache state is uncontrolled. `current` preserves the original history
+window and summary behavior; the other strategies permit history retrieval.
+
+The selected product default is recent context with original-history retrieval.
+Both retrieval and snapshots passed the same 54-workflow candidate qualification;
+retrieval had the lower observed full workflow cost. These sequential runs had
+uncontrolled provider cache, so the difference is not a causal savings estimate.
+Explicit `current` remains available for baseline comparisons. Standalone
+runtimes without usable history tools preserve loaded originals within the model
+input budget instead of advertising unavailable retrieval. The final default and
+fallback source passed all 54 unchanged workflows and all 27 repeated answers,
+costing USD 0.06519195 across 227 calls. Details, limitations, and preserved failed
+runs appear in `docs/evals/history-findings.md` and the task checklist. That initial
+qualification predates integration with Pi 0.87.1. The first current-base report,
+`test-report/evals/archive/history-pr-final-qualification.json`, passed 53/54 and preserves its
+pagination recall failure; it does not replace the required passing final-source
+gate. Current integration checks also verify system transcript instructions and
+tools reach the provider after history selection.
+
+```sh
+pnpm exec tsx packages/testkit/src/cli/evals.ts --live --suite history --strategy current --strategy retrieval --strategy snapshots --strategy cache-aware --connection /tmp/eval-connection.json --pricing /tmp/eval-pricing.json --judge-connection /tmp/eval-judge-connection.json --judge-pricing /tmp/eval-judge-pricing.json --trials 2 --spend-cap-usd 1
+```
+
+Ordinary long-history cases begin with a deterministic prepared summary that
+omits rare original details while retaining common constraints and corrections.
+Its generation is free fixture setup, so these cases do not measure real summary
+preparation cost. Backlog, oversized-input, and invalid-summary cases are separate
+bounded stress workloads. Invalid stored summaries do not simulate a provider
+failure during summarization. Reports include post-run summary coverage and
+queue failure counts when the loaded code supports them; counts omit error
+messages and payloads. Expected recovery must be assessed against coverage and
+outcomes, rather than treating every background failure as an outcome failure.
+
+Per-call context telemetry records sanitized selection decisions, predicted
+freshness, measured reuse, and cost by prediction. Unsupported retention metadata
+remains unknown. History diagnostics retain only synthetic search queries,
+result counts, and bounded options; original messages, credentials, and IDs are
+excluded. Exclusive retrieval cost attribution covers an entire model call that
+requests or consumes history tools; it does not split the call's answer tokens.
+
+Use `--cache-probe` for four direct model calls: a fresh synthetic prefix,
+identical replay, changed prefix, and changed replay. This requires an explicit
+connection and pricing, shares the invocation's spend guard, and avoids database
+setup. It measures observed reuse and first-response latency; it is not an expiry
+test. `--cache-capabilities /tmp/cache-capabilities.json` supplies generic documented
+metadata independently of credentials. Predictions remain advisory because
+routing and eviction can prevent reuse. Separate invocations must receive only
+the remaining approved budget after earlier reservations and charges.
+
+Retention metadata describes the selector's prediction. In particular,
+`retentionMode: none` disables inferred warmth and does not promise that the
+provider disables caching or bills all input at the ordinary rate. Fake-clock
+checks cover expiry transitions; live prefix replay covers immediate reuse and
+changed-prefix observations. Live retention expiry remains unproven unless a
+separate expiry experiment is explicitly reported.
+
+New workflow reports also partition final durable usage into numbered steps
+using run and parent-run associations. Compaction and calls without an observed
+step association remain separate workflow background buckets. Reports publish
+no ledger or run identifiers. The partition reconciles model-call counts and
+known charges with the full workflow total; unknown incurred costs stay unknown.
+This attribution does not add waits between questions or change background
+scheduling. Earlier reports without `stepAccounting` cannot establish exact
+first-question versus follow-up charges from the combined setup cost alone.
+
+The partial pagination qualification was stopped after eleven passing workflows
+when a source audit found an incomplete instruction-ordering reconciliation. Its
+remaining 43 workflows are explicitly not run. Restored ordering is checked on
+actual provider requests assembled by the executor helper; the final corrected
+source must complete its own unchanged 54-workflow qualification before merge.
+
+The restored-prefix PR qualification completed 54 workflows with 53 passing.
+All twelve distant-recall trials and all 27 repeated answers passed; one strict
+loop skipped segment seven and guessed an invalid cursor. The original result is
+preserved in `test-report/evals/archive/history-pr-restored-prefix-qualification.json`. Its charge
+was USD 0.093003835 across 248 calls, reconciled with zero reservations or
+background/cleanup failures. Cumulative guarded spend is USD 1.43272518 of USD 5.
+Shared opaque-cursor guidance and its actual-wire regressions address this new
+failure; a full unchanged live qualification remains required before merge.
+
+The separate opaque-cursor qualification on clean committed source `3dd01cea`
+completed all 54 workflows: 53 passed. All twelve distant-recall trials and all
+27 repeated answers passed; five of six strict loops passed. One loop stopped
+after five reads, claiming missing continuation metadata. The raw JSON contained
+its cursor, but the failed live outgoing payload was not captured; the claim does
+not establish a serialization defect. The actual-wire offline loop passes without
+waiving the live failure. The preserved report is
+`test-report/evals/archive/history-pr-opaque-cursor-qualification.json`. Its charge was
+USD 0.09108541 across 238 calls, fully reconciled with zero reservations or
+background/cleanup failures. Cumulative guarded spend is USD 1.52381059 of USD 5.
+That run left the live qualification gate failed. Passing CI does not clear a
+failed live qualification.

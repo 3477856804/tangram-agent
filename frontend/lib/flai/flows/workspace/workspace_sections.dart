@@ -1,18 +1,18 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 
 import 'package:tangram/harness/ui_customization.dart';
+import 'package:tangram/mosaic/generated_registry.dart';
+import 'package:tangram/mosaic/host.dart';
+import 'package:tangram/mosaic/panel.dart';
+import 'package:tangram/mosaic/registry.dart';
 import 'package:tangram/ui/pages/tga_3d_page.dart';
 import 'package:tangram/ui/pages/tga_account_ops_page.dart';
 import 'package:tangram/ui/pages/tga_app_market_page.dart';
 import 'package:tangram/ui/pages/tga_artifacts_page.dart';
 import 'package:tangram/ui/pages/tga_channels_page.dart';
 import 'package:tangram/ui/pages/tga_calls_page.dart';
-import 'package:tangram/ui/pages/tga_cognition_page.dart';
 import 'package:tangram/ui/pages/tga_compute_page.dart';
 import 'package:tangram/ui/pages/tga_computer_page.dart';
-import 'package:tangram/ui/pages/tga_creator_page.dart';
-import 'package:tangram/ui/pages/tga_customize_page.dart';
 import 'package:tangram/ui/pages/tga_experience_page.dart';
 import 'package:tangram/ui/pages/tga_group_chat_page.dart';
 import 'package:tangram/ui/pages/tga_knowledge_page.dart';
@@ -36,7 +36,6 @@ import 'package:tangram/ui/pages/tga_store_page.dart';
 import 'package:tangram/ui/pages/tga_sun_run_page.dart';
 import 'package:tangram/ui/pages/tga_team_page.dart';
 import 'package:tangram/ui/pages/tga_training_page.dart';
-import 'package:tangram/ui/pages/tga_ui_plugins_page.dart';
 import 'package:tangram/ui/pages/tga_video_studio_page.dart';
 import 'package:tangram/ui/pages/tga_workflow_page.dart';
 import 'package:tangram/ui/pages/tga_workspace_page.dart';
@@ -171,33 +170,9 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
     fullPage: true,
   ),
   NavItem(
-    icon: Icons.psychology_alt_outlined,
-    labelKey: 'sidebar.cognition',
-    page: const TgaCognitionPage(),
-    fullPage: true,
-  ),
-  NavItem(
     icon: Icons.storefront_rounded,
     labelKey: 'sidebar.appMarket',
     page: const TgaAppMarketPage(),
-    fullPage: true,
-  ),
-  NavItem(
-    icon: Icons.extension_outlined,
-    labelKey: 'sidebar.creator',
-    page: const TgaCreatorPage(),
-    fullPage: true,
-  ),
-  NavItem(
-    icon: Icons.palette_outlined,
-    labelKey: 'sidebar.customize',
-    page: const _SharedCustomizePage(),
-    fullPage: true,
-  ),
-  NavItem(
-    icon: Icons.widgets_outlined,
-    labelKey: 'sidebar.uiPlugins',
-    page: const TgaUiPluginsPage(),
     fullPage: true,
   ),
   NavItem(
@@ -228,6 +203,20 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
     icon: Icons.memory_outlined,
     labelKey: 'sidebar.models',
     page: const TgaModelsPage(),
+    fullPage: true,
+  ),
+  NavItem(
+    icon: Icons.dashboard_outlined,
+    labelKey: 'sidebar.mosaic',
+    // mosaic 拼装壳：左侧导航 + 右侧面板，面板由约定注册表生成
+    //（新增面板文件即自动出现，零改主入口）。
+    // 能力集合目前由侧栏全量授予——与今日两个面板无条件出现在导航里
+    // 的行为一致；能力授权落地后改为真实授权集合，visible() 会自动
+    // 过滤缺失能力的面板。现有 channels/models 入口原样保留。
+    page: MosaicHost(
+      registry: MosaicRegistry(panels: tgaPanels()),
+      available: MosaicCapability.values.toSet(),
+    ),
     fullPage: true,
   ),
   NavItem(
@@ -309,20 +298,3 @@ List<NavItem> _allWorkspaceNavItems() => <NavItem>[
     fullPage: true,
   ),
 ];
-
-/// 复用 main.dart 提供的同一个 [UiCustomizationStore]：保存/切换后主题立即生效。
-/// 没有 Provider（独立测试或单独复用页面）时回退到页面自行加载，行为不变。
-class _SharedCustomizePage extends StatelessWidget {
-  const _SharedCustomizePage();
-
-  @override
-  Widget build(BuildContext context) {
-    UiCustomizationStore? store;
-    try {
-      store = Provider.of<UiCustomizationStore>(context);
-    } on Object {
-      store = null;
-    }
-    return TgaCustomizePage(customization: store);
-  }
-}

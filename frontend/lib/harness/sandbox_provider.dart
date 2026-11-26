@@ -33,7 +33,8 @@ enum SandboxProviderKind {
 }
 
 /// 一次沙箱执行的结果。`status` 取值：
-/// `ok` / `error` / `timeout` / `takeover-active` / `not-installed`。
+/// `ok` / `error` / `timeout` / `takeover-active` / `not-installed` / `denied`
+///（`denied` = 安全策略 deny 预检拒绝，未执行命令）。
 class SandboxExecResult {
   const SandboxExecResult({
     required this.ok,
@@ -72,6 +73,23 @@ class SandboxExecResult {
         error: detail,
       );
 
+  /// 安全策略 deny 预检拒绝的结果（不执行命令；`rule` 为空表示
+  /// 预检本身失败而 fail-closed，同样未执行）。
+  factory SandboxExecResult.denied({
+    required SandboxProviderKind kind,
+    required String rule,
+    String cwd = '.',
+  }) =>
+      SandboxExecResult(
+        ok: false,
+        kind: kind,
+        status: 'denied',
+        error: rule.isEmpty
+            ? '安全策略检查失败，拒绝执行'
+            : '命令被安全策略拒绝（规则 $rule）',
+        cwd: cwd,
+      );
+
   final bool ok;
   final SandboxProviderKind kind;
   final String stdout;
@@ -97,6 +115,209 @@ class SandboxExecResult {
         if (error.isNotEmpty) 'error': error,
         'cwd': cwd,
       };
+}
+
+/// deny 预检回调（round14 第一阶段）：只查 deny，返回命中规则的 id，
+/// 未命中返回 null。不建审批单、不消费一次性凭据；回调本身抛错时调用方
+/// 按 fail-closed 处理（拒绝执行），绝不静默放行。
+typedef SandboxProviderDenyCheck = Future<String?> Function(
+  String command,
+  String cwd,
+);
+
+/// 执行审计回调：只收元数据事件，绝不收命令原文与输出。
+/// 回调抛错时调用方一律吞掉，绝不阻断执行。
+typedef SandboxProviderAuditCallback = void Function(
+  SandboxAuditEvent event,
+);
+
+/// 沙箱执行审计事件（round14 第一阶段）：只记元数据，绝不记命令原文与输出。
+///
+/// 字段约定照抄 Python 侧 `im/serve.py` 的审计 detail 写法
+/// （`tool=… first=… chars=…`），再补执行结果所需的字段：
+///  * `tool` 工具名（`shell` / `cube`）；
+///  * `first` 命令/表达式首词（≤40 字符；命令为空或只有环境变量导出时
+///    回落为工具名本身）；
+///  * `chars` 原始命令长度（`shellEnvPrefix` 拼进的 `export …` 前缀先剥离，
+///    只计剥离后的长度，避免用长度泄露密钥）；
+///  * `cwd` 相对路径（已是相对路径时原样记录）；
+///  * `exit` 退出码（`-1` = 未执行：deny 拒绝 / 预检失败 / 执行体未启动）；
+///  * `ms` 执行耗时毫秒；`provider` 执行后端（`local` / `proot` …）；
+///  * `rule` 命中的 deny 规则 id（未命中为空）。
+///
+/// `decision`（`allowed` / `denied` / `failed`）不进 [detail]——它走
+/// 审计写入的 decision 参数，与 Python 侧的 decision 字段同义。
+/// 本类是 `SandboxAuditEvent` 的唯一真源：`SandboxedShell` 侧的重复实现
+/// 已在 round15 删除，改为 export 本类（见
+/// `agent/sandbox/sandboxed_shell.dart`）；`detail` 格式即 canonical 格式
+/// （见 check_sandbox_audit_round14.dart §2/§4 与
+/// check_audit_rotation_round15.dart）。
+class SandboxAuditEvent {
+  const SandboxAuditEvent({
+    required this.tool,
+    required this.first,
+    required this.chars,
+    required this.cwd,
+    required this.exit,
+    required this.ms,
+    required this.provider,
+    required this.rule,
+    required this.decision,
+  });
+
+  final String tool;
+  final String first;
+  final int chars;
+  final String cwd;
+  final int exit;
+  final int ms;
+  final String provider;
+  final String rule;
+  final String decision;
+
+  /// 审计 detail 字符串：`k=v` 空格分隔，与 Python 侧同形。
+  String get detail =>
+      'tool=$tool first=$first chars=$chars cwd=$cwd '
+      'exit=$exit ms=$ms provider=$provider rule=$rule';
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'tool': tool,
+        'first': first,
+        'chars': chars,
+        'cwd': cwd,
+        'exit': exit,
+        'ms': ms,
+        'provider': provider,
+        'rule': rule,
+        'decision': decision,
+        'detail': detail,
+      };
+
+  /// 从原始命令构造事件：先剥离 `shellEnvPrefix` 拼进的
+  /// `export K='v'; ` 前缀，再取首词与长度。
+  factory SandboxAuditEvent.fromCommand({
+    required String tool,
+    required String command,
+    String cwd = '.',
+    required int exit,
+    required int ms,
+    required String provider,
+    String rule = '',
+    required String decision,
+    String? root,
+  }) {
+    final String stripped = stripEnvPrefix(command);
+    final String first = firstWord(command);
+    return SandboxAuditEvent(
+      tool: tool,
+      first: first.isEmpty ? tool : first,
+      chars: stripped.length,
+      cwd: root == null ? cwd : relativeCwd(cwd, root),
+      exit: exit,
+      ms: ms,
+      provider: provider,
+      rule: rule,
+      decision: decision,
+    );
+  }
+
+  /// 从 cube 表达式构造事件：cube 执行无 cwd（记 '.'），首词取表达式
+  /// 首个空白分隔 token（≤40 字符），空表达式回落为工具名。
+  /// （round15：原 `sandboxed_shell.dart` 的同形实现已并入本类，此处为
+  /// 唯一真源；shell 侧改为 export 本类。语义与原实现逐字一致。）
+  factory SandboxAuditEvent.fromExpression({
+    required String expression,
+    required int exit,
+    required int ms,
+    required String decision,
+    String rule = '',
+  }) {
+    final String text = expression.trim();
+    String first = 'cube';
+    if (text.isNotEmpty) {
+      final String token = text.split(RegExp(r'\s+')).first;
+      first = token.length > 40 ? token.substring(0, 40) : token;
+    }
+    return SandboxAuditEvent(
+      tool: 'cube',
+      first: first,
+      chars: text.length,
+      cwd: '.',
+      exit: exit,
+      ms: ms,
+      provider: 'isolate-cube',
+      rule: rule,
+      decision: decision,
+    );
+  }
+
+  /// 命令首词（≤40 字符）：先剥离环境变量导出前缀再取首个空白分隔 token；
+  /// 命令为空或只有导出语句时返回 ''（由 [fromCommand] 回落为工具名）。
+  static String firstWord(String command) {
+    final String stripped = stripEnvPrefix(command);
+    if (stripped.isEmpty) return '';
+    final String first = stripped.split(RegExp(r'\s+')).first;
+    return first.length > 40 ? first.substring(0, 40) : first;
+  }
+
+  /// 剥离命令开头的 `export K='v'; ` 前缀（`shellEnvPrefix` 的拼法，
+  /// 值内单引号以 `'\''` 转义）。逐条剥离开头的完整导出语句（以 `;` 结束）；
+  /// 剥离后为空（只有前缀、无真实命令，或命令本身只有导出语句）时返回 ''，
+  /// 调用方以工具名回落 first、chars 记 0，避免用长度泄露前缀里密钥的
+  /// 长度。命令本身是单个无分号导出（`export FOO=bar`）时因语句不完整
+  /// 而不剥离，原样保留。
+  static String stripEnvPrefix(String command) {
+    String s = command;
+    while (true) {
+      final RegExpMatch? m =
+          RegExp(r"^export\s+[A-Za-z_][A-Za-z0-9_]*=").firstMatch(s);
+      if (m == null) break;
+      int i = m.end;
+      if (i < s.length && s[i] == "'") {
+        // 单引号值：'\'' 是转义后的单引号，跳过；裸 ' 闭合。
+        i++;
+        bool closed = false;
+        while (i < s.length) {
+          if (s.startsWith(r"'\''", i)) {
+            i += 4;
+            continue;
+          }
+          if (s[i] == "'") {
+            closed = true;
+            break;
+          }
+          i++;
+        }
+        if (!closed) break;
+        i++; // 越过闭合引号。
+      } else {
+        // 无引号值：扫到分号。
+        while (i < s.length && s[i] != ';') {
+          i++;
+        }
+        if (i >= s.length) break; // 无分号：不是完整导出语句，不剥离。
+      }
+      // 分号前可有空白；分号后只允许空白，否则不是一条完整导出语句。
+      while (i < s.length && s[i] == ' ') {
+        i++;
+      }
+      if (i >= s.length || s[i] != ';') break;
+      i++; // 越过分号。
+      s = s.substring(i).trimLeft();
+    }
+    return s;
+  }
+
+  /// 绝对路径 cwd 相对化到沙箱根（已是相对路径时原样返回）。
+  static String relativeCwd(String cwd, String root) {
+    final String c = cwd.trim();
+    if (c.isEmpty) return '.';
+    final String r = root.replaceAll(RegExp(r'/+$'), '');
+    if (r.isEmpty) return c;
+    if (c == r) return '.';
+    if (c.startsWith('$r/')) return c.substring(r.length + 1);
+    return c;
+  }
 }
 
 /// listDir 返回的一条文件记录。
@@ -130,6 +351,66 @@ abstract class SandboxProvider {
 
   /// 人工接管管理器（可为空 = 不设接管门禁；注册表会统一注入）。
   SandboxTakeover? takeover;
+
+  /// deny 预检回调（可选，由注册表注入或调用方直接设置；只查 deny，
+  /// 返回命中规则的 id，未命中返回 null）。
+  SandboxProviderDenyCheck? denyCheck;
+
+  /// 执行审计回调（可选，只收 [SandboxAuditEvent] 元数据事件）。
+  SandboxProviderAuditCallback? onAudit;
+
+  /// deny 预检（round14）：命中时返回拒绝结果且不执行命令，同时记一条
+  /// decision=`denied`、rule=规则 id 的审计；未命中返回 null（放行）。
+  /// 预检回调本身抛错时按 fail-closed 处理：返回 rule 为空的拒绝结果并
+  /// 记一条审计，绝不静默放行。未接线（[denyCheck] 为空）时直接放行。
+  Future<SandboxExecResult?> checkDeny(
+    String command, {
+    required String cwd,
+    required int ms,
+  }) async {
+    final SandboxProviderDenyCheck? check = denyCheck;
+    if (check == null) return null;
+    String? rule;
+    try {
+      rule = await check(command, cwd);
+    } on Object {
+      fireAudit(SandboxAuditEvent.fromCommand(
+        tool: 'shell',
+        command: command,
+        cwd: cwd,
+        exit: -1,
+        ms: ms,
+        provider: kind.name,
+        decision: 'denied',
+      ));
+      return SandboxExecResult.denied(kind: kind, rule: '', cwd: cwd);
+    }
+    if (rule == null || rule.isEmpty) return null;
+    fireAudit(SandboxAuditEvent.fromCommand(
+      tool: 'shell',
+      command: command,
+      cwd: cwd,
+      exit: -1,
+      ms: ms,
+      provider: kind.name,
+      rule: rule,
+      decision: 'denied',
+    ));
+    return SandboxExecResult.denied(kind: kind, rule: rule, cwd: cwd);
+  }
+
+  /// 审计发送：回调为空或抛错时静默跳过，绝不阻断执行。
+  /// 各后端在 `exec` 的 choke 点调用（deny 由 [checkDeny] 代发，
+  /// 成功/失败由执行收尾处发），保证每条执行最多记一条审计。
+  void fireAudit(SandboxAuditEvent event) {
+    final SandboxProviderAuditCallback? cb = onAudit;
+    if (cb == null) return;
+    try {
+      cb(event);
+    } on Object {
+      // 审计失败绝不阻断执行。
+    }
+  }
 
   /// 生命周期：确保后端就绪。proot 未安装时返回 ok:false（不自动下载，
   /// 安装由 UI 侧 `proot.install()` 触发）；本机后端恒为就绪。
@@ -322,6 +603,15 @@ class LocalSandboxProvider extends SandboxProvider {
   }) async {
     final SandboxExecResult? refused = takeoverRefusal();
     if (refused != null) return refused;
+    // round14：deny 预检（只查 deny；接管门禁优先，仍以接管拒绝为准）。
+    // 预检在工作区创建 / cwd 校验之前：被拒的命令不触碰任何磁盘状态。
+    final Stopwatch execSw = Stopwatch()..start();
+    final SandboxExecResult? denied = await checkDeny(
+      command,
+      cwd: cwd,
+      ms: execSw.elapsedMilliseconds,
+    );
+    if (denied != null) return denied;
     if (Platform.isWindows) {
       return SandboxExecResult(
         ok: false,
@@ -397,7 +687,10 @@ class LocalSandboxProvider extends SandboxProvider {
     final String err = SandboxProvider.capOutput(stderrAll, maxOutputChars);
     final bool truncated =
         stdoutAll.length > maxOutputChars || stderrAll.length > maxOutputChars;
-    return SandboxExecResult(
+    // round14：执行收尾审计（只记元数据；本方法内其余 early return 均在
+    // 执行体启动前——平台不支持 / 工作区不可用 / cwd 越界 / shell 起不来——
+    // 命令未执行，故不记执行审计；deny 由 checkDeny 代发，不重复记）。
+    final SandboxExecResult result = SandboxExecResult(
       ok: !timedOut && exitCode == 0,
       kind: kind,
       stdout: out,
@@ -411,6 +704,16 @@ class LocalSandboxProvider extends SandboxProvider {
           : (exitCode == 0 ? '' : 'exit $exitCode'),
       cwd: cwd,
     );
+    fireAudit(SandboxAuditEvent.fromCommand(
+      tool: 'shell',
+      command: command,
+      cwd: cwd,
+      exit: exitCode,
+      ms: execSw.elapsedMilliseconds,
+      provider: kind.name,
+      decision: result.ok ? 'allowed' : 'failed',
+    ));
+    return result;
   }
 
   @override
@@ -586,6 +889,30 @@ class SandboxProviderRegistry {
   SandboxProvider? _current;
   SandboxProviderKind? _currentKind;
 
+  /// deny 预检 / 执行审计回调（round14）：注册表持有，建后端时注入各
+  /// provider（与 `takeover` 同款注入）；已建好的当前后端由 setter 同步。
+  /// 注册表自身不另记审计——审计只在后端 `exec` 的 choke 点记一条。
+  SandboxProviderDenyCheck? _denyCheck;
+  SandboxProviderDenyCheck? get denyCheck => _denyCheck;
+  set denyCheck(SandboxProviderDenyCheck? value) {
+    _denyCheck = value;
+    _current?.denyCheck = value;
+  }
+
+  SandboxProviderAuditCallback? _onAudit;
+  SandboxProviderAuditCallback? get onAudit => _onAudit;
+  set onAudit(SandboxProviderAuditCallback? value) {
+    _onAudit = value;
+    _current?.onAudit = value;
+  }
+
+  /// 把注册表持有的 deny/审计回调注入后端（只注入已设置的，不覆盖
+  /// 后端自带的回调）。
+  void _injectHooks(SandboxProvider p) {
+    if (_denyCheck != null) p.denyCheck = _denyCheck;
+    if (_onAudit != null) p.onAudit = _onAudit;
+  }
+
   /// 最近一次切换失败的原因（成功切换后清掉）。
   String? lastSwitchError;
 
@@ -617,6 +944,7 @@ class SandboxProviderRegistry {
     }
     final SandboxProvider p = factory();
     p.takeover = takeover;
+    _injectHooks(p);
     _current = p;
     _currentKind = kind;
     return p;
@@ -635,6 +963,7 @@ class SandboxProviderRegistry {
     }
     final SandboxProvider candidate = factory();
     candidate.takeover = takeover;
+    _injectHooks(candidate);
     final Map<String, dynamic> check = await candidate.selfCheck();
     if (check['ok'] == true) {
       _current = candidate;
@@ -663,6 +992,7 @@ class SandboxProviderRegistry {
     }
     final SandboxProvider fb = fbFactory();
     fb.takeover = takeover;
+    _injectHooks(fb);
     final Map<String, dynamic> fbCheck = await fb.selfCheck();
     if (fbCheck['ok'] != true) {
       return <String, dynamic>{
@@ -683,7 +1013,8 @@ class SandboxProviderRegistry {
     };
   }
 
-  /// 执行入口：委托当前后端（接管门禁在后端 exec 内生效）。
+  /// 执行入口：委托当前后端（接管门禁、deny 预检与执行审计都在后端
+  /// `exec` 的 choke 点生效；注册表只注入回调，不另记审计，避免重复记）。
   Future<SandboxExecResult> exec(
     String command, {
     String cwd = '.',

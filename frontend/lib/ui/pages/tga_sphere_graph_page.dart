@@ -736,8 +736,8 @@ class _SpherePainter extends CustomPainter {
       // 节点改小：去掉臃肿感。度数影响减弱（/10 且上限 1.7），
       // 基础半径与深度增量同步收紧，让 400 节点球体更精致、不糊成一团。
       final double degFactor =
-          1.0 + math.sqrt((degrees[i] > 0 ? degrees[i] : 1).toDouble()) / 10;
-      double nodeR = (1.3 + depth * 1.5) * math.min(degFactor, 1.7) * zoom;
+          1.0 + math.sqrt((degrees[i] > 0 ? degrees[i] : 1).toDouble()) / 12;
+      double nodeR = (1.05 + depth * 1.15) * math.min(degFactor, 1.55) * zoom;
       if (isSel) nodeR *= 1 + 0.45 * _easeOutBack(selT);
       nodeRs[i] = nodeR;
 
@@ -747,7 +747,7 @@ class _SpherePainter extends CustomPainter {
       final double glowA =
           (back ? 0.22 * 0.35 : 0.22 * (0.45 + depth * 0.55)) +
               (isSel ? 0.10 : 0.0);
-      final double haloR = nodeR * 2.2;
+      final double haloR = nodeR * 1.85;
       canvas.drawCircle(
         screen[i],
         haloR,

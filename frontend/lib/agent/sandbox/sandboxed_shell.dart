@@ -9,6 +9,16 @@ import 'package:path/path.dart' as p;
 
 import 'cube_schema.dart';
 
+/// `SandboxAuditEvent` 唯一真源在 `harness/sandbox_provider.dart`，
+/// 本文件不再自有重复实现，直接 export（round15 统一）：
+/// `cube_shell.SandboxAuditEvent`（embedded_backend.dart 在用）与本文件内
+/// 引用都解析到同一 canonical 类；`sandbox_provider.dart` 只 import
+/// `sandbox_takeover.dart`，不 import agent 代码，无 import 环。
+/// 注意：export 本身不把名字带入本文件的名字空间（Dart 规则），本文件
+/// 内的引用靠下面这行 import 解析；两者缺一不可。
+import 'package:tangram/harness/sandbox_provider.dart' show SandboxAuditEvent;
+export 'package:tangram/harness/sandbox_provider.dart' show SandboxAuditEvent;
+
 /// 命名稳定错误：能力缺失 / 未知 cube 时抛出。沙箱以「显式拒绝 + 零执行」
 /// 回应，绝不静默降级成不受限执行（对齐 flutter_agent_harness 的 `_refusal`）。
 class RefusalError implements Exception {
@@ -350,6 +360,24 @@ class _IsolateMsg {
   final Map<String, dynamic> args;
 }
 
+/// deny 预检回调（round14 第一阶段）：只查 deny，返回命中规则的 id，
+/// 未命中返回 null。不建审批单、不消费一次性凭据；回调本身抛错时调用方
+/// 按 fail-closed 处理（拒绝执行），绝不静默放行。
+typedef SandboxDenyCheck = Future<String?> Function(
+  String cube,
+  String expression,
+);
+
+/// 执行审计回调：只收元数据事件，绝不收表达式原文与输出。
+/// 回调抛错时调用方一律吞掉，绝不阻断执行。
+typedef SandboxAuditCallback = void Function(SandboxAuditEvent event);
+
+/// ask 预检回调（第二阶段）：返回命中 ask 的规则 id，未命中返回 null。
+typedef SandboxAskCheck = Future<String?> Function(String cube, String expression);
+
+/// ask 审批回调：返回 true＝已获批（一次性凭据已消费），false＝已建审批单待人工确认。
+typedef SandboxAskApproval = Future<bool> Function(String cube, String expression);
+
 /// 应用级沙箱门面（单例）。加载契约后即具备能力校验与执行能力；
 /// 契约加载失败则永久处于拒绝态（零执行），绝不假装安全。
 class SandboxedShell extends ChangeNotifier {
@@ -362,6 +390,35 @@ class SandboxedShell extends ChangeNotifier {
   bool _loading = false;
   bool _loaded = false;
   String? _loadError;
+
+  /// deny 预检回调（可选，由 EmbeddedBackend 在构造时注入；只查 deny）。
+  /// 挂在单例本身而非内核对象上：hotSwap 只换插件节点，不重建本单例，
+  /// 也不重跑 EmbeddedBackend._bootKernel，回调不会被热替换丢掉。
+  SandboxDenyCheck? denyCheck;
+
+  /// 执行审计回调（可选，由 EmbeddedBackend 在构造时注入；只收元数据）。
+  SandboxAuditCallback? onAudit;
+
+  /// ask 预检回调（可选，由 EmbeddedBackend 在构造时注入；只查 ask，
+  /// 返回命中 ask 的规则 id，未命中返回 null）。
+  /// 挂在单例本身而非内核对象上：hotSwap 只换插件节点，不重建本单例，
+  /// 也不重跑 EmbeddedBackend._bootKernel，回调不会被热替换丢掉。
+  SandboxAskCheck? askCheck;
+
+  /// ask 审批回调（可选，由 EmbeddedBackend 在构造时注入；ask 命中时调用，
+  /// 返回 true=已获批继续执行，false=已建审批单待人工确认）。
+  SandboxAskApproval? onAskApproval;
+
+  /// 审计发送：回调为空或抛错时静默跳过，绝不阻断执行。
+  void _fireAudit(SandboxAuditEvent event) {
+    final SandboxAuditCallback? cb = onAudit;
+    if (cb == null) return;
+    try {
+      cb(event);
+    } on Object {
+      // 审计失败绝不阻断执行。
+    }
+  }
 
   CubeContract? get contract => _contract;
   bool get loaded => _loaded;
@@ -398,7 +455,120 @@ class SandboxedShell extends ChangeNotifier {
         _loadError ?? '能力契约未加载，沙箱处于拒绝态（零执行）。',
       );
     }
-    return _env!.exec(cube, args);
+    // round14 第一阶段：deny 预检 + 执行审计。只查 deny，不碰 ask/auto；
+    // 预检在 Isolate 启动之前：被拒的表达式绝不进入执行体。
+    // 表达式取参顺序与 _execute 内保持一致（code / expression / text）。
+    final String expression =
+        (args['code'] ?? args['expression'] ?? args['text'] ?? '').toString();
+    final Stopwatch execSw = Stopwatch()..start();
+    final SandboxDenyCheck? check = denyCheck;
+    if (check != null) {
+      String? rule;
+      try {
+        rule = await check(cube, expression);
+      } on Object {
+        _fireAudit(SandboxAuditEvent.fromExpression(
+          expression: expression,
+          exit: -1,
+          ms: execSw.elapsedMilliseconds,
+          decision: 'denied',
+        ));
+        return SandboxResult(
+          ok: false,
+          error: '安全策略检查失败，拒绝执行',
+          cube: cube,
+        );
+      }
+      if (rule != null && rule.isNotEmpty) {
+        _fireAudit(SandboxAuditEvent.fromExpression(
+          expression: expression,
+          exit: -1,
+          ms: execSw.elapsedMilliseconds,
+          decision: 'denied',
+          rule: rule,
+        ));
+        return SandboxResult(
+          ok: false,
+          error: '表达式被安全策略拒绝（规则 $rule）',
+          cube: cube,
+        );
+      }
+    }
+    // round15 第二阶段：ask 预检 + 审批。只查 ask，不碰 deny/allow；
+    // askCheck 未接线时行为与之前完全一致。
+    final SandboxAskCheck? ask = askCheck;
+    if (ask != null) {
+      String? askRule;
+      try {
+        askRule = await ask(cube, expression);
+      } on Object {
+        _fireAudit(SandboxAuditEvent.fromExpression(
+          expression: expression,
+          exit: -1,
+          ms: execSw.elapsedMilliseconds,
+          decision: 'denied',
+        ));
+        return SandboxResult(
+          ok: false,
+          error: '安全策略检查失败，拒绝执行',
+          cube: cube,
+        );
+      }
+      if (askRule != null && askRule.isNotEmpty) {
+        bool approved = false;
+        final SandboxAskApproval? approval = onAskApproval;
+        if (approval != null) {
+          try {
+            approved = await approval(cube, expression);
+          } on Object {
+            approved = false;
+          }
+        }
+        if (!approved) {
+          _fireAudit(SandboxAuditEvent.fromExpression(
+            expression: expression,
+            exit: -1,
+            ms: execSw.elapsedMilliseconds,
+            decision: 'denied',
+            rule: askRule,
+          ));
+          return SandboxResult(
+            ok: false,
+            error: approval == null
+                ? '表达式需人工确认：未接审批入口，拒绝执行'
+                : '表达式需人工确认后才能执行（已建审批单，批准后重试）',
+            cube: cube,
+          );
+        }
+      }
+    }
+    try {
+      final SandboxResult r = await _env!.exec(cube, args);
+      _fireAudit(SandboxAuditEvent.fromExpression(
+        expression: expression,
+        exit: r.ok ? 0 : 1,
+        ms: execSw.elapsedMilliseconds,
+        decision: r.ok ? 'allowed' : 'failed',
+      ));
+      return r;
+    } on RefusalError {
+      // 能力缺失 / 未知 cube / 超时：执行体未完成，记 failed、exit -1。
+      _fireAudit(SandboxAuditEvent.fromExpression(
+        expression: expression,
+        exit: -1,
+        ms: execSw.elapsedMilliseconds,
+        decision: 'failed',
+      ));
+      rethrow;
+    } on Object {
+      _fireAudit(SandboxAuditEvent.fromExpression(
+        expression: expression,
+        exit: -1,
+        ms: execSw.elapsedMilliseconds,
+        decision: 'failed',
+      ));
+      rethrow;
+    }
   }
 
   List<String> get cubeNames => _contract?.cubes.keys.toList() ?? const <String>[];

@@ -126,6 +126,18 @@ class PermissionPolicy {
             note: '拒绝读取 .env、凭证与私钥文件',
           ),
           PermissionRule(
+            id: 'default-ask-computer-write',
+            tool: r'^computer_write$',
+            decision: PolicyDecision.ask,
+            note: 'Team Computer 写入需确认（round13 补齐写工具覆盖）',
+          ),
+          PermissionRule(
+            id: 'default-ask-integration-call',
+            tool: r'^integration_call$',
+            decision: PolicyDecision.ask,
+            note: '外部集成调用（MCP/OpenAPI/GraphQL）需确认（round13 补齐写工具覆盖）',
+          ),
+          PermissionRule(
             id: 'default-allow-workspace',
             tool: r'^workspace\.(mkdir|read|copy|write|search|list)$',
             decision: PolicyDecision.allow,
@@ -175,6 +187,24 @@ class PermissionPolicy {
       }
     }
     return fallback;
+  }
+
+  /// 首个命中规则的 id；无规则命中（走 fallback）时返回 ''。
+  ///
+  /// deny 预检的唯一真源：调用方先用 [evaluate] 判定是否为 deny，再用
+  /// 本方法取规则 id 记入审计。两次求值同顺序、同策略实例，结果一致。
+  /// 本方法只返回 id，不做任何放行/拦截判定。
+  String matchedRuleId({
+    required String tool,
+    String path = '',
+    String args = '',
+  }) {
+    for (final PermissionRule rule in rules) {
+      if (rule.matches(tool: tool, path: path, args: args)) {
+        return rule.id;
+      }
+    }
+    return '';
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{

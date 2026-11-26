@@ -38,7 +38,7 @@ def test_default_tier_is_official():
 
 def test_tier_accepts_wire_and_alias():
     assert _manifest(tier="T0")["tier"] == "T0"
-    assert _manifest(tier="third_party")["tier"] == "T3"
+    assert _manifest(tier="third_party", caps=["net:fetch"])["tier"] == "T3"
     assert _manifest(tier="user")["tier"] == "T2"
 
 
