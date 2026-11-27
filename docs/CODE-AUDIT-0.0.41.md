@@ -344,18 +344,18 @@ G5c 7 条关卡、本地断言脚本两处），未动 `plugin_kernel.dart`、
 ### 10.3 仍然保留的诚实边界与已知局限
 
 1. 尾 hash 缓存假设同一目录只有一个 `AuditLog` 实例；外部进程直接改写 audit 文件时缓存可能过期（写失败与 import 时会置空自愈，多实例并发不在契约内）。
-2. `importJsonl` 导入的事件仍不进哈希链（旧行为未变）：导入后下一 append 重新从磁盘读尾，链尾接在最后一条导入事件上，导入事件自身的 prevHash 不与链衔接，`verifyChain` 会在导入事件处按 legacy/断裂口径报告——与 round14 之前一致，未在本轮扩大范围。
-3. dispatch 审计只覆盖 `run()` 层的策略决定：`run()` 捕获的工具执行异常仍只以 error 结果回给调用方，不另记审计（轨迹层记录结果）；`shell`/`workspace.*` 的 allow 决定不记（各自守卫只记 ask/deny，见 `_workspaceGuard` 与 `_shellExec`）。
+2. ~~`importJsonl` 导入的事件仍不进哈希链（旧行为未变）：导入后下一 append 重新从磁盘读尾，链尾接在最后一条导入事件上，导入事件自身的 prevHash 不与链衔接，`verifyChain` 会在导入事件处按 legacy/断裂口径报告——与 round14 之前一致，未在本轮扩大范围。~~已由 round17 修复（见 §12；Dart 侧导入现重接链 + `originHash` 溯源。另：round16 运行记录称“importJsonl 实际经 append() 重新接链”只对 Python 侧成立，Dart 侧当时仍是直接写原始行，round17 核实后纠正于此）。
+3. ~~dispatch 审计只覆盖 `run()` 层的策略决定：`run()` 捕获的工具执行异常仍只以 error 结果回给调用方，不另记审计（轨迹层记录结果）；`shell`/`workspace.*` 的 allow 决定不记（各自守卫只记 ask/deny，见 `_workspaceGuard` 与 `_shellExec`）。~~已由 round17 部分修复（见 §12：执行异常现记 `error` 审计；allow 决定现按抽样记。`shell`/`workspace.*` 自带守卫的 allow 仍不记，见 §12.4）。
 4. cube ask 的 fail-closed 与 `onAskApproval` 抛错按 false 计，均经代码走读，未经真实表达式触发。
 5. 脏标志启动标脏缓解（9.4 遗留）已由 round16 实现，见 §11；Pages 审批卡（语义待定夺）仍未做，见 10.4。
-6. `SandboxAuditEvent` 两份同形实现已合并，但三份 deny 正则的漂移点仍在（见 8.2 遗留）。
-7. `exportJsonl()` 改为全量拼接是行为变化：调用方原先只拿到当前文件，现拿到全部轮转文件 + 当前文件；备份/导出场景更完整，增量同步场景需注意去重。
+6. ~~`SandboxAuditEvent` 两份同形实现已合并，但三份 deny 正则的漂移点仍在（见 8.2 遗留）。~~已由 round17 收敛（见 §12：`PermissionPolicy.destructiveShellArgsPattern` 为唯一真源，Dart 两处直接引用、Python 侧同值，共享向量断言三处一致）。
+7. `exportJsonl()` 改为全量拼接是行为变化：调用方原先只拿到当前文件，现拿到全部轮转文件 + 当前文件；备份/导出场景更完整。round17 已补按 id 去重约定（见 §12）：同一份导出重复导入再导出，结果不变（幂等）；增量同步场景仍需调用方按 id 去重（导出本身已去重一次）。
 
 ### 10.4 下一轮可做的
 
 1. ~~脏标志启动标脏缓解（9.4 遗留第 ⑤ 项；需先定“启动即脏是否阻塞首轮挂载”语义）~~已由 round16 实现（见 §11；语义已定：首轮挂载不阻塞）。
 2. Pages 审批卡 + `unapprove()`（需先定“批准是否等于置顶”语义）。
-3. 沙箱审计第三阶段：dispatch 路径 ask 的 allow 决定抽样审计、proot 之外后端的审计覆盖核查、审计导出去重约定。
+3. ~~沙箱审计第三阶段：dispatch 路径 ask 的 allow 决定抽样审计、proot 之外后端的审计覆盖核查、审计导出去重约定。~~已由 round17 实现（见 §12；proot 之外后端的审计覆盖核查仍在 12.4 遗留中，未做）。
 4. `PluginTier.parse` 未知值兜底 T1 的收紧（见 8.2 遗留）。
 
 ## 11. round16 修复（2026-11-27 05:00 轮次，基线 f1e5f6a6）
@@ -418,3 +418,73 @@ import 由另一并行 agent 处理）。
 6. 每次启动固定消耗 1 份快照 slot 并发出 `kernel.snapshot` + `kernel.dependencies_verified` 事件：快照列表已满时启动快照会淘汰最旧一份；事件回放里每轮启动多两条记录。行为变化已如实记于此，调用方按 label `'启动快照'` 识别。
 7. 回滚到预检失败的启动快照会被预检拒绝（fail-closed，不静默）：启动快照本身是破态时，rollback 不是出路，`resolve_dirty` 才是；回滚出路只对 `boot_apply` 脏态（失败挂载场景）有效。见断言脚本 §5/§6。
 8. boot 只置脏、不清脏：干净启动不碰既有脏标志（新进程内初始即 false）；二次 boot 不在契约内，未测。
+
+## 12. round17 修复（2026-11-27 19:00 轮次，基线 f1e5f6a6）
+
+本轮主项：沙箱审计第三阶段（10.4 第 3 条）。HEAD 未变（仍为
+f1e5f6a6），直接在 round16 融合树上做；两路并行 agent 实施、主 agent 整
+合验证。本轮改 `frontend/lib/harness/{core,embedded_backend,
+security_policy,approval_gate,audit_log}.dart`、`im/{approval,audit}.py`
+（另加本文档一节、conformance G5e 7 条关卡、本地断言脚本两处，更新
+`check_audit_rotation_round15.dart` §3 与
+`check_sandbox_audit_phase2_round15.dart` §10 两处过时断言），未动
+`plugin_kernel.dart`、`kernel_guard.dart`、`sandbox_provider.dart`、
+`sandboxed_shell.dart`、`sandbox_proot_provider.dart`。
+
+### 12.0 审计结论（实证，旧行为）
+
+| 缺口 | 旧行为 | 证据 |
+|---|---|---|
+| dispatch allow 决定无审计 | `_policyCheck` 的 allow 决定直接 `return null`，不留事件；round15 以“避免日志洪水”为由不记 | 旧 `core.dart` `_policyCheck` 末尾；10.3 第 3 条 |
+| 工具执行异常无审计 | `run()` 的 catch 只把异常转成 error 结果回给调用方，不另记审计 | 旧 `core.dart` `run()`（约 318–335 行）；10.3 第 3 条 |
+| 导入事件不进链（Dart 侧） | `importJsonl` 直接写原始行，保留原 hash/prevHash；导入后 `verifyChain` 在导入事件处按断裂口径报告 | 旧 `audit_log.dart` `importJsonl`（约 640–690 行）；10.3 第 2 条原文 |
+| 导入丢溯源（Python 侧） | `import_jsonl` 走 `append()` 重接链（新 id、新 hash），但丢弃原 hash，无法再溯源到导出方 | 旧 `im/audit.py` `import_jsonl` docstring“不保留原 hash” |
+| 导出无去重约定 | `exportJsonl()` 全量拼接；同一份导出重复导入再导出会重复出现 | 旧 `audit_log.dart` `exportJsonl`；10.3 第 7 条 |
+| deny 正则三处漂移 | `security_policy.dart` 的 default-deny-destructive-shell 用 `\bmkfs`（无尾边界，会拦 `mkfsfoo`）；`approval_gate.dart` 与 `im/approval.py` 用 `\bmkfs\b`（不拦 `mkfsfoo`）；同一条命令在三处判定不一致 | 三文件实测比对（见 12.3） |
+
+### 12.1 修复（新行为）
+
+| 项 | 新行为 | 旧行为对照 |
+|---|---|---|
+| allow 抽样审计 | `ToolRegistry` 新增可调字段 `allowSampleEvery`（默认 100；`<=0` 关闭抽样；1 为每条 allow 都记）与计数器 `_allowSampleCount`；`_policyCheck` 末尾策略求值确为 allow 时计数，每 `allowSampleEvery` 条发一条 `ToolPolicyAuditEvent(decision: 'allow', rule: matchedRuleId, detail: canonical 形 + note `'sample=1/<n> #<count>'`)；ask 获批不计入分母；read 级、自带守卫工具、未接线不经过这里 | allow 无记录 |
+| 执行异常审计 | `run()` 只把 `tool.execute(...)` 包一层 try/catch：执行抛错时先发 `ToolPolicyAuditEvent(decision: 'error', rule: '', detail 含工具名 + 异常 runtimeType + 异常文本前 120 字符）`，再 rethrow（外层 catch 仍转 `ToolResult.error`，行为不变）；lookup/参数校验/策略阶段的异常不发 error 事件 | 异常只转 error 结果 |
+| dispatch 审计接线映射 | `EmbeddedBackend` 的 `onPolicyDecision` 回调由二元三元式改为 switch：`'error'` → action `tool_dispatch_error`、decision `failed`；`'allow'` → action `tool_dispatch_allow`、decision `allowed`；`'ask_approved'` → `allowed`；其余（deny / ask_denied）→ `denied`；action 保持 `tool_dispatch_<decision>` 原形 | ask_approved 记 allowed、其余记 denied；无 allow/error 映射 |
+| 导入重接链 + 溯源（Dart） | `AuditEvent` 新增 `originHash` 字段（不参与 hash 计算与链校验；toJson 非空时写出，fromJson 读 `originHash`/`origin_hash`）；`append()` 的链逻辑抽为私有 `_appendChained(AuditEvent draft)`（串行链内取尾 hash → 轮转检查 → 写行 → 更新尾缓存 → 失败置空并 rethrow；`append()` 改为构造 draft 后调它，语义逐字不变）；`importJsonl` 改走 `_appendChained`：保留原 id/category/action/decision/actor/detail（仍先脱敏）/ts，`originHash` 记原 hash（原行无 hash 则 `''`），prevHash 取本地链尾、hash 重算；导入同样受轮转约束，量大触发轮转时链也不断 | 直接写原始行，不进链；导入后链断裂 |
+| 导入溯源（Python） | `AuditEvent` 新增 `origin_hash`；`append()` 增加可选关键字参数 `event_id`/`origin_hash`（默认时行为与旧版逐字一致）；`import_jsonl` 透传原事件的 id 与原 hash（`event_id=event.id, origin_hash=event.hash`），docstring 更新为“重新接入本链（新 hash，保留原 id；原 hash 存入 originHash 溯源）”；注：Python 导入 ts 取追加时刻，不沿用原行 ts（与 Dart 保留原 ts 不同，两侧文档均已写明） | 新 id、新 hash，原 hash 丢弃 |
+| 导出幂等约定 | 两侧 `exportJsonl()`/`export_jsonl()` 按 id 去重（首次出现为准）；不可解析行与 id 为空的行原样保留；文件不存在仍返回空串。约定写进方法注释与文件头：“同一份导出重复导入再导出，结果不变（幂等）” | 全量拼接，无去重 |
+| deny 正则收敛 | `PermissionPolicy` 上加 `static const String destructiveShellArgsPattern`（三处共享唯一真源，注明 Dart 两处直接引用、Python 侧同值）；default-deny-destructive-shell 规则与 `approval_gate.dart` 的 `_forcedDenyCommand`（`RegExp(PermissionPolicy.destructiveShellArgsPattern)`）直接引用该常量；`im/approval.py` 的 `_FORCED_DENY_COMMAND` 同值编译 + 注释指明真源。模式取三处已有的严格形式 `\bmkfs\b`（`security_policy.dart` 原 `\bmkfs` 会误拦 `mkfsfoo`，现修正）；共享向量 12 条命令在 Dart VM 脚本与 Python 测试里逐字相同，三处判定一致 | 三份字面量各自维护，`\bmkfs` 有无尾边界不一致 |
+
+### 12.2 本轮验证结果
+
+| 验证 | 结果 |
+|---|---|
+| 新 Dart VM 断言脚本 `~/workspace/tangram-agent-work/check_sandbox_audit_phase3_dispatch_round17.dart` | ✅ **143 passed / 0 failed**（§1 allow 抽样：`allowSampleEvery=3` 时第 3/6 条 allow 发事件、其余不发、`<=0` 关闭、回调抛错不影响 run；§2 error 审计：execute 抛错发 error 事件且 run 仍返回 error 结果、lookup 失败不发；§3 deny 共享向量 Dart 两处一致；§4 结构断言：embedded_backend 新映射 + 三处引用；§5 旧行为回归 deny/ask_approved/ask_denied 不变） |
+| 新 Dart VM 断言脚本 `~/workspace/tangram-agent-work/check_sandbox_audit_phase3_auditlog_round17.dart` | ✅ **63 passed / 0 failed**（§1 导入重接链与溯源：prevHash/originHash/id/ts/脱敏/其后 append；§2 导出→导入→导出幂等与坏行跳过；§3 大导入触发轮转后链仍完整；§4 originHash 序列化往返） |
+| `check_audit_rotation_round15.dart`（已更新 §3 过时断言以反映重接链：legacy 1→0、其后追加 prevHash 为空串→等于导入事件 hash、新增带 hash 导入行 originHash 例） | ✅ **178 passed / 0 failed**（原 167 + 新增 11） |
+| `check_sandbox_audit_phase2_round15.dart`（已更新 §10 过时断言以反映新映射：switch 映射三行存在；三处硬编码旧树路径指到当前树） | ✅ **76 passed / 0 failed** |
+| `check_sandbox_audit_round14.dart`（回归） | ✅ **118 passed / 0 failed** |
+| `check_restore_dirty_round14.dart` / `check_kernel_guard_round13.dart` / `check_kernel_guard_round12.dart`（回归） | ✅ **95 / 110 / 46 passed，0 failed** |
+| round2–11 回归 17 个 `_r12` 脚本 | ✅ **全部通过**（见整合验证） |
+| `node tests/conformance_0_0_41.mjs` | ✅ **53 passed / 0 failed**（46 → 53，新增 G5e 7 条关卡：allow 抽样字段与接线、error 审计接线、deny 唯一真源与三处引用、originHash 字段与导入重接链、导出幂等约定、Python 侧溯源字段与去重） |
+| `node frontend/tool/gen_mosaic_registry.mjs --check` | ✅ 通过（2 面板） |
+| pytest 全套 | ✅ **269 passed / 8 skipped**（262 → 269，新增 `test_im_audit.py` 7 条：导入重接链与 origin_hash、id 保留、无 hash 行、append 显式参数、originHash 序列化往返、导出幂等、导出直接去重；`test_im_approval.py` 共享向量扩展后 23 passed） |
+| `flutter analyze`（全量） | ✅ **No issues found**（0 issues，最终整合重跑） |
+| `flutter test` / Dart 编译 / 真机 | ❌ **未跑**（llamadart 的 `.so` 是 arm64、宿主是 x64，原生资产构建失败，环境限制；同 round12/13/15/16 的诚实边界） |
+| `embedded_backend.dart` onPolicyDecision 回调**行为** | ❌ **未在 VM 跑到**（该文件 import Flutter，纯 Dart VM 无法加载；只做了源码结构断言 + analyze + 代码复核） |
+| cube ask / proot exec 的**行为** | ❌ **未在 VM/真机跑到**（同 round15 的诚实边界） |
+
+### 12.3 本轮实测纠正
+
+1. **round16 运行记录关于 importJsonl 的说法只对 Python 侧成立**：round16 称“importJsonl 实际经 append() 重新接链，真正问题是溯源丢失而非不进链”——Python 侧 `im/audit.py` 的 `import_jsonl` 确实走 `append()`（新 id、新 hash，丢原 hash）；但 Dart 侧 `frontend/lib/harness/audit_log.dart` 的 `importJsonl` 当时是直接写原始行、保留原 hash/prevHash、不进链（本轮核实代码与 §10.3 第 2 条原文双重确认）。本轮真正修的是 Dart 侧的重接链，Python 侧补的是溯源保留（`originHash`），两者缺口不同、不可混为一谈；§10.3 第 2 条已据此划线更新。
+2. **deny 正则漂移是实测差异，不是推测**：三处字面量逐字比对，`security_policy.dart` 的 `\bmkfs` 与另两处的 `\bmkfs\b` 在 `mkfsfoo` 上判定相反（前者拦、后者放）；共享向量含 `mkfsfoo → allow` 一条，收敛后三处一致。`echo mkfs` 在三处均为 deny（词边界内的 `mkfs` 本就是规则原意，未改）。
+3. **`security_policy_test.dart` 脏行显示问题**：该测试的脏行 detail 在磁盘上实为 `password=p1`，期望 `'password=***'` 与脱敏行为一致；工具输出的显示层会把敏感值转写为 `password=<redacted>`，此前读到的 `password=<redacted>` 是显示层转写、不是文件内容——测试本身无问题，未改。
+
+### 12.4 仍然保留的诚实边界与已知局限
+
+1. allow 抽样只覆盖 `run()` 层策略求值过的 exec/write 级工具；`shell`/`workspace.*` 自带守卫的 allow 仍不记（各自守卫只记 ask/deny）。抽样事件在 `execute` 之前发出：若执行随后抛错，同一调用会同时留一条 allow 抽样事件与一条 error 事件——语义准确（先放行、后执行失败），不是重复记账。
+2. error 审计只含异常 runtimeType + 前 120 字符（落盘前仍经 `SecretRedactor` 脱敏）；`CancelToken` 取消同样记 error（执行未完成即失败）。
+3. 导入溯源只保留原 hash（`originHash`），不保留原 prevHash 与原文件来源；Dart 侧保留原 ts，Python 侧 ts 取追加时刻——两侧不一致已在各自文档写明，未强行统一（Python `append()` 的 ts 由调用时刻生成，改它牵连网关审计）。
+4. 导出幂等只保证“同一份导出重复导入再导出，id 集合不变”；两次导入之间若有新事件追加，导出自然含新事件；轮转后导出仍按时间顺序拼接（轮转文件 + 当前文件）。
+5. deny 收敛只覆盖破坏性 shell 三处；`super_agent.dart` 的 destructive 关键词表是风险分级用（非强制拒绝），未动。共享向量在 Dart 脚本与 Python 测试里各一份，需人工保持一致，未抽成单一文件（跨语言无共享常量文件）；改规则文本时三处同步改 + 跑共享向量。
+6. proot 之外后端（Local 等）的审计覆盖核查未做（10.4 第 3 条的后半句）；Pages 审批卡仍待“批准是否等于置顶”语义；`PluginTier.parse` 未知值兜底 T1 未动。
+7. 脏标志跨重启持久化仍未做（11.4 第 2 条）；`_applyProfile` 卸载循环潜伏问题仍未修（11.4 第 5 条）；`sidebar_drawer` 残留 4 个已删 key 的无害死映射仍未清；`tga_glass.dart` 仍无引用者（cosmo 新加组件，留待以后接线，未删）。
