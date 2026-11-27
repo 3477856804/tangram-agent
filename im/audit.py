@@ -77,6 +77,9 @@ class AuditEvent:
     ts: float = field(default_factory=time.time)
     prev_hash: str = ""
     hash: str = ""
+    # 溯源：导入事件在原日志里的 hash（重新接链后原 hash 不再是链 hash，
+    # 在此保留以便溯源）；本地追加的事件与无 hash 的导入行留空。
+    origin_hash: str = ""
 
     def compute_hash(self) -> str:
         """按内容与 prev_hash 重算哈希；写入与校验共用同一算法。"""
@@ -105,6 +108,8 @@ class AuditEvent:
             out["prevHash"] = self.prev_hash
         if self.hash:
             out["hash"] = self.hash
+        if self.origin_hash:
+            out["originHash"] = self.origin_hash
         return out
 
     @classmethod
@@ -125,6 +130,7 @@ class AuditEvent:
             ts=ts,
             prev_hash=str(raw.get("prevHash") or raw.get("prev_hash") or ""),
             hash=str(raw.get("hash") or ""),
+            origin_hash=str(raw.get("originHash") or raw.get("origin_hash") or ""),
         )
 
 
@@ -194,20 +200,25 @@ class AuditLog:
         decision: str = DECISION_INFO,
         actor: str = "system",
         detail: str = "",
+        event_id: str | None = None,
+        origin_hash: str = "",
     ) -> Optional[AuditEvent]:
         """追加一条事件；detail 先脱敏再落盘，自动接入哈希链。
 
         写盘失败返回 None（并记 stderr 警告），绝不抛异常。
+        ``event_id`` / ``origin_hash`` 仅供导入使用：导入事件保留原 id，
+        原 hash 存入 originHash 溯源；默认（None / ''）时行为与旧版一致。
         """
         safe_detail = SecretRedactor.redact(str(detail or ""))
         draft = AuditEvent(
-            id=self._next_id(),
+            id=event_id or self._next_id(),
             category=str(category),
             action=str(action),
             decision=str(decision or DECISION_INFO),
             actor=str(actor or "system"),
             detail=safe_detail,
             ts=time.time(),
+            origin_hash=str(origin_hash or ""),
         )
         try:
             with self._lock:
@@ -221,6 +232,7 @@ class AuditLog:
                     detail=draft.detail,
                     ts=draft.ts,
                     prev_hash=prev,
+                    origin_hash=draft.origin_hash,
                 )
                 event.hash = event.compute_hash()
                 existed = self.path.is_file()
@@ -347,20 +359,44 @@ class AuditLog:
     # ---- 导入导出 ----
 
     def export_jsonl(self) -> str:
-        """原样导出 JSONL 文本；文件不存在时返回空串。"""
+        """导出 JSONL 文本；文件不存在时返回空串。
+
+        按 id 去重（首次出现为准）：可解析且 id 非空的行，重复 id 只保留
+        第一次出现；不可解析行原样保留。同一份导出重复导入再导出，结果
+        不变（幂等）。
+        """
         with self._lock:
             if not self.path.is_file():
                 return ""
             try:
-                return self.path.read_text(encoding="utf-8")
+                raw = self.path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 return ""
+        seen: set[str] = set()
+        kept: list[str] = []
+        for line in raw.splitlines():
+            if not line.strip():
+                kept.append(line)
+                continue
+            event_id = ""
+            try:
+                decoded = json.loads(line)
+            except ValueError:
+                decoded = None
+            if isinstance(decoded, dict):
+                event_id = str(decoded.get("id") or "")
+            if event_id:
+                if event_id in seen:
+                    continue  # 重复 id 只保留首次出现
+                seen.add(event_id)
+            kept.append(line)
+        return "".join(line + "\n" for line in kept)
 
     def import_jsonl(self, content: str) -> int:
         """逐行导入：坏行 / 缺关键字段的行跳过，返回成功追加的条数。
 
         导入前同样脱敏，避免把外部日志里的明文密钥带回磁盘。
-        导入的事件重新接入本链（新 id、新 hash），不保留原 hash。
+        导入的事件重新接入本链（新 hash，保留原 id；原 hash 存入 originHash 溯源）。
         """
         imported = 0
         for line in str(content or "").splitlines():
@@ -380,7 +416,9 @@ class AuditLog:
             if not event.id or not event.category or not event.action:
                 continue
             if self.append(event.category, event.action, event.decision,
-                           event.actor, event.detail) is not None:
+                           event.actor, event.detail,
+                           event_id=event.id,
+                           origin_hash=event.hash) is not None:
                 imported += 1
         return imported
 
