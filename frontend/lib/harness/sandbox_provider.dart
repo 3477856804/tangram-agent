@@ -90,6 +90,28 @@ class SandboxExecResult {
         cwd: cwd,
       );
 
+  /// 策略 ask 预检拒绝的结果（round18）：ask 命中且未获批（或未接审批
+  /// 入口），未执行命令。status 仍为 `'denied'`（调用方按拒绝处理不
+  /// 变），error 文案区分于 deny：说明是需人工确认而非规则直接拒绝；
+  /// `rule` 为空表示 ask 预检本身失败而 fail-closed。
+  factory SandboxExecResult.askDenied({
+    required SandboxProviderKind kind,
+    required String rule,
+    required bool hasApproval,
+    String cwd = '.',
+  }) =>
+      SandboxExecResult(
+        ok: false,
+        kind: kind,
+        status: 'denied',
+        error: rule.isEmpty
+            ? '安全策略检查失败，拒绝执行'
+            : (hasApproval
+                ? '命令需人工确认后才能执行（规则 $rule，已建审批单，批准后重试）'
+                : '命令需人工确认：未接审批入口，拒绝执行（规则 $rule）'),
+        cwd: cwd,
+      );
+
   final bool ok;
   final SandboxProviderKind kind;
   final String stdout;
@@ -123,6 +145,41 @@ class SandboxExecResult {
 typedef SandboxProviderDenyCheck = Future<String?> Function(
   String command,
   String cwd,
+);
+
+/// ask 预检回调（round18）：只查 ask，返回命中 ask 的规则 id，未命中
+/// 返回 null。语义与 cube 侧 `SandboxAskCheck` 同款（见
+/// `sandboxed_shell.dart`）；回调本身抛错时调用方按 fail-closed 处理。
+typedef SandboxProviderAskCheck = Future<String?> Function(
+  String command,
+  String cwd,
+);
+
+/// ask 审批入口（round18）：ask 命中时调用，返回 true＝已获批继续执行，
+/// false＝已建审批单待人工确认。语义与 cube 侧 `SandboxAskApproval` 同款。
+typedef SandboxProviderAskApproval = Future<bool> Function(
+  String command,
+  String cwd,
+);
+
+/// 写 deny 预检回调（round18）：只查 deny，按 guest 路径求值，返回命中
+/// 规则的 id，未命中返回 null。生产接线：
+/// `policy.evaluate(tool: 'workspace.write', path: guestPath)`。
+/// 回调本身抛错时调用方按 fail-closed 处理（拒绝写入）。
+typedef SandboxProviderWriteDenyCheck = Future<String?> Function(
+  String guestPath,
+);
+
+/// 写 ask 预检回调（round18）：只查 ask，按 guest 路径求值，返回命中
+/// ask 的规则 id，未命中返回 null。回调本身抛错时调用方按 fail-closed 处理。
+typedef SandboxProviderWriteAskCheck = Future<String?> Function(
+  String guestPath,
+);
+
+/// 写 ask 审批入口（round18）：ask 命中时调用，返回 true＝已获批继续写，
+/// false＝已建审批单待人工确认。
+typedef SandboxProviderWriteAskApproval = Future<bool> Function(
+  String guestPath,
 );
 
 /// 执行审计回调：只收元数据事件，绝不收命令原文与输出。
@@ -251,6 +308,46 @@ class SandboxAuditEvent {
     );
   }
 
+  /// 从写文件动作构造事件（round18）：tool 为 `'workspace.write'`，
+  /// first 取 guest 路径的文件名（≤40 字符；路径为空或只含分隔符时回落为
+  /// 工具名），chars 取待写内容长度，cwd 取 guest 路径的父目录（无父目录
+  /// 时 `'.'`；`..` 穿越段只作元数据噪音略去，不参与 first/cwd 计算），
+  /// exit 0=已写、-1=未写（拒绝 / 路径越界 / 写失败）。decision 与 exec
+  /// 事件同值域（allowed/denied/failed），detail 格式与 fromCommand
+  /// 完全同形（`k=v` 空格分隔），便于同一审计链复核。内容本身绝不进事件。
+  factory SandboxAuditEvent.fromWrite({
+    required String guestPath,
+    required int chars,
+    required int exit,
+    required int ms,
+    required String provider,
+    String rule = '',
+    required String decision,
+  }) {
+    final String g = guestPath.trim();
+    final List<String> segs = g
+        .split('/')
+        .where((String s) => s.isNotEmpty && s != '.' && s != '..')
+        .toList();
+    String first = segs.isEmpty ? 'workspace.write' : segs.last;
+    if (first.length > 40) first = first.substring(0, 40);
+    String cwd = segs.length > 1
+        ? segs.sublist(0, segs.length - 1).join('/')
+        : '.';
+    if (g.startsWith('/') && cwd != '.') cwd = '/$cwd';
+    return SandboxAuditEvent(
+      tool: 'workspace.write',
+      first: first,
+      chars: chars,
+      cwd: cwd,
+      exit: exit,
+      ms: ms,
+      provider: provider,
+      rule: rule,
+      decision: decision,
+    );
+  }
+
   /// 命令首词（≤40 字符）：先剥离环境变量导出前缀再取首个空白分隔 token；
   /// 命令为空或只有导出语句时返回 ''（由 [fromCommand] 回落为工具名）。
   static String firstWord(String command) {
@@ -356,6 +453,22 @@ abstract class SandboxProvider {
   /// 返回命中规则的 id，未命中返回 null）。
   SandboxProviderDenyCheck? denyCheck;
 
+  /// ask 预检回调（round18，可选，由注册表注入或调用方直接设置；只查
+  /// ask，返回命中 ask 的规则 id，未命中返回 null）。
+  SandboxProviderAskCheck? askCheck;
+
+  /// ask 审批入口（round18，可选；ask 命中时调用，返回 true＝已获批）。
+  SandboxProviderAskApproval? onAskApproval;
+
+  /// 写 deny 预检回调（round18，可选；只查 deny，按 guest 路径求值）。
+  SandboxProviderWriteDenyCheck? writeDenyCheck;
+
+  /// 写 ask 预检回调（round18，可选；只查 ask，按 guest 路径求值）。
+  SandboxProviderWriteAskCheck? writeAskCheck;
+
+  /// 写 ask 审批入口（round18，可选；ask 命中时调用，返回 true＝已获批）。
+  SandboxProviderWriteAskApproval? onWriteAskApproval;
+
   /// 执行审计回调（可选，只收 [SandboxAuditEvent] 元数据事件）。
   SandboxProviderAuditCallback? onAudit;
 
@@ -397,6 +510,153 @@ abstract class SandboxProvider {
       decision: 'denied',
     ));
     return SandboxExecResult.denied(kind: kind, rule: rule, cwd: cwd);
+  }
+
+  /// ask 预检（round18）：只查 ask，不碰 deny/allow；未接线（[askCheck]
+  /// 为空）时直接放行，行为与之前完全一致。调用位置与 cube 同款：在
+  /// [checkDeny] 之后、执行体启动之前。
+  /// 命中 ask 时调 [onAskApproval]：入口为空或返回 false → 返回拒绝结果
+  /// 并记一条 decision=`denied`、rule=ask 规则 id 的审计（无审批入口与
+  /// 已建单两种文案区分，见 [SandboxExecResult.askDenied]）；返回 true
+  /// → 放行，尾部执行审计仍按成功/失败记 allowed/failed。
+  /// 预检回调本身抛错时按 fail-closed 处理：返回拒绝结果并记一条审计，
+  /// 绝不静默放行。
+  Future<SandboxExecResult?> checkAsk(
+    String command, {
+    required String cwd,
+    required int ms,
+  }) async {
+    final SandboxProviderAskCheck? ask = askCheck;
+    if (ask == null) return null;
+    String? rule;
+    try {
+      rule = await ask(command, cwd);
+    } on Object {
+      fireAudit(SandboxAuditEvent.fromCommand(
+        tool: 'shell',
+        command: command,
+        cwd: cwd,
+        exit: -1,
+        ms: ms,
+        provider: kind.name,
+        decision: 'denied',
+      ));
+      return SandboxExecResult.askDenied(
+        kind: kind,
+        rule: '',
+        hasApproval: false,
+        cwd: cwd,
+      );
+    }
+    if (rule == null || rule.isEmpty) return null;
+    bool approved = false;
+    final SandboxProviderAskApproval? approval = onAskApproval;
+    if (approval != null) {
+      try {
+        approved = await approval(command, cwd);
+      } on Object {
+        approved = false;
+      }
+    }
+    if (!approved) {
+      fireAudit(SandboxAuditEvent.fromCommand(
+        tool: 'shell',
+        command: command,
+        cwd: cwd,
+        exit: -1,
+        ms: ms,
+        provider: kind.name,
+        rule: rule,
+        decision: 'denied',
+      ));
+      return SandboxExecResult.askDenied(
+        kind: kind,
+        rule: rule,
+        hasApproval: approval != null,
+        cwd: cwd,
+      );
+    }
+    return null;
+  }
+
+  /// 写策略预检（round18）：deny → ask，先后求值；未接线时直接放行。
+  /// 命中 deny：记一条 decision=`denied` 的写审计并返回拒绝 map；
+  /// 命中 ask：调 [onWriteAskApproval]，入口为空或返回 false → 记一条
+  /// `denied` 写审计并返回拒绝 map；返回 true → 放行，尾部写审计仍按
+  /// 成功/失败记 allowed/failed。任一预检回调抛错时 fail-closed：
+  /// 记 `denied` 写审计并拒绝。拒绝 map 与写失败同形
+  /// `{ok: false, error: ...}`，调用方无需区分。预检在路径解析之前：
+  /// 被拒的写入不触碰任何磁盘状态。
+  /// （接管门禁不拦写：文件读写不受接管影响，见文件头。）
+  Future<Map<String, dynamic>?> checkWritePolicy(
+    String guestPath, {
+    required int contentChars,
+    required int ms,
+  }) async {
+    SandboxAuditEvent deniedEvent(String rule) =>
+        SandboxAuditEvent.fromWrite(
+          guestPath: guestPath,
+          chars: contentChars,
+          exit: -1,
+          ms: ms,
+          provider: kind.name,
+          rule: rule,
+          decision: 'denied',
+        );
+    final SandboxProviderWriteDenyCheck? deny = writeDenyCheck;
+    if (deny != null) {
+      String? rule;
+      try {
+        rule = await deny(guestPath);
+      } on Object {
+        fireAudit(deniedEvent(''));
+        return <String, dynamic>{
+          'ok': false,
+          'error': '安全策略检查失败，拒绝写入',
+        };
+      }
+      if (rule != null && rule.isNotEmpty) {
+        fireAudit(deniedEvent(rule));
+        return <String, dynamic>{
+          'ok': false,
+          'error': '写入被安全策略拒绝（规则 $rule）：$guestPath',
+        };
+      }
+    }
+    final SandboxProviderWriteAskCheck? ask = writeAskCheck;
+    if (ask != null) {
+      String? rule;
+      try {
+        rule = await ask(guestPath);
+      } on Object {
+        fireAudit(deniedEvent(''));
+        return <String, dynamic>{
+          'ok': false,
+          'error': '安全策略检查失败，拒绝写入',
+        };
+      }
+      if (rule != null && rule.isNotEmpty) {
+        bool approved = false;
+        final SandboxProviderWriteAskApproval? approval = onWriteAskApproval;
+        if (approval != null) {
+          try {
+            approved = await approval(guestPath);
+          } on Object {
+            approved = false;
+          }
+        }
+        if (!approved) {
+          fireAudit(deniedEvent(rule));
+          return <String, dynamic>{
+            'ok': false,
+            'error': approval == null
+                ? '写入需人工确认：未接审批入口，拒绝执行（规则 $rule）：$guestPath'
+                : '写入需人工确认后才能执行（规则 $rule，已建审批单，批准后重试）：$guestPath',
+          };
+        }
+      }
+    }
+    return null;
   }
 
   /// 审计发送：回调为空或抛错时静默跳过，绝不阻断执行。
@@ -612,14 +872,37 @@ class LocalSandboxProvider extends SandboxProvider {
       ms: execSw.elapsedMilliseconds,
     );
     if (denied != null) return denied;
-    if (Platform.isWindows) {
+    // round18：ask 预检（只查 ask；deny 已在上一步处理；未接线时放行，
+    // 行为与之前完全一致；ask 获批后继续执行，尾部审计仍按 ok 记 allowed/failed）。
+    final SandboxExecResult? askDenied = await checkAsk(
+      command,
+      cwd: cwd,
+      ms: execSw.elapsedMilliseconds,
+    );
+    if (askDenied != null) return askDenied;
+    // round18：执行错误分支审计（与生产 `_shellExec` 同款：执行体启动
+    // 失败 / 环境不可用记 failed、exit -1）。接管拒绝与 deny/ask 拒绝各
+    // 有自己的审计语义（接管不记执行审计，deny/ask 记 denied），不走这里。
+    SandboxExecResult execFailed(String error) {
+      fireAudit(SandboxAuditEvent.fromCommand(
+        tool: 'shell',
+        command: command,
+        cwd: cwd,
+        exit: -1,
+        ms: execSw.elapsedMilliseconds,
+        provider: kind.name,
+        decision: 'failed',
+      ));
       return SandboxExecResult(
         ok: false,
         kind: kind,
         status: 'error',
-        error: '本机沙箱 exec 仅支持 POSIX shell，Windows 请用远端沙箱。',
+        error: error,
         cwd: cwd,
       );
+    }
+    if (Platform.isWindows) {
+      return execFailed('本机沙箱 exec 仅支持 POSIX shell，Windows 请用远端沙箱。');
     }
     // exec 前确保工作区存在（start 的同款幂等创建；未 start 就 exec
     // 也不应报「目录不存在」，否则切换自检通过后首次执行仍会失败）。
@@ -628,26 +911,14 @@ class LocalSandboxProvider extends SandboxProvider {
         await workspace.create(recursive: true);
       }
     } on Object catch (e) {
-      return SandboxExecResult(
-        ok: false,
-        kind: kind,
-        status: 'error',
-        error: '工作区不可用：$e',
-        cwd: cwd,
-      );
+      return execFailed('工作区不可用：$e');
     }
     final String? dir = SandboxProvider.resolveWorkspacePath(
       workspacePath: workspace.path,
       path: cwd,
     );
     if (dir == null) {
-      return SandboxExecResult(
-        ok: false,
-        kind: kind,
-        status: 'error',
-        error: '工作目录越出沙箱工作区：$cwd',
-        cwd: cwd,
-      );
+      return execFailed('工作目录越出沙箱工作区：$cwd');
     }
     Process proc;
     try {
@@ -658,13 +929,7 @@ class LocalSandboxProvider extends SandboxProvider {
         runInShell: false,
       );
     } on Object catch (e) {
-      return SandboxExecResult(
-        ok: false,
-        kind: kind,
-        status: 'error',
-        error: '宿主 shell 无法启动：$e',
-        cwd: cwd,
-      );
+      return execFailed('宿主 shell 无法启动：$e');
     }
     final Future<String> outF =
         proc.stdout.transform(const Utf8Decoder(allowMalformed: true)).join();
@@ -687,9 +952,9 @@ class LocalSandboxProvider extends SandboxProvider {
     final String err = SandboxProvider.capOutput(stderrAll, maxOutputChars);
     final bool truncated =
         stdoutAll.length > maxOutputChars || stderrAll.length > maxOutputChars;
-    // round14：执行收尾审计（只记元数据；本方法内其余 early return 均在
-    // 执行体启动前——平台不支持 / 工作区不可用 / cwd 越界 / shell 起不来——
-    // 命令未执行，故不记执行审计；deny 由 checkDeny 代发，不重复记）。
+    // round14：执行收尾审计（只记元数据；deny 由 checkDeny 代发、ask 被拒
+    // 由 checkAsk 代发、执行错误分支由 execFailed 代发，均不重复记；
+    // 接管拒绝在 exec 入口处直接返回，不记执行审计）。
     final SandboxExecResult result = SandboxExecResult(
       ok: !timedOut && exitCode == 0,
       kind: kind,
@@ -759,11 +1024,32 @@ class LocalSandboxProvider extends SandboxProvider {
     String guestPath,
     String content,
   ) async {
+    // round18：写策略预检（deny → ask；未接线时放行，行为与之前完全一
+    // 致）+ 写审计（成功记 allowed、拒绝记 denied、失败记 failed；每次
+    // 写动作恰一条事件，与 exec 审计同款）。预检在路径解析之前：被拒的
+    // 写入不触碰任何磁盘状态；接管门禁不拦写（文件读写不受接管影响）。
+    final Stopwatch writeSw = Stopwatch()..start();
+    final Map<String, dynamic>? refused = await checkWritePolicy(
+      guestPath,
+      contentChars: content.length,
+      ms: writeSw.elapsedMilliseconds,
+    );
+    if (refused != null) return refused;
+    SandboxAuditEvent writeEvent(String decision, int exit) =>
+        SandboxAuditEvent.fromWrite(
+          guestPath: guestPath,
+          chars: content.length,
+          exit: exit,
+          ms: writeSw.elapsedMilliseconds,
+          provider: kind.name,
+          decision: decision,
+        );
     final String? path = SandboxProvider.resolveWorkspacePath(
       workspacePath: workspace.path,
       path: guestPath,
     );
     if (path == null) {
+      fireAudit(writeEvent('failed', -1));
       return <String, dynamic>{
         'ok': false,
         'error': '路径越出沙箱工作区：$guestPath',
@@ -773,12 +1059,14 @@ class LocalSandboxProvider extends SandboxProvider {
       final File f = File(path);
       await f.parent.create(recursive: true);
       await f.writeAsString(content, flush: true);
+      fireAudit(writeEvent('allowed', 0));
       return <String, dynamic>{
         'ok': true,
         'path': guestPath,
         'size': content.length,
       };
     } on Object catch (e) {
+      fireAudit(writeEvent('failed', -1));
       return <String, dynamic>{'ok': false, 'error': '写入失败：$e'};
     }
   }
@@ -892,11 +1180,50 @@ class SandboxProviderRegistry {
   /// deny 预检 / 执行审计回调（round14）：注册表持有，建后端时注入各
   /// provider（与 `takeover` 同款注入）；已建好的当前后端由 setter 同步。
   /// 注册表自身不另记审计——审计只在后端 `exec` 的 choke 点记一条。
+  /// round18：同款持有 ask 预检 / ask 审批入口与写策略钩子
+  /// （writeDenyCheck / writeAskCheck / onWriteAskApproval），写审计
+  /// 只在后端 `writeFile` 的 choke 点记一条。
   SandboxProviderDenyCheck? _denyCheck;
   SandboxProviderDenyCheck? get denyCheck => _denyCheck;
   set denyCheck(SandboxProviderDenyCheck? value) {
     _denyCheck = value;
     _current?.denyCheck = value;
+  }
+
+  SandboxProviderAskCheck? _askCheck;
+  SandboxProviderAskCheck? get askCheck => _askCheck;
+  set askCheck(SandboxProviderAskCheck? value) {
+    _askCheck = value;
+    _current?.askCheck = value;
+  }
+
+  SandboxProviderAskApproval? _onAskApproval;
+  SandboxProviderAskApproval? get onAskApproval => _onAskApproval;
+  set onAskApproval(SandboxProviderAskApproval? value) {
+    _onAskApproval = value;
+    _current?.onAskApproval = value;
+  }
+
+  SandboxProviderWriteDenyCheck? _writeDenyCheck;
+  SandboxProviderWriteDenyCheck? get writeDenyCheck => _writeDenyCheck;
+  set writeDenyCheck(SandboxProviderWriteDenyCheck? value) {
+    _writeDenyCheck = value;
+    _current?.writeDenyCheck = value;
+  }
+
+  SandboxProviderWriteAskCheck? _writeAskCheck;
+  SandboxProviderWriteAskCheck? get writeAskCheck => _writeAskCheck;
+  set writeAskCheck(SandboxProviderWriteAskCheck? value) {
+    _writeAskCheck = value;
+    _current?.writeAskCheck = value;
+  }
+
+  SandboxProviderWriteAskApproval? _onWriteAskApproval;
+  SandboxProviderWriteAskApproval? get onWriteAskApproval =>
+      _onWriteAskApproval;
+  set onWriteAskApproval(SandboxProviderWriteAskApproval? value) {
+    _onWriteAskApproval = value;
+    _current?.onWriteAskApproval = value;
   }
 
   SandboxProviderAuditCallback? _onAudit;
@@ -906,10 +1233,17 @@ class SandboxProviderRegistry {
     _current?.onAudit = value;
   }
 
-  /// 把注册表持有的 deny/审计回调注入后端（只注入已设置的，不覆盖
-  /// 后端自带的回调）。
+  /// 把注册表持有的 deny/ask/写策略/审计回调注入后端（只注入已设置的，
+  /// 不覆盖后端自带的回调）。
   void _injectHooks(SandboxProvider p) {
     if (_denyCheck != null) p.denyCheck = _denyCheck;
+    if (_askCheck != null) p.askCheck = _askCheck;
+    if (_onAskApproval != null) p.onAskApproval = _onAskApproval;
+    if (_writeDenyCheck != null) p.writeDenyCheck = _writeDenyCheck;
+    if (_writeAskCheck != null) p.writeAskCheck = _writeAskCheck;
+    if (_onWriteAskApproval != null) {
+      p.onWriteAskApproval = _onWriteAskApproval;
+    }
     if (_onAudit != null) p.onAudit = _onAudit;
   }
 
@@ -1027,6 +1361,14 @@ class SandboxProviderRegistry {
         timeout: timeout,
         maxOutputChars: maxOutputChars,
       );
+
+  /// 写入口（round18）：委托当前后端（写 deny/ask 预检与写审计都在后端
+  /// `writeFile` 的 choke 点生效；注册表只注入回调，不另记审计）。
+  Future<Map<String, dynamic>> writeFile(
+    String guestPath,
+    String content,
+  ) =>
+      current.writeFile(guestPath, content);
 
   /// 注册表 + 当前后端的状态快照。
   Future<Map<String, dynamic>> status() async {
