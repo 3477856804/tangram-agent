@@ -279,7 +279,7 @@ caps=[]，`seamAllowed()` 在 caps 为空时非 T3 一律放行。以下修复�
 
 ### 9.4 仍然保留的诚实边界与已知局限
 
-1. 脏标志**只在内存**：进程重启即失。启动标脏缓解已由 round16 实现（见 §11：boot 落启动快照并跑 `verifyDependencies` + 闭包预检标脏，语义已定为首轮挂载不阻塞）；但跨重启持久化仍未做——`_persistConfig` 只存 profile/home_patch，重启后旧脏态仍无法从磁盘恢复，见 §11.4。
+1. ~~脏标志**只在内存**：进程重启即失。启动标脏缓解已由 round16 实现（见 §11：boot 落启动快照并跑 `verifyDependencies` + 闭包预检标脏，语义已定为首轮挂载不阻塞）；但跨重启持久化仍未做——`_persistConfig` 只存 profile/home_patch，重启后旧脏态仍无法从磁盘恢复，见 §11.4。~~已由 round18 实现（见 §14：脏态随 `_persistConfig` 写入 `kernel_config.json` 的 `restore_dirty` 键，启动时先恢复；内存语义不变）。
 2. 预检是静态闭包检查，核实不了挂载时序：消费者在快照内排在提供者之前、自提供服务（`requires` 含自身提供的服务）这两类，预检会放行、阶段二挂载时才失败——由脏标志 + resume 兜底，不是预检漏网无声。
 3. 预检里「插件未注册」与「接缝 owner 不在快照集内」两支是防御性分支：公开 API 下注册表只增不减、快照时刻的 provider owner 必在快照节点集内，无法经公开 API 造出反例；断言脚本只覆盖可达的「依赖缺失」分支，另两支未实测。
 4. `_setMode` 仍先赋值模式、后 `_applyProfile`：`_persistConfig` 抛错时 mode 标签已改为目标值，失败返回里如实带有该 mode；脏标志与 journal 负责记录，由三条出路恢复。重试同一快照时因模式已等于目标值，阶段四直接跳过——这是本轮实测通过的路径，不是巧合。
@@ -355,7 +355,7 @@ G5c 7 条关卡、本地断言脚本两处），未动 `plugin_kernel.dart`、
 
 1. ~~脏标志启动标脏缓解（9.4 遗留第 ⑤ 项；需先定“启动即脏是否阻塞首轮挂载”语义）~~已由 round16 实现（见 §11；语义已定：首轮挂载不阻塞）。
 2. Pages 审批卡 + `unapprove()`（需先定“批准是否等于置顶”语义）。
-3. ~~沙箱审计第三阶段：dispatch 路径 ask 的 allow 决定抽样审计、proot 之外后端的审计覆盖核查、审计导出去重约定。~~已由 round17 实现（见 §12；proot 之外后端的审计覆盖核查仍在 12.4 遗留中，未做）。
+3. ~~沙箱审计第三阶段：dispatch 路径 ask 的 allow 决定抽样审计、proot 之外后端的审计覆盖核查、审计导出去重约定。~~已由 round17 实现抽样审计与导出去重（见 §12）；proot 之外后端的审计覆盖核查已由 round18 完成（见 §13）。
 4. `PluginTier.parse` 未知值兜底 T1 的收紧（见 8.2 遗留）。
 
 ## 11. round16 修复（2026-11-27 05:00 轮次，基线 f1e5f6a6）
@@ -374,7 +374,7 @@ import 由另一并行 agent 处理）。
 | 首轮挂载不阻塞 | 预检在 `_applyProfile` 之后跑；脏门禁只在 `handle()` 入口；boot 直调 `_applyProfile` 不走 `handle()`，故脏态不可能卡住启动流程、不会死锁。脏门禁只拦 `handle()` 改动类动作，与 round14 §9 第 6 条宿主直连口径一致（宿主直调 `kernel.mount()` 等不受限）。 |
 | 失败挂载可见 | 消费 `_applyProfile` 返回值：failedMounts/failedUnmounts 写入 journal + 发 `kernel.boot_mount_failed` 事件，不再丢弃；同时标脏（与 round14“任一变异阶段失败即置脏”同哲学：启动挂载失败留下的就是半态）。 |
 | 出路 | 复用既有 `rollback`（回滚到启动快照）/ `resolve_dirty`；不新增出路。 |
-| 不做跨重启持久化 | `_persistConfig` 只存 profile/home_patch，扩展持久化超出本轮范围；文档诚实边界写明“重启仍失”（见 11.4）。 |
+| 不做跨重启持久化 | ~~`_persistConfig` 只存 profile/home_patch，扩展持久化超出本轮范围；文档诚实边界写明“重启仍失”（见 11.4）。~~已由 round18 实现（见 §14）；本轮范围当时未含持久化，语义仍按本节执行。 |
 
 ### 11.1 修复（新行为，全部在 plugin_kernel.dart 内）
 
@@ -411,7 +411,7 @@ import 由另一并行 agent 处理）。
 ### 11.4 仍然保留的诚实边界与已知局限
 
 1. 启动预检失败分支（`kernel.boot_dirty` 事件、journal failed_phase `'boot_verify'`、`boot_errors` 非空）**经公开 API 在首轮启动目前不可达**：bundle 跳过未授权插件 + trim 在启动时无操作对象 + 挂载时依赖校验保证已挂载集自洽，`verifyDependencies()` 与 `_preflightSnapshot(启动快照)` 在首轮启动恒通过（防御性纵深）。一旦未来出现启动后卸载/服务移除路径（例如插件在 apply 中卸载他方、trim 语义变化），该分支即生效，无需再改接线。`_preflightSnapshot` 本身的失败逻辑由 round14 §5（依赖缺失的快照被预检拒绝）覆盖；`verifyDependencies` 的灵敏度由本轮脚本 §3b（启动后卸载提供方→同一核查报断裂）覆盖；调用点由 conformance G5d 按顺序切片断言。
-2. 跨重启持久化仍未做：脏标志只在内存，`_persistConfig` 只存 profile/home_patch；进程重启后旧脏态仍失，启动标脏只能发现**本次**启动的问题，不能恢复上次的脏态。
+2. ~~跨重启持久化仍未做：脏标志只在内存，`_persistConfig` 只存 profile/home_patch；进程重启后旧脏态仍失，启动标脏只能发现**本次**启动的问题，不能恢复上次的脏态。~~已由 round18 实现（见 §14：脏态随 `_persistConfig` 落盘，启动时先恢复；快照本身仍只在内存）。
 3. `failed_unmounts` 在首轮启动同样不可达：启动时 `_nodes` 为空，`_applyProfile(reset: true)` 的卸载循环不执行；journal 摘要含该键且恒为空列表（不编造）。`_applyProfile` 的 reset 循环另有一处潜伏问题未修（本轮范围外，见第 5 条）。
 4. 预检是启动后快照的静态闭包检查，核实不了挂载时序：消费者在 bundle 内排在提供者之前时，消费者挂载失败走 `boot_apply`（失败挂载可见），不是 `boot_verify`——两条路径互补，不是漏网无声。
 5. `_applyProfile(reset: true)` 的卸载循环未跳过已被父节点连带卸载的子节点（restoreSnapshot 阶段一有此跳过，`_applyProfile` 没有）：父子插件树 + reset 时，子节点卸载会返回 `ok:false`（“未挂载”）并记入 failedUnmounts。首轮启动 `_nodes` 为空，该循环不执行，故本轮未修；若未来出现二次 boot 或 reset 时已有节点，此处会误报启动卸载失败。
@@ -486,5 +486,115 @@ security_policy,approval_gate,audit_log}.dart`、`im/{approval,audit}.py`
 3. 导入溯源只保留原 hash（`originHash`），不保留原 prevHash 与原文件来源；Dart 侧保留原 ts，Python 侧 ts 取追加时刻——两侧不一致已在各自文档写明，未强行统一（Python `append()` 的 ts 由调用时刻生成，改它牵连网关审计）。
 4. 导出幂等只保证“同一份导出重复导入再导出，id 集合不变”；两次导入之间若有新事件追加，导出自然含新事件；轮转后导出仍按时间顺序拼接（轮转文件 + 当前文件）。
 5. deny 收敛只覆盖破坏性 shell 三处；`super_agent.dart` 的 destructive 关键词表是风险分级用（非强制拒绝），未动。共享向量在 Dart 脚本与 Python 测试里各一份，需人工保持一致，未抽成单一文件（跨语言无共享常量文件）；改规则文本时三处同步改 + 跑共享向量。
-6. proot 之外后端（Local 等）的审计覆盖核查未做（10.4 第 3 条的后半句）；Pages 审批卡仍待“批准是否等于置顶”语义；`PluginTier.parse` 未知值兜底 T1 未动。
-7. 脏标志跨重启持久化仍未做（11.4 第 2 条）；`_applyProfile` 卸载循环潜伏问题仍未修（11.4 第 5 条）；`sidebar_drawer` 残留 4 个已删 key 的无害死映射仍未清；`tga_glass.dart` 仍无引用者（cosmo 新加组件，留待以后接线，未删）。
+6. ~~proot 之外后端（Local 等）的审计覆盖核查未做（10.4 第 3 条的后半句）；~~已由 round18 完成（见 §13；生产接线缺口仍在 13.4 第 1 条）。Pages 审批卡仍待“批准是否等于置顶”语义；`PluginTier.parse` 未知值兜底 T1 未动。
+7. ~~脏标志跨重启持久化仍未做（11.4 第 2 条）；~~已由 round18 实现（见 §14）；`_applyProfile` 卸载循环潜伏问题仍未修（11.4 第 5 条）；~~`sidebar_drawer` 残留 4 个已删 key 的无害死映射仍未清；~~已由 round18 清理（见 §13）；`tga_glass.dart` 仍无引用者（round18 已复核：lib 内无引用者，文件保留、未接线，见 §13）。
+
+## 13. round18 修复（2026-11-28 05:00 轮次，基线 f1e5f6a6）
+
+本轮主项：沙箱审计第三阶段收尾——非 proot 后端审计覆盖核查（10.4 第 3 条后半句、12.4 第 6 条）+ sidebar 死映射清理（12.4 第 7 条前半句）。HEAD 未变（仍为 f1e5f6a6），直接在 round17 融合树上做；两路并行 agent 实施（本 agent 负责非 proot 后端审计覆盖 + sidebar 死映射清理）、主 agent 整合验证。本轮改 `frontend/lib/harness/{sandbox_provider,sandbox_proot_provider}.dart`、`frontend/lib/flai/flows/sidebar/screens/sidebar_drawer.dart`（另加本文档一节、本地断言脚本一处，更新 `check_sandbox_audit_phase2_round15.dart` §11），未动 `plugin_kernel.dart`、`kernel_guard.dart`、`core.dart`、`embedded_backend.dart`、`sandboxed_shell.dart`、`security_policy.dart`、`approval_gate.dart`、`audit_log.dart`。
+
+### 13.0 审计结论（实证，旧行为）
+
+| 缺口 | 旧行为 | 证据 |
+|---|---|---|
+| provider exec 无 ask | Local/Proot exec 只调 `checkDeny`；策略判 ask 的命令直接执行，不建单、不消费一次性凭据 | `sandbox_provider.dart` 的 `checkDeny` 是唯一预检；`sandbox_proot_provider.dart` exec（round15 只接 deny） |
+| provider write 完全无策略检查、无审计 | Local/Proot `writeFile` 只做路径解析 + 写盘；deny/ask 规则对写路径不生效，写动作不留任何审计 | 两文件 `writeFile`（round17 前） |
+| provider exec 错误分支无审计 | 平台不支持 / 工作区不可用 / cwd 越界 / shell 起不来 / 未安装 / `proot.run` 返回 null 均静默返回 error 结果，不记审计 | 两文件 exec 的 early return；round15 注释“执行体启动前不记执行审计” |
+| 生产四后端已覆盖（核查结论，非缺口） | `_shellExec`：门禁前置 evaluate（deny/ask 记审计并拒绝）+ 6 处收尾 `_auditShellExec`（ssh/proot/real-shell/builtin，含 not-installed/run-null 的 failed、exit -1） | `embedded_backend.dart` `_shellExec`（约 4988–5470 行）；round14 断言 `_auditShellExec` 7 处 |
+| cube 已覆盖（核查结论，非缺口） | `SandboxedShell`：deny + ask + 审计三钩子俱全 | `sandboxed_shell.dart` exec；`embedded_backend.dart` 构造接线 |
+| ToolRegistry 五态已覆盖（核查结论，非缺口） | deny / ask_approved / ask_denied / allow 抽样 / error | `core.dart`；round17 |
+| 注册表生产未接线（缺口，不在本轮文件范围） | `SandboxProviderRegistry` 在 lib/ 内除测试外无调用者；`EmbeddedBackend` 未向注册表注入任何钩子，provider 后端生产不可达 | 全树 grep：lib 内 `SandboxProviderRegistry(` 调用者 0 个（除定义本身） |
+
+### 13.1 修复（新行为）
+
+| 项 | 新行为 | 旧行为对照 |
+|---|---|---|
+| provider exec ask | `SandboxProvider` 新增 `askCheck`/`onAskApproval` + `checkAsk()`（cube 同款语义：deny 之后、执行体之前；命中 ask 时调审批入口，入口为空或返回 false 记 denied 审计并拒绝，文案区分无入口/已建单；返回 true 放行；预检抛错 fail-closed）；Local 与 Proot exec 均在 `checkDeny` 之后接入；新增 `SandboxExecResult.askDenied` 工厂（status 仍为 denied） | ask 直接执行 |
+| provider write 策略 + 审计 | 新增 `writeDenyCheck`/`writeAskCheck`/`onWriteAskApproval` + `checkWritePolicy()`（deny → ask；预检在路径解析之前）；新增 `SandboxAuditEvent.fromWrite` 工厂（tool `'workspace.write'`，first=文件名≤40，chars=内容长度，cwd=父目录，exit 0=已写/-1=未写，detail 与 `fromCommand` 同形）；Local 与 Proot `writeFile`：拒绝记 denied、成功记 allowed、越界/IO 失败记 failed，每次写恰一条事件；接管门禁不拦写（不变） | 写无检查、无审计 |
+| provider exec 错误分支审计 | Local：平台不支持 / 工作区不可用 / cwd 越界 / shell 起不来走 `execFailed` 记 failed、exit -1；Proot：not-installed / `proot.run` 返回 null 走 `execFailed` 记 failed、exit -1；与生产 `_shellExec` 同款。round15“执行体启动前不记执行审计”的旧约定废止；接管拒绝仍不记执行审计（round14 链 C 断言不变），deny/ask 仍记 denied | 错误分支静默 |
+| 注册表补齐 | 注册表新增 ask/写钩子持有字段 + setter（后设同步到当前后端，与 denyCheck/onAudit 同款）+ `_injectHooks` 注入；新增 `writeFile` 分发入口（委托当前后端） | 只有 deny/审计钩子、无写入口 |
+| sidebar 死映射清理 | `_navGroupByLabelKey` 删 4 条（cognition/creator/customize/uiPlugins，37→33）；`_navFallbackZh` 的 uiPlugins 兜底随之删（表暂空）；其余 33 条不动。删除前提：4 个 key 在 `workspace_sections` 里无任何 NavItem 声明，`visibleNavKeys` 只做过滤（未知 key 跳过），故映射永不可达 | 残留 4 个已删 key 的死映射 |
+| tga_glass | 核查：lib 内仍无引用者；文件保留、未接线（cosmo 新加组件，留待以后接线，未删） | 同前 |
+
+### 13.2 本轮验证结果
+
+| 验证 | 结果 |
+|---|---|
+| 新 Dart VM 断言脚本 `~/workspace/tangram-agent-work/check_sandbox_audit_backends_round18.dart` | ✅ **205 passed / 0 failed**（§1 exec ask 行为；§2 错误分支审计；§3 proot/基类/注册表结构；§4 写策略 + 审计行为与 fromWrite 元数据；§5 注册表注入行为；§6 sidebar 33 条 + tga_glass 无引用；§7 覆盖矩阵回归；§8 旧行为回归） |
+| `check_sandbox_audit_phase2_round15.dart`（已更新 §11：fireAudit 1→2 处 + checkAsk 顺序断言） | ✅ **80 passed / 0 failed**（原 76 + 新增 4） |
+| `check_sandbox_audit_round14.dart`（回归） | ✅ **118 passed / 0 failed** |
+| `check_sandbox_audit_phase3_dispatch_round17.dart`（回归） | ✅ **143 passed / 0 failed** |
+| `check_sandbox_audit_phase3_auditlog_round17.dart`（回归） | ✅ **63 passed / 0 failed** |
+| `check_audit_rotation_round15.dart`（回归） | ✅ **178 passed / 0 failed** |
+| `flutter analyze`（全量） | ✅ **No issues found**（0 issues） |
+| pytest 全套 | ❌ **未跑**（本机无 pytest/venv；本轮未动任何 Python 文件，Python 行为不受影响；整合时由主 agent 在有 venv 的环境重跑） |
+| `flutter test` / Dart 编译 / 真机 | ❌ **未跑**（同 round12/13/15/16/17 的诚实边界） |
+| proot exec / cube / `EmbeddedBackend` 的**行为** | ❌ **未在 VM/真机跑到**（import Flutter；只做源码结构断言 + analyze + 代码复核） |
+
+### 13.3 本轮实测纠正
+
+1. **round15 关于 proot early return 的约定已废止**：round15 称 not-installed / `proot.run` 返回 null“在执行体启动前，命令未执行，故不记执行审计”——生产 `_shellExec` 对同一分支记 failed、exit -1，两层口径不一致。本轮统一为记 failed、exit -1（§10.1 的 proot 钩子行“不记执行审计”已过时，以本节为准；phase2 §11 已同步更新）。
+2. **allow 抽样口径**：round17 的抽样只在 `ToolRegistry` 层（默认 1/100）。provider/cube/shell 的执行审计按 round14 约定每动作一条（allowed/failed），本轮未给 provider 加抽样——“allow 仍按抽样”指 ToolRegistry 层的抽样保持不变，不是把 provider 的逐条审计改成抽样。逐条审计是三层（shell/cube/provider）共用的执行审计契约，改抽样会改 audit.jsonl 的事件口径，须另议。
+3. **sidebar 死映射是 4 个 key、5 行**：分组表 4 条 + 兜底表 uiPlugins 1 条；原分组表共 37 条（此前记录误作 36 条），现剩 33 条。4 个 key 的 NavItem 均不在 `workspace_sections` 声明里（`mosaic`/`sunRun` 是有声明但未进分组表的另一回事，走类型兜底，不动）。
+
+### 13.4 仍然保留的诚实边界与已知局限
+
+1. **生产接线缺口**：provider 层的策略/审计 choke 点已补齐，但 `EmbeddedBackend` 尚未实例化 `SandboxProviderRegistry`、未注入 denyCheck/askCheck/onAskApproval/writeDenyCheck/writeAskCheck/onWriteAskApproval/onAudit——生产 exec 仍走 `_shellExec` 直调 SshSandbox/ProotSandbox/`_realShellExec`/内置解释器，provider 后端在生产上不可达。接线须另改 `embedded_backend.dart`（构造时建注册表、注册 local/proot 后端、注入与 cube 同款的策略回调与 `_auditShellExec`/`_auditCubeEvent` 同款的审计回调），并补 flutter 侧测试；本轮只证明 provider 层本身已就绪。
+2. allow 抽样事件在 `execute` 之前发出（round17 既有语义）；provider 的 ask 获批后尾部审计仍按 ok 记 allowed/failed，不另记一条 ask_approved 事件——ask 获批在 provider/cube 层不留独立事件，与 cube 同款；五态区分只在 ToolRegistry 层。
+3. 写审计的 `chars` 为待写内容长度（UTF-16 代码单元数），`first` 为文件名——内容本身绝不进审计；大文件写仍只记一条元数据事件。
+4. （接续 12.4）Pages 审批卡仍待“批准是否等于置顶”语义；`PluginTier.parse` 未知值兜底 T1 未动；~~脏标志跨重启持久化仍未做（11.4 第 2 条）；~~已由 round18 实现（见 §14）；`_applyProfile` 卸载循环潜伏问题仍未修（11.4 第 5 条）。
+
+## 14. round18 修复（2026-11-28 05:00 轮次，基线 f1e5f6a6）
+
+本轮主项：脏标志跨重启持久化（9.4 第 1 条、11.4 第 2 条、12.4 第 7 条遗留）。HEAD 未变（仍为 f1e5f6a6），直接在 round17 融合树上做；两路并行 agent 实施（本 agent 负责脏标志持久化；另一 agent 负责沙箱审计收尾 + sidebar 清理，见 §13）、主 agent 整合验证。本轮只改 `frontend/lib/harness/plugin_kernel.dart`（另加本文档一节、本地断言脚本一处），未动 `sandbox_provider.dart` / `sandbox_proot_provider.dart` / `sandbox_takeover.dart` / `sidebar_drawer.dart` / `tga_glass.dart`，未新增任何操作页面（万物皆插件 / Super agent 等核心功能无操作页，见 14.3）。
+
+### 14.0 审计结论（实证，旧行为）
+
+| 缺口 | 旧行为 | 证据 |
+|---|---|---|
+| 脏态只在内存 | `_restoreDirty` / `_restoreDirtyReason` 是纯内存字段；`_persistConfig` 只写 `profile` / `home_patch` / `updated_at` 三键；进程重启后旧脏态即失，启动标脏只能发现**本次**启动的问题 | `plugin_kernel.dart` 约 859–864 行字段注释“只在内存，进程重启即失——跨重启持久化未做”；`_persistConfig` 约 1174 行 |
+| 清脏只清内存 | 三条出路（重试同一快照成功 / 回滚到备份成功 / `resolve_dirty` 显式确认）只把内存字段置回 false；磁盘上本就无脏键，无从谈清盘 | `resolve_dirty` 约 2045 行、`restoreSnapshot` 成功路径约 2377 行 |
+| 快照仍只在内存 | 快照列表是进程内 `List<KernelSnapshot>`，不落盘；重启后磁盘上没有可恢复的“最新快照”，boot 的“最新快照”仍是本次装配结果本身 | round16 §11.0 预检对象决策；本轮未改（见 14.4 第 2 条） |
+
+### 14.1 修复（新行为，全部在 plugin_kernel.dart 内，不另起文件，不新增类型）
+
+| 项 | 新行为 | 旧行为对照 |
+|---|---|---|
+| 脏态落盘 | `_persistConfig` 脏时多写一个 `restore_dirty` 键：`{dirty: true, reason, at, phase}`（`at` = 置脏时间 ISO 8601，`phase` = 置脏来源 `'boot'` / `'restore'`）；干净时不写该键——干净启动不留脏痕，清脏时同一收口把键清掉。写盘仍是原有 tmp+rename 原子写，失败时旧 `kernel_config.json` 完好，`profile` / `home_patch` 不受损 | 只写 profile/home_patch/updated_at |
+| 启动恢复 | `boot()` 在 `readConfig()` 之后、首个 `_persistConfig`（`_applyProfile` 内）之前，先调 `_restorePersistedDirty(saved)` 恢复上轮脏态：`dirty==true` 且 `reason` 为字符串（可空）时恢复脏态、置脏时间与来源，journal phase 记 `'restored_dirty'`；恢复后内核仍脏，仍须 rollback 或 `resolve_dirty` 才能继续；本次装配本身干净时不发新的 boot 脏事件 | 重启后旧脏态即失 |
+| 置脏收口落盘 | 启动标脏（`_markBootDirtyIfNeeded`，phase `'boot'`）由 `boot()` 在调用后收口 `if (_restoreDirty) await _persistDirtyState()`；回退失败（`_failRestore`，phase `'restore'`，现为 async、调用点 `return await`）在返回前 `await _persistDirtyState()` | 置脏不同步磁盘 |
+| 清脏收口清盘 | `resolve_dirty` 显式确认、重试同一快照成功、回滚到备份成功三条出路，清内存脏态的同时 `await _persistDirtyState()`，把磁盘上的脏键清掉 | 清脏只清内存 |
+| 落盘尽力而为 | `_persistDirtyState()` 包一层 try/catch：写盘失败只发 `kernel.dirty_persist_failed` 审计事件（含 error 与当时 dirty 值），不抛错、不回滚内存脏态、不挡启动与出路；调用方一次普通写盘（如 `set_patch`）即可恢复同步 | 无此收口 |
+| 损坏脏记录 | `_restorePersistedDirty` 校验：`restore_dirty` 不是 Map、`dirty` 非 bool true、`reason` 非字符串时，按“干净”处理并记一条 `kernel.dirty_record_ignored` 审计事件，不抛错、不挡启动；`dirty==false` 或无该键时静默干净，不发事件。整文件 JSON 损坏时 `FileKernelPersistence.readConfig` 已回退空态（旧行为，本轮未改），只断言干净启动 | 无此校验 |
+| 脏态可见 | `handle('describe'/'status')` 与 facade `PluginContext.describe()` 新增 `restore_dirty_at` / `restore_dirty_phase` 两个只读字段（干净时为空串）；原有 `restore_dirty` / `restore_dirty_reason` / `restore_journal` 字段不动 | 无脏时间/来源字段 |
+
+### 14.2 本轮验证结果
+
+| 验证 | 结果 |
+|---|---|
+| 新 Dart VM 断言脚本 `~/workspace/tangram-agent-work/check_dirty_persist_round18.dart` | ✅ **98 passed / 0 failed**（§0 干净启动不留脏痕；§1 置脏后持久化文件含脏标志与 reason/at/phase 且 profile/home_patch 不受损 + facade 字段；§2 新实例加载后脏态恢复端到端：修复 bundle 后仍恢复上轮脏态、脏门禁生效、resolve_dirty 后内存与磁盘同时清脏；§3 回退失败落盘 phase 'restore' → 重试同一快照成功清脏含磁盘、清脏后新实例启动干净；§4 回滚到备份成功清脏含磁盘；§5 损坏脏记录不挡启动：非 Map / dirty 非 true / reason 非字符串 → 干净 + ignored 事件、整文件 JSON 损坏 → 干净启动、dirty:false 显式干净不发事件；§6 失败写入不破坏原有持久化：写失败只记 dirty_persist_failed、内存脏态照常切换、磁盘旧文件完好、恢复写后一次普通写盘即同步；§7 facade describe 脏时间/来源） |
+| `check_boot_dirty_round16.dart`（回归） | ✅ **95 passed / 0 failed**，与 round16 期望无冲突，**无需同步修正** |
+| `check_restore_dirty_round14.dart`（回归） | ✅ **95 passed / 0 failed** |
+| `check_kernel_guard_round13.dart` / `check_kernel_guard_round12.dart`（回归） | ✅ **110 / 46 passed，0 failed** |
+| `node tests/conformance_0_0_41.mjs` | ✅ **53 passed / 0 failed**（G5d 6 条关卡仍过：`_markBootDirtyIfNeeded` 保持同步 `void` 签名，conformance 按 `'void _markBootDirtyIfNeeded('` 切片；落盘收口放 `boot()` 里 await，本轮改签名为 `Future<void>` 时 4 条 G5d 关卡曾失败，已改回——见 14.3 末条） |
+| pytest 全套 | ✅ **269 passed / 8 skipped**（与 round17 基线逐项持平） |
+| `flutter analyze`（全量） | ✅ **No issues found**（0 issues） |
+| `flutter test` / Dart 编译 / 真机 | ❌ **未跑**（llamadart 的 `.so` 是 arm64、宿主是 x64，原生资产构建失败，环境限制；同 round12/13/15/16/17 的诚实边界） |
+
+### 14.3 持久化约定（本节为规范，后续轮次按此执行）
+
+1. **写盘时机**：脏态是 `_persistConfig` 写出的 `kernel_config.json` 里一个普通键，随每一次配置落盘同步写出——置脏收口（boot 标脏、回退失败）与清脏收口（三条出路）都经 `_persistDirtyState()` 落盘；其余写盘点（`_applyProfile`、`_setPatch` 的 bundle/home/profile 层）不感知脏态，只负责把当前内存脏态原样写回。干净时键不存在：磁盘上“无键”即“干净”，不要另写 `dirty:false` 占位。
+2. **记录形态**：`restore_dirty = {dirty: true, reason: String, at: String（ISO 8601）, phase: 'boot' | 'restore'}`。`phase` 只记置脏来源，不记出路；`at` 只记置脏时刻，清脏不留痕。journal 不落盘：重启后恢复的脏态只有 reason/at/phase，journal 摘要只给 `phase: 'restored_dirty'` 的最小骨架（`failed_phase` 取回恢复的 phase，其余键为空），不伪造失败插件与目标快照。
+3. **清脏收口**：三条出路共用同一约定——内存清脏 + `await _persistDirtyState()`，磁盘键随即消失；任一出路清脏后，再启动的新实例必干净（断言 §3 末条）。`resolve_dirty` 仍须 `trustedRoot` + 显式 `accept: true`；脏门禁仍只拦 `handle()` 改动类动作，宿主直调不受限（round14 §9 第 6 条口径不变）。
+4. **损坏处理**：脏记录损坏（非 Map / `dirty` 非 true / `reason` 非字符串）→ 按干净处理 + `kernel.dirty_record_ignored` 审计事件，不抛错、不挡启动；`dirty==false` 显式干净，不发事件；整文件 JSON 损坏 → `readConfig` 回退空态，干净启动（旧行为）。写盘失败（磁盘满、权限等）→ 只记 `kernel.dirty_persist_failed` 审计事件，内存脏态照常切换，旧文件完好（tmp+rename 原子写）；恢复写能力后一次普通写盘即同步。
+5. **恢复顺序**：`boot()` 必须在首个 `_persistConfig` 之前恢复脏态，否则装配落盘会把磁盘上的旧脏键冲掉（`_applyProfile` 写盘时内存脏态仍为 false）。恢复后若本次启动又标脏，新 reason/at/phase 覆盖旧值并落盘；本次启动干净时旧脏态原样保留，仍须出路清脏。
+6. **不做**：快照仍只在内存（不落盘）；`restoreSnapshot` 变异开始时的瞬时置脏（“正在回退到快照 …”）不落盘——进程崩溃时它随进程消失，磁盘保留此前已落盘的脏态；不新增操作页面、不新增持久化文件、不新增类型。
+7. **实现约束**：`_markBootDirtyIfNeeded` 保持同步 `void` 签名——conformance G5d 按字面 `'void _markBootDirtyIfNeeded('` 切片，改成 `Future<void>` 会使 4 条关卡的切片落到错误位置而失败（本轮实测）；落盘收口放 `boot()` 里 `if (_restoreDirty) await _persistDirtyState()`。`_failRestore` 改为 async 是安全的（无 conformance 切片命中它，调用点 4 处均已 `return await`）。
+
+### 14.4 仍然保留的诚实边界与已知局限
+
+1. 快照仍只在内存：重启后磁盘上没有可恢复的快照，恢复的脏态指向的目标快照 id 在新进程里不存在——重启后 `rollback` 不是出路，`resolve_dirty` 才是（与 11.4 第 7 条同理：回滚出路只对同进程内的 `boot_apply` 脏态有效；跨重启恢复的脏态，其 journal 只有最小骨架）。
+2. `restoreSnapshot` 变异开始时的瞬时置脏不落盘：进程恰在回退中途崩溃时，磁盘保留此前已落盘的脏态（此前干净则仍干净）；半回退的节点态随进程消失，重启后按磁盘 profile 重新装配——这是快照内存化的既有限制，不是本轮引入的新缺口。
+3. 恢复的脏态不重放事件：上轮的 `kernel.boot_dirty` / `kernel.rollback_failed` 事件只在旧进程的事件流里（`kernel_events.jsonl` 会随 `readEvents` 回放进 `_seq`，但事件内容不重放为热事件）；新进程只恢复脏态本身，不补发旧事件。
+4. `_applyProfile` 卸载循环潜伏问题仍未修（11.4 第 5 条）；`_setMode` 先赋值模式、后 `_applyProfile` 的顺序未动（9.4 第 4 条）。
+5. 本轮未跑 `flutter test` / Dart 编译 / 真机（见 14.2）；断言脚本的临时目录删除需等未 await 的事件落盘（200ms 沉降 + 重试），属测试脚手架约定，不影响内核。
