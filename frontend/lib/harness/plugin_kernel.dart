@@ -601,6 +601,8 @@ class PluginKernelFacade {
         'event_seq': _kernel._seq,
         'restore_dirty': _kernel._restoreDirty,
         'restore_dirty_reason': _kernel._restoreDirtyReason,
+        'restore_dirty_at': _kernel._restoreDirtyAt,
+        'restore_dirty_phase': _kernel._restoreDirtyPhase,
         'restore_journal': _kernel._restoreJournalSummary(),
       };
 
@@ -857,11 +859,20 @@ class PluginKernel {
   /// 回退脏标志（round14）：restoreSnapshot 任一变异阶段失败即置真，直到
   /// 三条出路之一清脏（重试同一快照成功 / 回滚到回退前备份成功 /
   /// resolve_dirty 显式确认）。round16：boot 失败（挂载/卸载失败、启动快
-  /// 照预检失败）同样置真（journal phase 'boot_dirty'）。只在内存，进程
-  /// 重启即失——跨重启持久化未做（_persistConfig 只存 profile/home_patch），
-  /// 重启后旧脏态仍无法从磁盘恢复，见 docs/CODE-AUDIT-0.0.41.md §11。
+  /// 照预检失败）同样置真（journal phase 'boot_dirty'）。round18：脏态
+  /// 跨重启持久化——置脏/清脏时随 _persistConfig 一起写入 kernel_config.json
+  /// 的 restore_dirty 键（dirty/reason/at/phase），启动时先恢复（见
+  /// _restorePersistedDirty）；脏记录损坏按干净处理并记审计事件，不挡启动。
+  /// 内存语义不变。唯一例外：restoreSnapshot 变异开始时的瞬时置脏
+  /// （“正在回退到快照 …”）不落盘——进程崩溃时它随进程消失，磁盘保留此前
+  /// 已落盘的脏态（失败由 _failRestore 落盘，成功由成功路径清盘）。
   bool _restoreDirty = false;
   String _restoreDirtyReason = '';
+
+  /// round18：置脏时间（ISO 8601，置脏收口写入）与置脏来源 phase
+  /// （'boot' = 启动标脏，'restore' = 回退失败）；清脏时与 reason 一起清空。
+  String _restoreDirtyAt = '';
+  String _restoreDirtyPhase = '';
 
   /// 回退 journal（Map，不新增类型）：目标快照、回退前备份、当前阶段、
   /// 已完成卸载/挂载、失败插件与阶段、时间戳。失败时随结构化结果返回，
@@ -945,6 +956,10 @@ class PluginKernel {
       registerPlugin(p);
     }
     final Map<String, dynamic> saved = await persistence.readConfig();
+    // round18：先恢复上轮落盘的脏态（跨重启持久化），再走本次装配——恢复
+    // 必须在首个 _persistConfig（_applyProfile 内）之前，否则装配落盘会
+    // 把磁盘上的旧脏键冲掉。脏记录损坏按干净处理（见 _restorePersistedDirty）。
+    _restorePersistedDirty(saved);
     _profile = _profileFromConfig(saved, defaultProfile);
     _homePatch = saved['home_patch'] is Map
         ? Map<String, dynamic>.from(saved['home_patch'] as Map)
@@ -965,14 +980,15 @@ class PluginKernel {
     });
     // round16：启动标脏（脏标志启动缓解，见 docs/CODE-AUDIT-0.0.41.md §11）。
     //
-    // 快照只在内存、_persistConfig 只存 profile/home_patch，重启后磁盘上
-    // 没有可恢复的“最新快照”——boot 的“最新快照”就是本次装配结果本身：
-    // _applyProfile 之后立即 captureSnapshot('启动快照')，再对它跑
-    // verifyDependencies（活态依赖核查）+ _preflightSnapshot（闭包预检，
+    // 快照只在内存，重启后磁盘上没有可恢复的“最新快照”——boot 的“最新快照”
+    // 就是本次装配结果本身：_applyProfile 之后立即 captureSnapshot('启动快照')，
+    // 再对它跑 verifyDependencies（活态依赖核查）+ _preflightSnapshot（闭包预检，
     // 复用 round14 判定口径）。任一失败都标脏，但首轮挂载不阻塞：预检
     // 在 _applyProfile 之后跑，脏门禁又只在 handle() 入口，boot 直调
     // _applyProfile 不走 handle()，故脏态不可能卡住启动流程、不会死锁。
-    // 出路复用既有 rollback（回滚到启动快照）/ resolve_dirty。
+    // 出路复用既有 rollback（回滚到启动快照）/ resolve_dirty。round18：
+    // _persistConfig 除 profile/home_patch 外还存 restore_dirty 脏态，启动时
+    // 先恢复旧脏态（见 _restorePersistedDirty）；快照本身仍只在内存。
     final Map<String, dynamic> applied = await _applyProfile(reset: true);
     final Map<String, dynamic> bootSnapJson = captureSnapshot('启动快照');
     final String bootSnapId = (bootSnapJson['id'] ?? '').toString();
@@ -985,12 +1001,67 @@ class PluginKernel {
       preflight: preflight,
       bootSnapId: bootSnapId,
     );
+    // round18：启动脏态落盘收口（_markBootDirtyIfNeeded 保持同步 void，
+    // conformance G5d 按其签名切片，故落盘放 boot 这里 await）。干净启动
+    // 不写盘；恢复的旧脏态若在，本次装配已由 _applyProfile 随配置写回，
+    // 此处重写同一脏态只是刷新 updated_at，无内容变化。
+    if (_restoreDirty) await _persistDirtyState();
+  }
+
+  /// round18：启动时恢复上轮落盘的脏态（跨重启持久化）。
+  ///
+  /// 约定（见 docs/CODE-AUDIT-0.0.41.md §13）：kernel_config.json 的
+  /// restore_dirty 键为 {dirty: bool, reason: String, at: String,
+  /// phase: 'boot'|'restore'}。dirty==true 且 reason 为字符串（可空）时
+  /// 恢复脏态（journal phase 记 'restored_dirty'，便于 describe 追溯）；
+  /// 其余形态一律按“干净”处理并记一条 kernel.dirty_record_ignored 审计
+  /// 事件，不抛错、不挡启动。dirty==false 或无该键时静默干净（不留脏痕，
+  /// 也不发事件）。整文件 JSON 损坏时 readConfig 已回退空态，本处不再处理。
+  void _restorePersistedDirty(Map<String, dynamic> saved) {
+    final Object? raw = saved['restore_dirty'];
+    if (raw == null) return;
+    if (raw is! Map) {
+      emit('kernel.dirty_record_ignored', 'kernel', <String, dynamic>{
+        'detail': 'restore_dirty 不是 Map，按干净处理',
+      });
+      return;
+    }
+    final Map<String, dynamic> rec = Map<String, dynamic>.from(raw);
+    final Object? dirty = rec['dirty'];
+    if (dirty == false) return; // 显式干净，不发事件。
+    final Object? reason = rec['reason'];
+    if (dirty != true || (reason != null && reason is! String)) {
+      emit('kernel.dirty_record_ignored', 'kernel', <String, dynamic>{
+        'detail': 'restore_dirty 格式不对（dirty 非 true 或 reason 非字符串），按干净处理',
+      });
+      return;
+    }
+    _restoreDirty = true;
+    _restoreDirtyReason = (reason as String?) ?? '';
+    _restoreDirtyAt = (rec['at'] as String?) ?? '';
+    _restoreDirtyPhase = (rec['phase'] as String?) ?? 'restore';
+    _restoreJournal = <String, dynamic>{
+      'target_snapshot': '',
+      'pre_restore_snapshot': '',
+      'phase': 'restored_dirty',
+      'failed_phase': _restoreDirtyPhase,
+      'failed_plugin': '',
+      'done_unmounts': <String>[],
+      'done_mounts': <String>[],
+      'failed_mounts': <Map<String, dynamic>>[],
+      'failed_unmounts': <Map<String, dynamic>>[],
+      'boot_errors': <String>[],
+      'at': _restoreDirtyAt,
+    };
   }
 
   /// round16：启动标脏收口。_applyProfile 的失败挂载/卸载与启动快照的
   /// 预检（verifyDependencies + _preflightSnapshot）任一失败都标脏、
   /// 写 journal、发事件；全部通过则什么都不做（干净启动不留脏痕）。
   /// 脏门禁只拦 handle() 改动类动作，boot 流程本身不受影响。
+  /// round18：置脏后由 boot() 收口落盘（phase 'boot'，见 boot 末尾）——
+  /// 本函数保持同步 void 签名（conformance G5d 按 'void _markBootDirtyIfNeeded('
+  /// 切片），落盘尽力而为（见 _persistDirtyState）。
   void _markBootDirtyIfNeeded({
     required Map<String, dynamic> applied,
     required Map<String, dynamic> deps,
@@ -1056,6 +1127,8 @@ class PluginKernel {
     }
     _restoreDirty = true;
     _restoreDirtyReason = reasons.join('；');
+    _restoreDirtyAt = DateTime.now().toIso8601String();
+    _restoreDirtyPhase = 'boot';
     _restoreJournal = <String, dynamic>{
       'target_snapshot': bootSnapId,
       'pre_restore_snapshot': '',
@@ -1087,6 +1160,7 @@ class PluginKernel {
         'dirty': true,
       });
     }
+    // round18：落盘由 boot() 在调用本函数后收口（本函数保持同步）。
   }
 
   RuntimeProfile _profileFromConfig(
@@ -1171,12 +1245,40 @@ class PluginKernel {
     };
   }
 
+  /// round18：脏态落盘收口（尽力而为）。脏标志随 _persistConfig 一起写入
+  /// 同一 kernel_config.json（见 _persistConfig）；写盘失败只发
+  /// kernel.dirty_persist_failed 审计事件，不抛错、不回滚内存脏态——
+  /// writeConfig 是 tmp+rename 原子写，失败时旧文件完好，profile/home_patch
+  /// 不受损；调用方重试一次普通写盘（如 set_patch）即可恢复同步。
+  Future<void> _persistDirtyState() async {
+    try {
+      await _persistConfig();
+    } on Object catch (e) {
+      emit('kernel.dirty_persist_failed', 'kernel', <String, dynamic>{
+        'error': '$e',
+        'dirty': _restoreDirty,
+      });
+    }
+  }
+
   Future<void> _persistConfig() async {
-    await persistence.writeConfig(<String, dynamic>{
+    final Map<String, dynamic> config = <String, dynamic>{
       'profile': _profile.toJson(),
       'home_patch': _homePatch,
       'updated_at': DateTime.now().toIso8601String(),
-    });
+    };
+    // round18：脏态随同一文件落盘（脏时写 restore_dirty 键：dirty/reason/
+    // at/phase；干净时不写该键——干净启动不留脏痕，清脏时同一收口把键清掉）。
+    // 原子 tmp+rename 写：失败时旧文件完好，profile/home_patch 不受损。
+    if (_restoreDirty) {
+      config['restore_dirty'] = <String, dynamic>{
+        'dirty': true,
+        'reason': _restoreDirtyReason,
+        'at': _restoreDirtyAt,
+        'phase': _restoreDirtyPhase,
+      };
+    }
+    await persistence.writeConfig(config);
   }
 
   /// 挂载一个插件：依赖校验 → 子作用域 apply → 收集 effects → 入树。
@@ -1919,6 +2021,8 @@ class PluginKernel {
           // round14：脏态可见（只读动作不受限）。
           'restore_dirty': _restoreDirty,
           'restore_dirty_reason': _restoreDirtyReason,
+          'restore_dirty_at': _restoreDirtyAt,
+          'restore_dirty_phase': _restoreDirtyPhase,
           'restore_journal': _restoreJournalSummary(),
         };
       case 'tree':
@@ -2044,7 +2148,11 @@ class PluginKernel {
             _restoreJournalSummary();
         _restoreDirty = false;
         _restoreDirtyReason = '';
+        _restoreDirtyAt = '';
+        _restoreDirtyPhase = '';
         _restoreJournal['phase'] = 'resolved';
+        // round18：清脏落盘（尽力而为；写失败只记审计事件，不翻供已清的内存态）。
+        await _persistDirtyState();
         emit('kernel.restore_dirty_resolved', 'kernel', <String, dynamic>{
           'accepted': true,
           'journal': resolvedJournal,
@@ -2197,15 +2305,19 @@ class PluginKernel {
 
   /// 变异阶段失败的统一收口：置脏、记 journal、发 kernel.rollback_failed、
   /// 返回结构化失败（含 resume 两条出路）。只在 _restoring 保护内调用。
-  Map<String, dynamic> _failRestore({
+  /// round18：置脏后随 _persistConfig 落盘（phase 'restore'），使重启后
+  /// 仍能恢复本次回退的脏态；调用方 await 本收口，落盘完成才返回。
+  Future<Map<String, dynamic>> _failRestore({
     required String phase,
     String failedPlugin = '',
     required String error,
     required List<String> doneUnmounts,
     required List<String> doneMounts,
     Map<String, dynamic>? extra,
-  }) {
+  }) async {
     _restoreDirty = true;
+    _restoreDirtyAt = DateTime.now().toIso8601String();
+    _restoreDirtyPhase = 'restore';
     _restoreJournal['phase'] = phase;
     _restoreJournal['failed_phase'] = phase;
     _restoreJournal['failed_plugin'] = failedPlugin;
@@ -2242,6 +2354,8 @@ class PluginKernel {
       'error': error,
       'pre_restore_snapshot': pre,
     });
+    // round18：回退失败的脏态落盘（尽力而为；写失败只记审计事件）。
+    await _persistDirtyState();
     return result;
   }
 
@@ -2304,7 +2418,7 @@ class PluginKernel {
           doneUnmounts.addAll(before.difference(_nodes.keys.toSet()));
           _restoreJournal['done_unmounts'] = List<String>.from(doneUnmounts);
           if (r['ok'] != true) {
-            return _failRestore(
+            return await _failRestore(
               phase: 'unmount',
               failedPlugin: pid,
               error: '回退失败：插件 $pid 无法卸载（${r['error']}）',
@@ -2326,7 +2440,7 @@ class PluginKernel {
           configLayer: (n['config_layer'] ?? 'runtime').toString(),
         );
         if (r['ok'] != true) {
-          return _failRestore(
+          return await _failRestore(
             phase: 'remount',
             failedPlugin: pid,
             error: '回退失败：插件 $pid 无法重新挂载（${r['error']}）',
@@ -2346,7 +2460,7 @@ class PluginKernel {
         if (active.isEmpty) continue;
         final CapabilitySeam? seam = _seams[name];
         if (seam == null || !seam.providers.containsKey(active)) {
-          return _failRestore(
+          return await _failRestore(
             phase: 'seams',
             error: '回退失败：接缝 $name 的目标 provider $active 不存在',
             doneUnmounts: doneUnmounts,
@@ -2364,7 +2478,7 @@ class PluginKernel {
       if (_booted && snap.mode.isNotEmpty && snap.mode != _profile.mode.label) {
         final Map<String, dynamic> r = await _setMode(snap.mode);
         if (r['ok'] != true) {
-          return _failRestore(
+          return await _failRestore(
             phase: 'mode',
             error: '回退失败：模式恢复失败（${r['error']}）',
             doneUnmounts: doneUnmounts,
@@ -2376,6 +2490,10 @@ class PluginKernel {
       _restoreJournal['phase'] = 'done';
       _restoreDirty = false;
       _restoreDirtyReason = '';
+      _restoreDirtyAt = '';
+      _restoreDirtyPhase = '';
+      // round18：重试同一快照 / 回滚到备份成功，清脏落盘（尽力而为）。
+      await _persistDirtyState();
       emit('kernel.rollback', 'kernel', <String, dynamic>{
         'snapshot': id,
         'mounted': mountedCount,
