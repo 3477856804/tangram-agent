@@ -44,8 +44,13 @@ CATEGORIES = (CATEGORY_OUTBOUND, CATEGORY_SANDBOX)
 # 一次性批准的有效期（秒）。
 APPROVAL_TTL_S = 600
 
-# 强制拒绝的破坏性命令模式（与 Dart 侧 security_policy.dart 的
-# default-deny-destructive-shell 同规则，策略改不掉这条）。
+# 强制拒绝的破坏性命令模式——与 Dart 侧
+# `PermissionPolicy.destructiveShellArgsPattern`（security_policy.dart，
+# 唯一真源）同值，三处同步改：Dart 侧 security_policy.dart 的
+# default-deny-destructive-shell 规则与 approval_gate.dart 的
+# `_forcedDenyCommand` 均用同一模式，策略改不掉这条。
+# 注意 `\bmkfs\b` 带尾边界：`mkfsfoo` 不拦（round17 收敛漂移：
+# security_policy.dart 此前用无尾边界的 `\bmkfs`，会误拦 mkfsfoo）。
 _FORCED_DENY_COMMAND = re.compile(
     r"\brm\s+-(?:[a-zA-Z]*[rR][a-zA-Z]*[fF]|[a-zA-Z]*[fF][a-zA-Z]*[rR])"
     r"|\bmkfs\b"
