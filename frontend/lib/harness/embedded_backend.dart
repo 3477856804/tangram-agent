@@ -113,12 +113,25 @@ class EmbeddedBackend implements QqShellRunner {
     tools.policyProvider = _ensurePolicy;
     tools.onApprovalRequired = _requestToolApproval;
     // round15 第二阶段：ToolRegistry 的策略决策审计（deny / ask 获批 /
-    // ask 被拒）落盘到 security 类审计；ask_approved 记 allowed，其余记 denied。
+    // ask 被拒）落盘到 security 类审计；round17 扩展映射：
+    // 'error' → action tool_dispatch_error、decision failed；
+    // 'allow'（抽样）→ action tool_dispatch_allow、decision allowed；
+    // 'ask_approved' → allowed；其余（deny / ask_denied）→ denied，
+    // action 保持 tool_dispatch_<decision> 原形。
     tools.onPolicyDecision = (ToolPolicyAuditEvent event) {
       unawaited(_auditLog().append(
         category: 'security',
-        action: 'tool_dispatch_${event.decision}',
-        decision: event.decision == 'ask_approved' ? 'allowed' : 'denied',
+        action: switch (event.decision) {
+          'error' => 'tool_dispatch_error',
+          'allow' => 'tool_dispatch_allow',
+          _ => 'tool_dispatch_${event.decision}',
+        },
+        decision: switch (event.decision) {
+          'error' => 'failed',
+          'allow' => 'allowed',
+          'ask_approved' => 'allowed',
+          _ => 'denied',
+        },
         actor: 'policy',
         detail: event.detail,
       ));
