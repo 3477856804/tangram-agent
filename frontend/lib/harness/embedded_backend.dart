@@ -67,7 +67,9 @@ import 'package:tangram/harness/plugin_kernel.dart';
 import 'package:tangram/harness/prompt_kit.dart';
 import 'package:tangram/harness/proot_sandbox.dart';
 import 'package:tangram/harness/qq_sandbox.dart';
+import 'package:tangram/harness/sandbox_proot_provider.dart';
 import 'package:tangram/harness/sandbox_provider.dart';
+import 'package:tangram/harness/sandbox_takeover.dart';
 import 'package:tangram/harness/security_policy.dart';
 import 'package:tangram/harness/pages_http_server.dart';
 import 'package:tangram/harness/pages_service.dart';
@@ -161,6 +163,68 @@ class EmbeddedBackend implements QqShellRunner {
       return policy.matchedRuleId(tool: 'cube', args: expression);
     };
     cube_shell.SandboxedShell.instance.onAskApproval = (String cube, String expression) async => _requestCubeApproval(cube, expression);
+    // round19：生产接线缺口修复（设计见
+    // ~/workspace/tangram-agent-work/round19_wiring_design.md；缺口见
+    // docs/CODE-AUDIT-0.0.41.md §13.4 第 1 条）——构造时建注册表并注入
+    // 写策略回调与审计过滤回调。defaultKind 按平台显式传入（安卓 proot、
+    // 桌面 local），不用注册表默认的 proot 一刀切；安卓只注册 proot——
+    // 宿主 Android toybox shell 永不参与命令执行（见 _shellExec）。
+    // 工厂懒构造：注册表只在首次取 current / switchTo 时调工厂，构造时
+    // 不启动后端、不触发下载。
+    sandboxTakeover = SandboxTakeover(
+      onAudit: (String action, Map<String, dynamic> detail) {
+        _auditTakeoverEvent(action, detail);
+      },
+    );
+    registry = SandboxProviderRegistry(
+      takeover: sandboxTakeover,
+      defaultKind: Platform.isAndroid
+          ? SandboxProviderKind.proot
+          : SandboxProviderKind.local,
+    );
+    if (Platform.isAndroid) {
+      registry.register(
+        SandboxProviderKind.proot,
+        () => ProotSandboxProvider(proot),
+      );
+    } else {
+      registry.register(
+        SandboxProviderKind.local,
+        () => LocalSandboxProvider(store.sub('sandbox')),
+      );
+      registry.register(
+        SandboxProviderKind.proot,
+        () => ProotSandboxProvider(proot),
+      );
+    }
+    // 写策略钩子：写路径无外部门禁，provider 是唯一门禁——三处全部接线。
+    // 求值用 tool 'workspace.write' + guest 路径（见设计 §3.2）。
+    registry.onAudit = _auditProviderEvent;
+    // （_auditProviderEvent 内按 tool 分流：'shell' 事件丢弃——exec 审计
+    // 归 _shellExec；只放行 'workspace.write' 事件。）
+    registry.writeDenyCheck = (String guestPath) async {
+      final PermissionPolicy policy = await _ensurePolicy();
+      if (policy.evaluate(tool: 'workspace.write', path: guestPath) !=
+          PolicyDecision.deny) {
+        return null;
+      }
+      return policy.matchedRuleId(tool: 'workspace.write', path: guestPath);
+    };
+    registry.writeAskCheck = (String guestPath) async {
+      final PermissionPolicy policy = await _ensurePolicy();
+      if (policy.evaluate(tool: 'workspace.write', path: guestPath) !=
+          PolicyDecision.ask) {
+        return null;
+      }
+      return policy.matchedRuleId(tool: 'workspace.write', path: guestPath);
+    };
+    registry.onWriteAskApproval = _requestWriteApproval;
+    // 注意：exec 的三处钩子（deny 预检、ask 预检、ask 审批入口）本轮保持
+    // 未接线（null）。原因见设计 §2.1 方案 A：_shellExec 顶部已有唯一门禁
+    // （deny/ask 求值 + 一次性凭据消费 + 建审批单 + 审计），再接一道会
+    // 双重门禁——已批准的命令在第二道门被拒、审批单重复创建、审计重复记。
+    // 写路径不受影响（见上）。未来若新增绕过 _shellExec 的 registry.exec
+    // 直接调用方，该调用方要么走 _shellExec，要么自行接线三钩子。
     // 真实 IM 网关：微信/QQ/飞书消息进来后走 _chat 的真实模型推理，
     // 回复经 AGP WebSocket 原样发回，绝不编造。QQ 沙箱直连扫码需要真实
     // shell 执行能力，把本后端作为 QqShellRunner 注入。
@@ -349,6 +413,16 @@ class EmbeddedBackend implements QqShellRunner {
 
   /// Android「Debian 用户态（proot）」扩展包：真实下载/解包/proot 执行。
   late final ProotSandbox proot = ProotSandbox(store, downloads);
+
+  /// round19：沙箱 provider 注册表（生产接线缺口修复，见构造处注释与
+  /// docs/CODE-AUDIT-0.0.41.md §13.4 第 1 条）。注册表此前在生产上零
+  /// 调用者——本文件只 import 了 `sandbox_provider.dart`、从未实例化
+  /// 注册表或任一后端。构造时接线一次（与 cube 接线同款理由：后端是
+  /// 进程级单例，hotSwap 不重建后端，回调不会被热替换丢掉）。
+  late final SandboxProviderRegistry registry;
+
+  /// round19：人工接管管理器（注册表持有唯一实例；接管只拦 exec、不拦写）。
+  late final SandboxTakeover sandboxTakeover;
 
   /// MCP 真实接入：HTTP/SSE 传输的服务端工具会被注册进 [tools]，
   /// 由内置 AgentLoop 直接调用；stdio 传输移动端无法 spawn 进程，如实跳过。
@@ -1986,6 +2060,19 @@ class EmbeddedBackend implements QqShellRunner {
       'ok': true,
       'version': version,
       'environment': await _sandboxEnvironment(),
+      // round19：provider 注册表状态透出（不新增操作页面）。只读同步快照
+      // （currentKind / availableKinds / takeover.isActive 均不构造后端、
+      // 不跑自检、不发审计），不调 registry.status()（后者会构造当前后端
+      // 并跑自检，不宜放在每次查策略时跑）。
+      'sandbox_provider': <String, dynamic>{
+        'current_kind': registry.currentKind.name,
+        'available_kinds': registry.availableKinds,
+        'takeover_active': registry.takeover.isActive,
+        if (registry.lastSwitchError != null)
+          'last_switch_error': registry.lastSwitchError,
+        if (registry.lastFallbackReason != null)
+          'last_fallback_reason': registry.lastFallbackReason,
+      },
       'gates': <String, dynamic>{
         'file_isolation': <String, dynamic>{
           'enabled': true,
@@ -5110,39 +5197,28 @@ class EmbeddedBackend implements QqShellRunner {
           );
           return r;
         }
-        final Map<String, dynamic>? viaLinux = await proot.run(raw, cwd);
-        if (viaLinux != null) {
-          _auditShellExec(
-            raw: raw,
-            cwd: cwd,
-            result: viaLinux,
-            provider: 'proot',
-            ms: auditSw.elapsedMilliseconds,
-            rule: ruleId,
-          );
-          return viaLinux;
-        }
-        final Map<String, dynamic> r = <String, dynamic>{
-          'ok': false,
-          'stdout': '',
-          'error':
-              'Linux 环境启动失败（proot 可执行文件不可用）。'
-              '请到「沙箱」页重新安装 Linux 环境后再试。',
-          'cwd': cwd,
-          'cube': 'shell',
-          'linux': true,
-        };
-        // 未执行（环境启动失败）：记 failed、exit -1。
+        // round19：安卓 exec 改走 provider 注册表（接管门禁 + 超时 60 秒 +
+        // 输出上限 65536，与 LocalSandboxProvider 同款契约；门禁仍在
+        // _shellExec 顶部，注册表的 exec 三钩子保持 null，见构造处注释）。
+        // provider 不返回 null：旧 proot.run 返回 null 的分支由
+        // _providerExecToLegacy 的 not-installed / error 结果覆盖。
+        final SandboxExecResult viaRegistry = await registry.exec(
+          raw,
+          cwd: cwd,
+        );
+        final Map<String, dynamic> viaLinux = _providerExecToLegacy(
+          viaRegistry,
+          cwd: cwd,
+        );
         _auditShellExec(
           raw: raw,
           cwd: cwd,
-          result: r,
+          result: viaLinux,
           provider: 'proot',
           ms: auditSw.elapsedMilliseconds,
           rule: ruleId,
-          exitOverride: -1,
         );
-        return r;
+        return viaLinux;
       }
       final real = await _realShellExec(raw, root, cwd);
       if (real != null) {
@@ -5468,6 +5544,81 @@ class EmbeddedBackend implements QqShellRunner {
   /// id（allow/ask 批准后的成功执行也记该规则，便于追溯是哪条规则放行
   /// 的；无规则命中走 fallback 时为空）。审计写盘失败绝不阻断执行，
   /// 也不改变返回值。
+  /// round19：`SandboxExecResult` → `_shellExec` 沿用的 legacy map。
+  /// 键集合与旧 `proot.run` 返回一致（`cube` / `real` / `debian` 保留，
+  /// 终端页读 `real` 判是否回退内置解释器；见设计 §2.3）。
+  /// stdout/stderr 合并：`proot.run` 返回的是合并文本（`stdout` 已含
+  /// stderr，见 proot_sandbox.dart:904）；provider 把两者分开返回，
+  /// 这里按同款拼法（stderr 为空时不补空行）合并，否则终端会丢 stderr。
+  /// 未执行的结果（接管拒绝 / 策略拒绝 / 未安装）一律记 exit_code -1，
+  /// 与旧「未安装 / 启动失败」分支的 failed、exit -1 同款，`_auditShellExec`
+  /// 无需再传 exitOverride。
+  Map<String, dynamic> _providerExecToLegacy(
+    SandboxExecResult result, {
+    required String cwd,
+  }) {
+    final String stdout = result.stdout;
+    final String stderr = result.stderr;
+    final String merged = stderr.isEmpty ? stdout : '$stdout\n$stderr';
+    switch (result.status) {
+      case 'takeover-active':
+      case 'denied':
+        return <String, dynamic>{
+          'ok': false,
+          'stdout': '',
+          'error': result.error,
+          'exit_code': -1,
+          'cwd': cwd,
+          'cube': 'shell',
+          'real': true,
+          'debian': true,
+          'linux': true,
+        };
+      case 'not-installed':
+        return <String, dynamic>{
+          'ok': false,
+          'stdout': '',
+          'error':
+              'Linux 环境未就绪：${result.error}'
+              '。请在「沙箱」页点「Linux 环境」重试安装。',
+          'exit_code': -1,
+          'cwd': cwd,
+          'cube': 'shell',
+          'real': true,
+          'debian': true,
+          'linux': true,
+          'installing': false,
+        };
+      default:
+        // status 'error' + exit -1 只发生在 proot.run 返回 null 时
+        // （见 ProotSandboxProvider.exec 的 execFailed 分支）：保留旧
+        // 「启动失败」分支的完整文案（含重装指引）。
+        final String error = result.status == 'error' && result.exitCode == -1
+            ? '${result.error}请到「沙箱」页重新安装 Linux 环境后再试。'
+            : result.error;
+        return <String, dynamic>{
+          'ok': result.ok,
+          'stdout': merged,
+          'error': error,
+          'exit_code': result.exitCode,
+          'cwd': result.cwd,
+          'cube': 'shell',
+          'real': true,
+          'debian': true,
+          if (result.timedOut) 'timed_out': true,
+          if (result.truncated) 'truncated': true,
+        };
+    }
+  }
+
+  /// round19：guest 路径写入口（新增能力，无既有调用方）：委托注册表
+  /// `writeFile`（写 deny/ask 预检与写审计都在 provider choke 点生效，
+  /// 见设计 §3.4；本轮不接待入调用方，调用方属于后续功能轮次）。
+  /// 方法名与 `_workspaceGuard` 的 `workspace.write` 工具名保持一致。
+  Future<Map<String, dynamic>> sandboxWrite(String guestPath, String content) {
+    return registry.writeFile(guestPath, content);
+  }
+
   void _auditShellExec({
     required String raw,
     required String cwd,
@@ -5526,6 +5677,53 @@ class EmbeddedBackend implements QqShellRunner {
           detail: event.detail,
         )
         .catchError((Object _) {});
+  }
+
+  /// round19：provider 审计事件映射（设计 §2.2/§3.5）——exec 审计归
+  /// `_shellExec`（`_auditShellExec` 是唯一 exec 审计方，带门禁规则归属），
+  /// provider 的 `shell` 事件（含 deny/ask 拒绝与尾部审计）直接丢弃，
+  /// 否则每条执行会记两条审计；只放行 `workspace.write` 事件：写审计
+  /// 只能由 provider choke 点发出（拒绝的规则 id 只存在于 provider 内部）。
+  /// 写盘失败绝不阻断执行（与 `_auditShellExec` 同款 try/catch + 吞错；
+  /// `fireAudit` 本身已吞回调抛错，这里是第二层防护）。
+  void _auditProviderEvent(SandboxAuditEvent event) {
+    if (event.tool == 'shell') return;
+    if (event.tool != 'workspace.write') return;
+    try {
+      unawaited(
+        _auditLog()
+            .append(
+              category: 'security',
+              action: 'workspace.write',
+              decision: event.decision,
+              actor: 'workspace',
+              detail: event.detail,
+            )
+            .catchError((Object _) {}),
+      );
+    } on Object catch (_) {
+      // 审计失败绝不阻断执行。
+    }
+  }
+
+  /// round19：接管租约事件落盘（设计 §2.2/§3.1）——租约事件（request /
+  /// grant / release / expired）只含租约 id、持有人、原因标签、剩余秒数，
+  /// 不进 provider 事件流；category 用 `takeover`，与现有 `security` /
+  /// `sandbox` / `approval` / `memory` / `im.proactive` 区分开。
+  /// 回调抛错由 `SandboxTakeover` 内部吞掉（见 sandbox_takeover.dart），
+  /// 这里再包一层 catchError，绝不阻断接管流程。
+  void _auditTakeoverEvent(String action, Map<String, dynamic> detail) {
+    unawaited(
+      _auditLog()
+          .append(
+            category: 'takeover',
+            action: action,
+            decision: 'info',
+            actor: 'takeover',
+            detail: jsonEncode(detail),
+          )
+          .catchError((Object _) {}),
+    );
   }
 
   // ===========================================================================
@@ -7754,6 +7952,37 @@ class EmbeddedBackend implements QqShellRunner {
       decision: 'ask',
       actor: 'cube',
       detail: '审批单 $id：$cube',
+    );
+    return false;
+  }
+
+  /// round19：写 ask 审批入口（设计 §3.4）：照抄 [_requestCubeApproval]
+  /// 的结构——grantKey 用 `workspace|write|<guestPath>`（与
+  /// [_workspaceGuard] 同命名空间，使安全中心批准一次后 provider 写与
+  /// 工作区文件动作互认凭据，不重复建单）；先消费一次性凭据，命中则返回
+  /// true，否则建审批单并返回 false。
+  /// 不得直接复用 [_workspaceGuard] 本身：它在 ask 时抛
+  /// `WorkspaceGuardDenied` 而不是返回 bool，而 `checkWritePolicy` 会把
+  /// 审批入口的抛错按“未获批”处理且不建单——复用它会丢审批单。
+  Future<bool> _requestWriteApproval(String guestPath) async {
+    final String grantKey = 'workspace|write|$guestPath';
+    if (await _consumeGrant(grantKey)) return true;
+    final String preview = guestPath.length > 80
+        ? '${guestPath.substring(0, 80)}…'
+        : guestPath;
+    final int id = await store.insert('approvals', <String, dynamic>{
+      'action': '写入文件：$preview',
+      'status': 'pending',
+      'grant_key': grantKey,
+      'consumed': 0,
+      'ts': _now(),
+    });
+    await _auditLog().append(
+      category: 'approval',
+      action: 'write_approval_required',
+      decision: 'ask',
+      actor: 'workspace',
+      detail: '审批单 $id：$guestPath',
     );
     return false;
   }
