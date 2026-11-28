@@ -223,10 +223,14 @@ Map<String, dynamic> validateToolArguments({
 }
 
 /// round15：ToolRegistry 策略决策审计事件（不可变小类）。
+/// round17：decision 取值扩展为 deny / ask_approved / ask_denied /
+/// allow（抽样）/ error。
 ///
-/// 只在 deny / ask 获批 / ask 被拒时发出；allow、read 级、自带守卫工具、
-/// 未接线时不发事件（避免日志洪水）。decision 取值：
-/// 'deny' / 'ask_approved' / 'ask_denied'。
+/// 发出时机：deny / ask 获批 / ask 被拒时各发一条；allow 只按
+/// [ToolRegistry.allowSampleEvery] 抽样发（默认每 100 条 allow 记 1 条）；
+/// 工具执行抛错时发一条 error。read 级、自带守卫工具、未接线时不发事件
+///（避免日志洪水）。decision 取值：
+/// 'deny' / 'ask_approved' / 'ask_denied' / 'allow' / 'error'。
 class ToolPolicyAuditEvent {
   const ToolPolicyAuditEvent({
     required this.tool,
@@ -268,10 +272,21 @@ class ToolRegistry {
   Future<bool> Function(String tool, Map<String, dynamic> args)?
       onApprovalRequired;
 
-  /// 策略决策审计回调（round15，可选）：deny / ask 获批 / ask 被拒时
-  /// 各发一条 [ToolPolicyAuditEvent]；allow、read 级、自带守卫工具、
-  /// 未接线时不发事件。回调抛错被吞掉，绝不改变 run() 行为。
+  /// 策略决策审计回调（round15，可选；round17 扩展）：deny / ask 获批 /
+  /// ask 被拒时各发一条 [ToolPolicyAuditEvent]；allow 按
+  /// [allowSampleEvery] 抽样发；工具执行抛错时发一条 error 事件。
+  /// read 级、自带守卫工具、未接线时不发事件。回调抛错被吞掉，
+  /// 绝不改变 run() 行为。
   ToolPolicyAuditCallback? onPolicyDecision;
+
+  /// round17：allow 抽样间隔——每 [allowSampleEvery] 条策略求值过的
+  /// allow 记 1 条审计事件。<=0 表示关闭抽样；1 表示每条 allow 都记；
+  /// 默认 100。只对策略求值过的 exec/write 级工具抽样（read 级、
+  /// 自带守卫、未接线不经过这里，原样不动）。
+  int allowSampleEvery = 100;
+
+  /// round17：策略求值过的 allow 累计计数（抽样分母）。
+  int _allowSampleCount = 0;
 
   /// run() 层跳过策略检查的工具：它们在 execute 内自己过策略并消费
   /// 一次性批准凭据（shell → _shellExec，workspace.* → _workspaceGuard），
@@ -324,7 +339,15 @@ class ToolRegistry {
       final Map<String, dynamic>? denied =
           await _policyCheck(name, tool, validated);
       if (denied != null) return ToolResult.error(denied['error'] as String);
-      return await tool.execute(validated, cancelToken);
+      // round17：只把 tool.execute 包一层 try/catch——执行抛错先发一条
+      // error 审计事件，再 rethrow（外层 catch 仍转 ToolResult.error，
+      // 行为不变）。lookup / 校验 / 策略阶段的异常不发 error 事件。
+      try {
+        return await tool.execute(validated, cancelToken);
+      } on Object catch (e) {
+        _emitPolicyError(name, e);
+        rethrow;
+      }
     } on Object catch (e) {
       return ToolResult.error('$e');
     }
@@ -410,11 +433,48 @@ class ToolRegistry {
         };
       }
     }
+    // round17：allow 抽样审计——只有策略求值结果确为 allow 才计数
+    //（ask 获批不计入；deny / ask 被拒已在上面返回）。
+    // 每 allowSampleEvery 条记 1 条（<=0 关闭抽样）。
+    if (decision == PolicyDecision.allow && allowSampleEvery > 0) {
+      _allowSampleCount++;
+      if (_allowSampleCount % allowSampleEvery == 0) {
+        _emitPolicyDecision(
+          'allow',
+          policy.matchedRuleId(tool: name, path: path, args: argsText),
+          name,
+          argsText,
+          note: 'sample=1/$allowSampleEvery #$_allowSampleCount',
+        );
+      }
+    }
     return null;
   }
 
-  /// round15：策略决策审计事件发送。只在 deny / ask 获批 / ask 被拒时
-  /// 调用；allow、read 级、自带守卫工具、未接线时不调用本方法。
+  /// round17：执行异常审计事件发送。detail 为
+  /// `tool=<name> error=<异常 runtimeType>: <异常文本前 120 字符>`。
+  /// 回调抛错被吞掉，绝不改变 run() 的行为；回调为 null 时不发事件。
+  void _emitPolicyError(String tool, Object e) {
+    final ToolPolicyAuditCallback? cb = onPolicyDecision;
+    if (cb == null) return;
+    final String text = '$e';
+    final String clipped =
+        text.length > 120 ? text.substring(0, 120) : text;
+    try {
+      cb(ToolPolicyAuditEvent(
+        tool: tool,
+        decision: 'error',
+        rule: '',
+        detail: 'tool=$tool error=${e.runtimeType}: $clipped',
+      ));
+    } on Object {
+      // 审计回调抛错绝不阻断工具执行。
+    }
+  }
+
+  /// round15：策略决策审计事件发送。deny / ask 获批 / ask 被拒时调用；
+  /// round17：allow 每 allowSampleEvery 条抽样调用一次。
+  /// read 级、自带守卫工具、未接线时不调用本方法。
   /// detail 用 canonical 形 `tool=<name> rule=<id> args=<argsText 前 160 字符>`。
   /// 回调抛错被吞掉，绝不改变 run() 的行为；回调为 null 时行为与旧版逐字一致。
   void _emitPolicyDecision(

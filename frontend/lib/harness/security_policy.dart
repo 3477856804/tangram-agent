@@ -108,6 +108,14 @@ class PermissionPolicy {
     this.fallback = PolicyDecision.ask,
   }) : rules = List<PermissionRule>.of(rules ?? const <PermissionRule>[]);
 
+  /// round17：破坏性 shell 参数模式——三处共享的唯一真源。
+  /// Dart 侧 `ApprovalGate._forcedDenyCommand` 直接引用本常量，
+  /// Python 侧 `im/approval.py` 的 `_FORCED_DENY_COMMAND` 与本常量同值；
+  /// 三处同步改。注意 `\bmkfs\b` 带尾边界：`mkfsfoo` 不拦
+  ///（此前本处用 `\bmkfs` 无尾边界，会误拦 mkfsfoo，与另两处漂移）。
+  static const String destructiveShellArgsPattern =
+      r'\brm\s+-(?:[a-zA-Z]*[rR][a-zA-Z]*[fF]|[a-zA-Z]*[fF][a-zA-Z]*[rR])|\bmkfs\b|\bdd\s+if=';
+
   /// 内置默认策略：只描述通用安全边界，不虚构额外能力。
   factory PermissionPolicy.withDefaults() => PermissionPolicy(
         rules: <PermissionRule>[
@@ -146,7 +154,7 @@ class PermissionPolicy {
           PermissionRule(
             id: 'default-deny-destructive-shell',
             tool: r'^shell$',
-            args: r'\brm\s+-(?:[a-zA-Z]*[rR][a-zA-Z]*[fF]|[a-zA-Z]*[fF][a-zA-Z]*[rR])|\bmkfs|\bdd\s+if=',
+            args: PermissionPolicy.destructiveShellArgsPattern,
             decision: PolicyDecision.deny,
             note: '拒绝 rm -rf / mkfs / dd 等破坏性命令',
           ),

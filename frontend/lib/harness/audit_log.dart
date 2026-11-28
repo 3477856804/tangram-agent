@@ -15,8 +15,15 @@
 ///  * 尾 hash 缓存：append 不再每次全量读文件，只在缓存未加载时从磁盘
 ///    读最后一行非空行解析 hash（RandomAccessFile 从尾部倒读，扫到换行
 ///    即停；单行超长时倒读到文件头兜底）；append 成功后更新缓存，
-///    importJsonl 每写一条后把缓存置空（导入事件不进链，下一 append
-///    重新从磁盘读尾）。exportJsonl 改为导出全部文件拼接（行为变化）。
+///    写失败时置空。exportJsonl 改为导出全部文件拼接（行为变化）。
+///
+/// round17（沙箱审计第三阶段）导入重接链 + 溯源保留 + 导出去重：
+///  * importJsonl 不再直接写原始行：每条导入行经 [_appendChained]
+///    重新接入本链（prevHash 取本地链尾、hash 重算），原 id / ts 保留，
+///    原 hash 存入 [AuditEvent.originHash] 溯源（原行无 hash 则为空串）；
+///    导入同样受轮转约束，导入量大触发轮转时链也不断；
+///  * exportJsonl 按 id 去重（首次出现为准）；同一份导出重复导入再
+///    导出，结果不变（幂等）。不可解析行与 id 为空的行原样保留。
 ///  * 本文件不 import `store.dart`：后者经 path_provider 牵出 dart:ui，
 ///    纯 Dart VM 无法加载；AuditLog 只需要根目录，旧构造
 ///    `AuditLog(store: store)` 只取 `store.root`（见 [_rootOf]），
@@ -32,6 +39,7 @@ import 'package:crypto/crypto.dart';
 /// [prevHash] / [hash] 构成防篡改哈希链：每条事件的 hash 由自身内容与
 /// 上一条事件的 hash 共同决定，任何一行被改写都会让链在校验时断掉。
 /// 历史日志里没有 hash 的旧事件按空 hash 处理（视为 legacy，跳过校验）。
+/// 导入事件的原 hash 记在 [originHash] 里溯源，不参与链校验与 hash 计算。
 class AuditEvent {
   AuditEvent({
     required this.id,
@@ -43,6 +51,7 @@ class AuditEvent {
     required this.ts,
     this.prevHash = '',
     this.hash = '',
+    this.originHash = '',
   });
 
   final String id;
@@ -54,6 +63,10 @@ class AuditEvent {
   final double ts;
   final String prevHash;
   final String hash;
+
+  /// 溯源：导入事件在原日志里的 hash（重新接链后原 hash 不再是链 hash，
+  /// 在此保留以便溯源）；本地追加的事件与无 hash 的导入行留空。
+  final String originHash;
 
   /// 按内容与 [prevHash] 重算哈希；写入与校验共用同一算法。
   String computeHash() => sha256
@@ -72,6 +85,7 @@ class AuditEvent {
         'ts': ts,
         if (prevHash.isNotEmpty) 'prevHash': prevHash,
         if (hash.isNotEmpty) 'hash': hash,
+        if (originHash.isNotEmpty) 'originHash': originHash,
       };
 
   /// 容错解析：字段缺失或类型不符时用默认值，坏行由调用方决定是否跳过。
@@ -84,6 +98,7 @@ class AuditEvent {
       ts = double.tryParse(rawTs) ?? 0;
     }
     final Object? rawPrevHash = json['prevHash'] ?? json['prev_hash'];
+    final Object? rawOriginHash = json['originHash'] ?? json['origin_hash'];
     return AuditEvent(
       id: json['id']?.toString() ?? '',
       category: json['category']?.toString() ?? '',
@@ -94,6 +109,7 @@ class AuditEvent {
       ts: ts,
       prevHash: rawPrevHash?.toString() ?? '',
       hash: json['hash']?.toString() ?? '',
+      originHash: rawOriginHash?.toString() ?? '',
     );
   }
 }
@@ -180,8 +196,8 @@ class AuditLog {
 
   /// 尾 hash 缓存。`_tailHashLoaded` 为 false 时表示未加载（append 时
   /// 懒加载，从磁盘读尾行）；加载后即便链尾为空串也记 loaded=true。
-  /// append 成功后更新；importJsonl 每写一条后置空（导入事件不进链，
-  /// 下一 append 重新从磁盘读尾）；写失败时同样置空，避免缓存说谎。
+  /// 写入成功后更新（append 与 importJsonl 都走 [_appendChained]）；
+  /// 写失败时置空，避免缓存说谎。
   String? _tailHash;
   bool _tailHashLoaded = false;
 
@@ -401,10 +417,20 @@ class AuditLog {
       detail: SecretRedactor.redact(detail),
       ts: DateTime.now().microsecondsSinceEpoch / 1000000,
     );
+    return _appendChained(draft);
+  }
+
+  /// 串行接链写入：draft 自带 id / ts / category / action / decision /
+  /// actor / detail（调用方保证 detail 已脱敏）与 originHash（导入事件
+  /// 的原 hash，本地追加为空串）；方法内只负责接链——在串行链内取链尾
+  /// hash、必要时先轮转（标记事件先行）、算 hash、写行、更新尾缓存。
+  /// 写失败时缓存置空并把错误抛给调用方（不谎称已落盘），同时让串行链
+  /// 恢复，避免一次磁盘异常导致后续写入全部级联失败。
+  Future<void> _appendChained(AuditEvent draft) {
     final Future<void> write = _writeChain.then((_) async {
       try {
         await _ensureDir();
-        // 在串行链内取链尾（缓存命中时不读磁盘），保证并发 append 时
+        // 在串行链内取链尾（缓存命中时不读磁盘），保证并发写入时
         // prevHash 不重复。
         String prevHash = await _loadTailHash();
         // 轮转：在串行链内、写新事件前检查当前文件大小。
@@ -423,6 +449,7 @@ class AuditLog {
           detail: draft.detail,
           ts: draft.ts,
           prevHash: prevHash,
+          originHash: draft.originHash,
         );
         final Map<String, dynamic> json = event.toJson()
           ..['hash'] = event.computeHash();
@@ -434,13 +461,13 @@ class AuditLog {
         _tailHashLoaded = true;
       } catch (e) {
         // 写失败时缓存可能已说谎（如轮转后标记未写成），置空让下一
-        // append 重新从磁盘读尾；错误本身照常抛给调用方。
+        // 次写入重新从磁盘读尾；错误本身照常抛给调用方。
         _invalidateTailHash();
         rethrow;
       }
     });
     // 写失败如实抛给调用方（不谎称已落盘），同时让串行链恢复，
-    // 避免一次磁盘异常导致后续 append 全部级联失败。
+    // 避免一次磁盘异常导致后续写入全部级联失败。
     _writeChain = write.catchError((Object _) {});
     return write;
   }
@@ -571,23 +598,50 @@ class AuditLog {
 
   /// 原样导出全部 JSONL 文本：轮转文件（时间升序）+ 当前文件依次拼接；
   /// 无任何文件时返回空串。round15 行为变化：旧版只导出当前文件。
+  ///
+  /// 导出按 id 去重（首次出现为准）：可解析且 id 非空的行，重复 id 只
+  /// 保留第一次出现；不可解析行与 id 为空的行原样保留。同一份导出重复
+  /// 导入再导出，结果不变（幂等）。
   Future<String> exportJsonl() async {
     await _writeChain;
     final StringBuffer buf = StringBuffer();
+    final Set<String> seenIds = <String>{};
     for (final File f in await _allLogFiles()) {
       if (!await f.exists()) continue;
       final String raw = await f.readAsString();
-      if (raw.isEmpty) continue;
-      buf.write(raw);
-      if (!raw.endsWith('\n')) buf.write('\n');
+      for (final String line in const LineSplitter().convert(raw)) {
+        final String trimmed = line.trim();
+        if (trimmed.isEmpty) {
+          buf.writeln(line);
+          continue;
+        }
+        String? id;
+        try {
+          final Object? decoded = jsonDecode(trimmed);
+          if (decoded is Map) {
+            final Object? rawId = decoded['id'];
+            id = rawId?.toString() ?? '';
+          }
+        } on Object {
+          // 不可解析行原样保留。
+          id = null;
+        }
+        if (id != null && id.isNotEmpty) {
+          if (!seenIds.add(id)) continue; // 重复 id 只保留首次出现。
+        }
+        buf.writeln(line);
+      }
     }
     return buf.toString();
   }
 
   /// 逐行导入：坏行 / 缺关键字段的行跳过，返回成功追加的条数。
   /// 导入前同样脱敏，避免把外部日志里的明文密钥带回磁盘。
-  /// 导入事件不进链：每写一条后把尾 hash 缓存置空，下一 append 重新
-  /// 从磁盘读尾（与旧实现行为一致）；与 append 交错时同样保证正确。
+  /// 导入事件重新接入本链：每条导入行保留原 id / category / action /
+  /// decision / actor / detail / ts，原 hash 存入 originHash 溯源
+  /// （原行无 hash 则为空串），prevHash 取本地链尾、hash 重算；导入
+  /// 同样受轮转约束（经 [_appendChained]，导入量大触发轮转时链也不断）。
+  /// 与 append 交错时同样保证正确。
   Future<int> importJsonl(String content) async {
     final List<String> lines = const LineSplitter().convert(content);
     int imported = 0;
@@ -616,21 +670,9 @@ class AuditLog {
         actor: event.actor,
         detail: SecretRedactor.redact(event.detail),
         ts: event.ts,
+        originHash: event.hash,
       );
-      final Future<void> write = _writeChain.then((_) async {
-        final IOSink sink = _file.openWrite(mode: FileMode.append);
-        sink.writeln(jsonEncode(safe.toJson()));
-        await sink.flush();
-        await sink.close();
-      });
-      _writeChain = write.catchError((Object _) {});
-      try {
-        await write;
-      } finally {
-        // 无论写成功与否都置空缓存：磁盘尾已变（或写失败状态未知），
-        // 下一 append 重新从磁盘读尾。
-        _invalidateTailHash();
-      }
+      await _appendChained(safe);
       imported++;
     }
     return imported;

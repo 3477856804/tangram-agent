@@ -22,6 +22,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:tangram/harness/security_policy.dart';
+
 class ApprovalGate {
   ApprovalGate(this.root);
 
@@ -43,11 +45,12 @@ class ApprovalGate {
   /// 一次性批准的有效期（毫秒）。
   static const int approvalTtlMs = 600 * 1000;
 
-  static final RegExp _forcedDenyCommand = RegExp(
-    r'\brm\s+-(?:[a-zA-Z]*[rR][a-zA-Z]*[fF]|[a-zA-Z]*[fF][a-zA-Z]*[rR])'
-    r'|\bmkfs\b'
-    r'|\bdd\s+if=',
-  );
+  /// round17：强制拒绝模式直接引用
+  /// [PermissionPolicy.destructiveShellArgsPattern]（唯一真源在
+  /// security_policy.dart）；Python 侧 im/approval.py 的
+  /// `_FORCED_DENY_COMMAND` 与本常量同值，三处同步改。
+  static final RegExp _forcedDenyCommand =
+      RegExp(PermissionPolicy.destructiveShellArgsPattern);
 
   static const String _policyFile = 'approval_policy.json';
   static const String _pendingFile = 'approval_pending.json';

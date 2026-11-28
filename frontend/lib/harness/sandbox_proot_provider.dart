@@ -82,12 +82,36 @@ class ProotSandboxProvider extends SandboxProvider {
       ms: execSw.elapsedMilliseconds,
     );
     if (denied != null) return denied;
+    // round18：ask 预检（只查 ask；未接线时放行，行为与之前完全一致；
+    // ask 获批后继续执行，尾部审计仍按 ok 记 allowed/failed）。
+    final SandboxExecResult? askDenied = await checkAsk(
+      command,
+      cwd: cwd,
+      ms: execSw.elapsedMilliseconds,
+    );
+    if (askDenied != null) return askDenied;
+    // round18：执行错误分支审计（与生产 `_shellExec` 同款：未安装 /
+    // 环境启动失败记 failed、exit -1；round15“执行体启动前不记执行审计”
+    // 的旧约定至此废止，见 CODE-AUDIT §13）。接管拒绝与 deny/ask 拒绝
+    // 各有自己的审计语义，不走这里。
+    SandboxExecResult execFailed(SandboxExecResult result) {
+      fireAudit(SandboxAuditEvent.fromCommand(
+        tool: 'shell',
+        command: command,
+        cwd: cwd,
+        exit: -1,
+        ms: execSw.elapsedMilliseconds,
+        provider: kind.name,
+        decision: 'failed',
+      ));
+      return result;
+    }
     if (!proot.installed) {
-      return SandboxExecResult.notInstalled(
+      return execFailed(SandboxExecResult.notInstalled(
         kind: kind,
         detail: 'Linux 用户态未安装，无法执行：请先在「沙箱」页安装 '
             '${proot.distroLabel}。',
-      );
+      ));
     }
     final Map<String, dynamic>? r = await proot.run(
       command,
@@ -95,13 +119,13 @@ class ProotSandboxProvider extends SandboxProvider {
       timeout: timeout,
     );
     if (r == null) {
-      return SandboxExecResult(
+      return execFailed(SandboxExecResult(
         ok: false,
         kind: kind,
         status: 'error',
         error: 'Linux 环境启动失败（proot 可执行文件不可用）。',
         cwd: cwd,
-      );
+      ));
     }
     final String stdoutAll = (r['stdout'] ?? '').toString();
     final String stderrAll = (r['stderr'] ?? '').toString();
@@ -110,9 +134,9 @@ class ProotSandboxProvider extends SandboxProvider {
     final int exitCode = r['exit_code'] is num
         ? (r['exit_code'] as num).toInt()
         : (r['ok'] == true ? 0 : 1);
-    // round15 第二阶段：执行收尾审计（只记元数据；not-installed / proot.run
-    // 返回 null 的 early return 均在执行体启动前，命令未执行，故不记执行审计；
-    // deny 由 checkDeny 代发，不重复记）。
+    // round15 第二阶段：执行收尾审计（只记元数据；deny 由 checkDeny 代发、
+    // ask 被拒由 checkAsk 代发、执行错误分支由 execFailed 代发，均不重复
+    // 记；接管拒绝在 exec 入口处直接返回，不记执行审计）。
     final SandboxExecResult result = SandboxExecResult(
       ok: r['ok'] == true,
       kind: kind,
@@ -185,8 +209,29 @@ class ProotSandboxProvider extends SandboxProvider {
     String guestPath,
     String content,
   ) async {
+    // round18：写策略预检（deny → ask；未接线时放行，行为与之前完全一
+    // 致）+ 写审计（成功记 allowed、拒绝记 denied、失败记 failed；每次
+    // 写动作恰一条事件，与 exec 审计同款）。预检在路径解析之前：被拒的
+    // 写入不触碰任何磁盘状态；接管门禁不拦写（文件读写不受接管影响）。
+    final Stopwatch writeSw = Stopwatch()..start();
+    final Map<String, dynamic>? refused = await checkWritePolicy(
+      guestPath,
+      contentChars: content.length,
+      ms: writeSw.elapsedMilliseconds,
+    );
+    if (refused != null) return refused;
+    SandboxAuditEvent writeEvent(String decision, int exit) =>
+        SandboxAuditEvent.fromWrite(
+          guestPath: guestPath,
+          chars: content.length,
+          exit: exit,
+          ms: writeSw.elapsedMilliseconds,
+          provider: kind.name,
+          decision: decision,
+        );
     final String? path = _hostPath(guestPath);
     if (path == null) {
+      fireAudit(writeEvent('failed', -1));
       return <String, dynamic>{
         'ok': false,
         'error': '路径越界或非法：$guestPath',
@@ -196,12 +241,14 @@ class ProotSandboxProvider extends SandboxProvider {
       final File f = File(path);
       await f.parent.create(recursive: true);
       await f.writeAsString(content, flush: true);
+      fireAudit(writeEvent('allowed', 0));
       return <String, dynamic>{
         'ok': true,
         'path': guestPath,
         'size': content.length,
       };
     } on Object catch (e) {
+      fireAudit(writeEvent('failed', -1));
       return <String, dynamic>{'ok': false, 'error': '写入失败：$e'};
     }
   }

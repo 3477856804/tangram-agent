@@ -12,9 +12,8 @@ import '../sidebar_config.dart';
 import '../widgets/chat_list_item.dart';
 
 /// i18n 词典尚未收录的新导航 key 的中文兜底（显示为可读文案而不是裸 key）。
-const Map<String, String> _navFallbackZh = <String, String>{
-  'sidebar.uiPlugins': 'UI 插件槽',
-};
+/// round18：已删 key 的兜底随之删除；本表暂空，以后新增入口且词典未收录时再补。
+const Map<String, String> _navFallbackZh = <String, String>{};
 
 /// 侧栏导航的业务分组。顺序即渲染顺序；未知 labelKey 回落到系统组，
 /// 保证以后新增入口不会因为没登记分组而消失。
@@ -31,21 +30,20 @@ enum _NavGroup {
 }
 
 /// 现有导航项 → 业务分组（以 labelKey 为准，顺序保持 workspace_sections 的声明顺序）。
+/// round18：已删 4 个 key（cognition/creator/customize/uiPlugins）不在此表——
+/// 它们的 NavItem 已不在 workspace_sections 声明里，查不到即走 _groupOf 的类型兜底，
+/// 与其余未登记 key 同款；死映射已清。
 const Map<String, _NavGroup> _navGroupByLabelKey = <String, _NavGroup>{
   'sidebar.overview': _NavGroup.reports,
   'sidebar.knowledge': _NavGroup.reports,
   'sidebar.graph': _NavGroup.reports,
   'sidebar.snapshot': _NavGroup.reports,
   'sidebar.experience': _NavGroup.reports,
-  'sidebar.cognition': _NavGroup.reports,
   'sidebar.workspace': _NavGroup.creation,
   'sidebar.mapping': _NavGroup.creation,
   'sidebar.model3d': _NavGroup.creation,
   'sidebar.store': _NavGroup.creation,
   'sidebar.appMarket': _NavGroup.creation,
-  'sidebar.creator': _NavGroup.creation,
-  'sidebar.customize': _NavGroup.creation,
-  'sidebar.uiPlugins': _NavGroup.creation,
   'sidebar.imageStudio': _NavGroup.creation,
   'sidebar.videoStudio': _NavGroup.creation,
   'sidebar.groupChat': _NavGroup.collaboration,
