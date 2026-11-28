@@ -5,7 +5,6 @@ import '../design/dsh_tokens.dart';
 import '../harness/ui_customization.dart' show UiCustomizationConfig;
 import 'app_config.dart';
 import 'flows/sidebar/settings_config.dart';
-import 'core/theme/tangram_palette.dart';
 import 'flows/chat/chat_experience_config.dart';
 import 'flows/sidebar/sidebar_config.dart';
 import 'flows/workspace/workspace_sections.dart';
@@ -97,7 +96,7 @@ AppScaffoldConfig buildTangramConfig({
     voiceCredentials: voiceCredentials,
     preferredVoiceBackend: preferredVoiceBackend,
   ),
-  theme: TangramTheme.flaiTheme(),
+  // Keep the Flai theme unset so FlaiApp resolves it from the active theme mode.
   // 应用显示名：产品名 tangram-agent 的简称，短到 Android 启动器不会截断。
   // 产品全称仍为 tangram-agent（见「关于」区），版本取单一真源 kAppVersion。
   appTitle: 'TGA',
