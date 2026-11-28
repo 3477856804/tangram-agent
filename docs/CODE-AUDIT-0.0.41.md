@@ -486,7 +486,7 @@ security_policy,approval_gate,audit_log}.dart`、`im/{approval,audit}.py`
 3. 导入溯源只保留原 hash（`originHash`），不保留原 prevHash 与原文件来源；Dart 侧保留原 ts，Python 侧 ts 取追加时刻——两侧不一致已在各自文档写明，未强行统一（Python `append()` 的 ts 由调用时刻生成，改它牵连网关审计）。
 4. 导出幂等只保证“同一份导出重复导入再导出，id 集合不变”；两次导入之间若有新事件追加，导出自然含新事件；轮转后导出仍按时间顺序拼接（轮转文件 + 当前文件）。
 5. deny 收敛只覆盖破坏性 shell 三处；`super_agent.dart` 的 destructive 关键词表是风险分级用（非强制拒绝），未动。共享向量在 Dart 脚本与 Python 测试里各一份，需人工保持一致，未抽成单一文件（跨语言无共享常量文件）；改规则文本时三处同步改 + 跑共享向量。
-6. ~~proot 之外后端（Local 等）的审计覆盖核查未做（10.4 第 3 条的后半句）；~~已由 round18 完成（见 §13；生产接线缺口仍在 13.4 第 1 条）。Pages 审批卡仍待“批准是否等于置顶”语义；`PluginTier.parse` 未知值兜底 T1 未动。
+6. ~~proot 之外后端（Local 等）的审计覆盖核查未做（10.4 第 3 条的后半句）；~~已由 round18 完成（见 §13；生产接线缺口已由 round19 实现，见 §15）。Pages 审批卡仍待“批准是否等于置顶”语义；`PluginTier.parse` 未知值兜底 T1 未动。
 7. ~~脏标志跨重启持久化仍未做（11.4 第 2 条）；~~已由 round18 实现（见 §14）；`_applyProfile` 卸载循环潜伏问题仍未修（11.4 第 5 条）；~~`sidebar_drawer` 残留 4 个已删 key 的无害死映射仍未清；~~已由 round18 清理（见 §13）；`tga_glass.dart` 仍无引用者（round18 已复核：lib 内无引用者，文件保留、未接线，见 §13）。
 
 ## 13. round18 修复（2026-11-28 05:00 轮次，基线 f1e5f6a6）
@@ -539,7 +539,7 @@ security_policy,approval_gate,audit_log}.dart`、`im/{approval,audit}.py`
 
 ### 13.4 仍然保留的诚实边界与已知局限
 
-1. **生产接线缺口**：provider 层的策略/审计 choke 点已补齐，但 `EmbeddedBackend` 尚未实例化 `SandboxProviderRegistry`、未注入 denyCheck/askCheck/onAskApproval/writeDenyCheck/writeAskCheck/onWriteAskApproval/onAudit——生产 exec 仍走 `_shellExec` 直调 SshSandbox/ProotSandbox/`_realShellExec`/内置解释器，provider 后端在生产上不可达。接线须另改 `embedded_backend.dart`（构造时建注册表、注册 local/proot 后端、注入与 cube 同款的策略回调与 `_auditShellExec`/`_auditCubeEvent` 同款的审计回调），并补 flutter 侧测试；本轮只证明 provider 层本身已就绪。
+1. ~~**生产接线缺口**：provider 层的策略/审计 choke 点已补齐，但 `EmbeddedBackend` 尚未实例化 `SandboxProviderRegistry`、未注入 denyCheck/askCheck/onAskApproval/writeDenyCheck/writeAskCheck/onWriteAskApproval/onAudit——生产 exec 仍走 `_shellExec` 直调 SshSandbox/ProotSandbox/`_realShellExec`/内置解释器，provider 后端在生产上不可达。接线须另改 `embedded_backend.dart`（构造时建注册表、注册 local/proot 后端、注入与 cube 同款的策略回调与 `_auditShellExec`/`_auditCubeEvent` 同款的审计回调），并补 flutter 侧测试；本轮只证明 provider 层本身已就绪。~~已由 round19 实现（见 §15：构造时建注册表、安卓 exec 改走 `registry.exec`、写三钩子与审计过滤回调已注入；exec 三钩子按设计 §2.1 方案 A 保持 null，见 15.3 第 2 条）。
 2. allow 抽样事件在 `execute` 之前发出（round17 既有语义）；provider 的 ask 获批后尾部审计仍按 ok 记 allowed/failed，不另记一条 ask_approved 事件——ask 获批在 provider/cube 层不留独立事件，与 cube 同款；五态区分只在 ToolRegistry 层。
 3. 写审计的 `chars` 为待写内容长度（UTF-16 代码单元数），`first` 为文件名——内容本身绝不进审计；大文件写仍只记一条元数据事件。
 4. （接续 12.4）Pages 审批卡仍待“批准是否等于置顶”语义；`PluginTier.parse` 未知值兜底 T1 未动；~~脏标志跨重启持久化仍未做（11.4 第 2 条）；~~已由 round18 实现（见 §14）；`_applyProfile` 卸载循环潜伏问题仍未修（11.4 第 5 条）。
@@ -598,3 +598,59 @@ security_policy,approval_gate,audit_log}.dart`、`im/{approval,audit}.py`
 3. 恢复的脏态不重放事件：上轮的 `kernel.boot_dirty` / `kernel.rollback_failed` 事件只在旧进程的事件流里（`kernel_events.jsonl` 会随 `readEvents` 回放进 `_seq`，但事件内容不重放为热事件）；新进程只恢复脏态本身，不补发旧事件。
 4. `_applyProfile` 卸载循环潜伏问题仍未修（11.4 第 5 条）；`_setMode` 先赋值模式、后 `_applyProfile` 的顺序未动（9.4 第 4 条）。
 5. 本轮未跑 `flutter test` / Dart 编译 / 真机（见 14.2）；断言脚本的临时目录删除需等未 await 的事件落盘（200ms 沉降 + 重试），属测试脚手架约定，不影响内核。
+
+## 15. round19 修复（2026-11-28 19:00 轮次，基线 566d255c）
+
+本轮主项：生产接线缺口修复（13.4 第 1 条遗留；设计见 `~/workspace/tangram-agent-work/round19_wiring_design.md`）。HEAD 已变（PR #7 合并，round16+17+18 已在 main，main 为 566d255c），在新 HEAD 完整下载树 `~/workspace/tangram-agent-566d255c/` 上做；实现分两路并行 agent（本 agent 负责接线实现；另一 agent 负责验证脚本编写与预跑，见 15.2）、主 agent 整合验证。本轮只改 `frontend/lib/harness/embedded_backend.dart`（另加本文档一节、本地断言脚本一处），未动 `sandbox_provider.dart` / `sandbox_proot_provider.dart` / `sandbox_takeover.dart` / `sandboxed_shell.dart` / `core.dart` / `security_policy.dart` / `proot_sandbox.dart`，未新增任何操作页面（万物皆插件 / Super agent 等核心功能无操作页）。
+
+### 15.0 审计结论（实证，旧行为——设计 §1 逐条重核到新树）
+
+| 断言 | 新树核实结果 |
+|---|---|
+| 注册表零生产调用者 | 属实：`embedded_backend.dart:70` import 了 `sandbox_provider.dart` 但全文件零引用；`frontend/lib` 内无任何 `SandboxProviderRegistry` / `SandboxTakeover(` / `LocalSandboxProvider(` / `ProotSandboxProvider(` 生产构造点；`proot` 仍是裸字段（:351） |
+| 复用基础行号 | 与设计一致、未漂移：构造器 :109–167、ToolRegistry 接线 :113–114、cube 接线 :145–163、`_ensurePolicy` :7648、`_consumeGrant` :7669、`_requestToolApproval` :7704、`_requestCubeApproval` :7737、`_workspaceGuard` :7763、`_auditShellExec` :5471、`_auditCubeEvent` :5519 |
+| exec/write 分发基线 | 与设计一致：`_shellExec` :4988、安卓 `proot.run(raw, cwd)` :5113、探针 :5743、`_realShellExec` :5855、`startDaemon` :6007；`sandbox_provider.dart` 1387 行、`sandbox_proot_provider.dart` 333 行、`security_policy.dart` 258 行 |
+| 设计基线漂移 1：startDaemon | 设计以 f1e5f6a6 树为准称 startDaemon 有 `proot.run` 直接调用；新树里 startDaemon 已改走 `Process.start(proot.prootBin …)`，方法内无 `proot.run(` 调用（只剩 :6018 一条注释提及）。验证脚本 §6 该断言已改为锁定新树基线（方法内无 `proot.run(` 调用）；startDaemon 本轮不动，不得为满足旧断言而恢复调用 |
+| 设计基线漂移 2：`proot.run` 的 stderr | 设计 §2.3 称 provider 的 stdout/stderr 是分开的；实测 `proot.run` 返回的 map 根本没有 `stderr` 键，只有合并后的 `stdout`（`proot_sandbox.dart:904`，`out + (stderrAll.isEmpty ? '' : '\n$stderrAll')`），故 provider 的 `stderr` 恒为空，转换时 stdout+stderr 合并与旧返回逐字一致（见 15.1） |
+
+### 15.1 修复（新行为，只改 `embedded_backend.dart`）
+
+| 项 | 新行为 | 旧行为对照 |
+|---|---|---|
+| 注册表构造 | `EmbeddedBackend._` 内、紧邻 cube 接线之后：建 `SandboxTakeover`（`onAudit` → 新增 `_auditTakeoverEvent`，category `takeover`）并交给 `SandboxProviderRegistry`；`defaultKind` 按平台显式传入（安卓 proot、桌面 local）；安卓只注册 proot（宿主 toybox 永不参与执行），桌面注册 local（`store.sub('sandbox')` 为工作区）与 proot；工厂懒构造，不启动后端、不触发下载 | 注册表不存在，provider 后端生产不可达 |
+| 写钩子注入 | `registry.onAudit = _auditProviderEvent`、`writeDenyCheck` / `writeAskCheck`（`policy.evaluate(tool: 'workspace.write', path: guestPath)`，deny/ask 时返回 `matchedRuleId`，否则 null）、`onWriteAskApproval = _requestWriteApproval`；四处按设计 §3.2 顺序赋值 | 均未接线 |
+| exec 三钩子保持 null（方案 A） | `denyCheck` / `askCheck` / `onAskApproval` 本轮不赋值。原因见设计 §2.1：`_shellExec` 顶部已有唯一门禁（deny/ask 求值 + 一次性凭据消费 + 建审批单 + 审计），再接一道会双重门禁——已批准的命令在第二道门被拒、审批单重复创建、审计重复记。代码注释写明原因；验证脚本 §6 有反向断言（三处赋值不存在，全文件零提及） | ——（本轮新增决策，非旧行为） |
+| 安卓 exec 改走注册表 | `_shellExec` 安卓分支：`proot.run(raw, cwd)` 改为 `registry.exec(raw, cwd: cwd)`，再经新增 `_providerExecToLegacy` 转回 legacy map；保留 `!proot.installed` 预检与 `_startLinuxInstall()` 分支、顶部策略门禁、`_auditShellExec`（provider 仍为 `proot`，仍是唯一 exec 审计方）；SSH 分支、桌面 `_realShellExec` 分支、内置解释器分支、`startDaemon` 与探针的 `proot.run` 直接调用一律不动 | 安卓分支直调 `proot.run` |
+| 结果适配 | `_providerExecToLegacy`：成功/失败补 `cube: 'shell'`、`real: true`、`debian: true`，stdout 与 stderr 按 `proot.run` 同款拼法合并（stderr 为空不补空行）；接管拒绝 / 策略拒绝 / 未安装一律 `exit_code: -1`（与旧 failed、exit -1 同款，无需再传 `exitOverride`）；未安装补 `installing: false`；`proot.run` 返回 null 的旧“启动失败”分支由 status `error` + exit -1 覆盖，完整文案（含“请到「沙箱」页重新安装”）保留 | `proot.run` 的 map 原样返回 |
+| 写入口与写审批 | 新增 `sandboxWrite(guestPath, content)`：唯一职责是委托 `registry.writeFile` 并原样返回结果；本轮不接待入调用方（调用方属于后续功能轮次）。新增 `_requestWriteApproval(guestPath)`：照抄 `_requestCubeApproval`，grantKey 用 `workspace|write|<guestPath>`（与 `_workspaceGuard` 同命名空间，互认凭据、不重复建单）；不得直接复用 `_workspaceGuard`（它在 ask 时抛 `WorkspaceGuardDenied` 而非返回 bool，复用会丢审批单） | 无 guest 写入口 |
+| 审计映射 | 新增 `_auditProviderEvent`：`shell` 事件直接丢弃（exec 审计归 `_shellExec`），只放行 `workspace.write` 事件（category `security`、action `workspace.write`、decision 取事件 decision、actor `workspace`、detail 取事件 detail）；写盘失败绝不阻断执行（try/catch + 吞错，`fireAudit` 本身已吞回调抛错）。新增 `_auditTakeoverEvent`：租约事件（request/grant/release/expired，只含租约 id、持有人、原因标签、剩余秒数）落盘，category `takeover` | provider 审计无生产出口 |
+| 状态透出（§3.6，可选，已做） | `_sandboxPolicy()` 返回值新增 `sandbox_provider` 键：`current_kind` / `available_kinds` / `takeover_active` / `last_switch_error` / `last_fallback_reason`（后两者仅在非空时出现）。只读同步快照，不调 `registry.status()`（后者会构造当前后端并跑自检，不宜放在每次查策略时跑）；不新增操作页面 | 无该键 |
+| 已知行为变化 | 安卓分支改走注册表后，超 64K 的输出会被截断（provider 默认 `maxOutputChars` 65536，今天的 `proot.run` 不截断）；超时仍为 60 秒（provider 默认值一致）。桌面 exec 仍走 `_realShellExec`（local 后端与之不等价：无 cwd 追踪 / 环境注入 / Windows 支持 / bash 优先，补齐属后续任务，见 15.4） | 长输出不截断 |
+
+### 15.2 本轮验证结果
+
+| 验证 | 结果 |
+|---|---|
+| 新 Dart VM 断言脚本 `~/workspace/tangram-agent-work/check_sandbox_wiring_round19.dart` | ✅ **289 passed / 0 failed**（§0 前置 9；§1 注册表构造与注册 43；§2 钩子注入语义 17；§3 exec choke 点顺序 51；§4 写策略与写审计 61；§5 审计洁净 27；§6 接线源码结构断言 28；§7 proot 适配器结构 20；§8 默认策略求值 16；§9 脚本内回归 17） |
+| 预跑（接线落地前） | ✅ **274 passed / 15 failed，失败全部在 §6**（接线未落地；其中 1 项为 startDaemon 设计基线漂移，见 15.0，已修正断言为新树基线） |
+| `flutter analyze`（新树 frontend 全量） | ✅ **No issues found**（0 issues）。注：新树刚下载、`frontend/.dart_tool/package_config.json` 不存在，首次 analyze 报 30519 issues 均为包解析失败；已把旧树 f1e5f6a6 的 package_config.json 拷到新树 `.dart_tool/` 后重跑（两树 `pubspec.yaml` 相同，`tangram` 的 rootUri 为相对路径 `../`，拷后解析正确）。该文件属构建期生成物，不进补丁 |
+| 既有回归同步修正 | ✅ **无需修正**：`tests/conformance_0_0_41.mjs` 只引用未改动的 `sandbox_provider.dart`；kokoro 语音脚本（`check_voice_provider_kokoro_round16.dart`）无任何 sandbox/`_shellExec`/`_sandboxPolicy` 引用；无其他既有 Dart 脚本引用已改的 `proot.run(raw, cwd)` 调用点 |
+| pytest 全套 / conformance / 既有 VM 回归脚本 | ⏳ **本 agent 未跑，由主 agent 在 sweep 里跑**（设计 §5 §9 同款分工；不谎称跑过） |
+| `flutter test` / Dart 编译 / 真机 | ❌ **未跑**（llamadart 的 `.so` 是 arm64、宿主是 x64，原生资产构建失败，环境限制；同 round12/13/15/16/17/18 的诚实边界）。Dart VM 断言只覆盖 `sandbox_provider.dart` 可加载的部分；proot 适配器只做源码结构断言；`EmbeddedBackend` 本身的行为（构造接线、安卓分支转换、写入口）由 §6 结构断言 + analyze + 代码复核覆盖，未在真机上跑过 |
+
+### 15.3 本轮实测纠正
+
+1. **startDaemon 基线漂移**（见 15.0）：设计 §6 的“startDaemon 的 `proot.run` 直接调用仍存在”在新树上不成立（已改走 `Process.start(prootBin)`）。验证脚本该断言已改为锁定新树基线（方法内无 `proot.run(` 调用）+ 仍直连 proot、不走 `registry.exec`；实现未动 startDaemon。
+2. **exec 三钩子保持 null 是有意为之，不是漏接**：任务原文的“注入回调”按设计 §2.1 方案 A 执行——只适用于写路径与未来直接调用方，不适用于 exec 路径。机械地把 exec 三钩子也接上会制造双重门禁回归（已批准命令被第二道门拒绝、审批单重复创建）。脚本 §6 的三处反向断言是硬性门禁，后续若改方案 B，必须同步删掉 `_shellExec` 的预检并重做审计归属，不可只改一半。
+3. **注册表字段必须叫 `registry`**：验证脚本 §6 按字面断言 `registry.onAudit =` / `registry.exec(` 等赋值与调用形态；字段若叫 `sandboxRegistry`，`sandboxRegistry.onAudit` 含的是大写 `Registry.onAudit`，断言会失败。字段已定名为 `registry`（`EmbeddedBackend` 内无同名成员，不冲突）；三处 exec 钩子的零提及断言要求代码与注释里不得出现 `registry.denyCheck` / `registry.askCheck` / `registry.onAskApproval` 字面串，本轮注释已避开该写法。
+4. **审计映射的首现位置**：`_auditProviderEvent` 在文件里的首次出现是构造处的赋值行，脚本 §6 取首次出现后 2000 字符断言 `workspace.write` 分流与 `'shell'` 丢弃；赋值行后紧跟的注释已同时写明这两处分流，断言通过不依赖方法体位置。
+5. **格式**：`dart format` 对 `embedded_backend.dart` 全文件本就报 changed（旧树同文件同样报 changed，属既有格式漂移）；本轮新增的 5 处格式点已按 formatter 偏好改过，剩余 diff 均在既有代码里，未做全文件重排（避免无关大 diff）。
+
+### 15.4 仍然保留的诚实边界与已知局限
+
+1. 未编译、未真机运行（见 15.2）；安卓真机行为（proot 安装、rootfs 执行、接管租约的实际触发）仍需真机验证，本文不声称已验证。
+2. `sandboxWrite` 本轮只新增方法、不接待入调用方；写钩子的真实效果（deny/ask/审计）在生产上要等第一个调用方接入后才有实际流量；不得为“证明写通”而临时接一个真实写调用方。
+3. 桌面 exec 仍走 `_realShellExec`：`LocalSandboxProvider` 与之不等价（无 cwd 追踪、环境注入、Windows 支持、/bin/bash 优先），补齐属后续任务（设计 §7 第 1 条）；local 后端目前仅服务写路径与未来调用方。
+4. 超 64K 输出截断是已知行为变化（见 15.1）；实现轮次已确认无既有测试与终端用例依赖超 64K 的 proot 输出（conformance 与既有脚本无相关引用；终端用例未经真机核对）。
+5. 方案 B（门禁迁入 provider）与 `SshSandboxProvider`、`sandboxWrite` 第一个真实调用方、`tga_glass.dart` 接线均不属于本轮（设计 §7）。
+6. 接管期间的 exec 拒绝是设计目的（租约只在用户主动发起的 QR 登录 / 2FA / 手动调试期间生效）；不需要 exec 的入站回复照常发送，审批只覆盖主动外发（round8 教训的边界未动）。
